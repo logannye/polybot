@@ -1,0 +1,20 @@
+[Unit]
+Description=Polybot AI Trading Bot
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=polybot
+WorkingDirectory=/opt/polybot
+EnvironmentFile=/opt/polybot/.env
+ExecStart=/opt/polybot/.venv/bin/python -m polybot
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polybot
+MemoryMax=512M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
