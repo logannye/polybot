@@ -1,0 +1,56 @@
+import structlog
+from datetime import datetime, timezone
+
+log = structlog.get_logger()
+
+
+def compute_limit_price(side: str, best_bid: float, best_ask: float, is_exit: bool = False) -> float:
+    spread = best_ask - best_bid
+    if is_exit:
+        return round(best_bid, 4)
+    tick = max(0.001, spread * 0.1)
+    price = best_bid + tick
+    price = min(price, best_ask)
+    return round(price, 4)
+
+
+class OrderExecutor:
+    def __init__(self, scanner, wallet, db, fill_timeout_seconds: int = 120):
+        self._scanner = scanner
+        self._wallet = wallet
+        self._db = db
+        self._fill_timeout_seconds = fill_timeout_seconds
+
+    def should_cancel_order(self, elapsed_seconds: float) -> bool:
+        return elapsed_seconds > self._fill_timeout_seconds
+
+    async def place_order(self, token_id, side, size_usd, price, market_id, analysis_id):
+        shares = self._wallet.compute_shares(size_usd, price)
+        if shares <= 0:
+            return None
+        order_data = {
+            "token_id": token_id,
+            "side": "BUY",
+            "size": str(shares),
+            "price": str(price),
+            "type": "GTC",
+        }
+        log.info("placing_order", market_id=market_id, side=side, size_usd=size_usd, price=price, shares=shares)
+        trade_id = await self._db.fetchval(
+            """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd, shares, kelly_inputs, status)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'open') RETURNING id""",
+            market_id, analysis_id, side, price, size_usd, shares, "{}",
+        )
+        return {"trade_id": trade_id, "order": order_data, "shares": shares}
+
+    async def close_position(self, trade_id, exit_price, exit_reason, shares, entry_price, side):
+        if side == "YES":
+            pnl = shares * (exit_price - entry_price)
+        else:
+            pnl = shares * ((1 - exit_price) - (1 - entry_price))
+        await self._db.execute(
+            """UPDATE trades SET status='closed', exit_price=$1, exit_reason=$2, pnl=$3, closed_at=$4 WHERE id=$5""",
+            exit_price, exit_reason, pnl, datetime.now(timezone.utc), trade_id,
+        )
+        log.info("position_closed", trade_id=trade_id, pnl=pnl, reason=exit_reason)
+        return pnl
