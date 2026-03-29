@@ -1,4 +1,5 @@
 import asyncio
+import json
 import structlog
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -235,7 +236,7 @@ class ArbitrageStrategy(Strategy):
             """INSERT INTO analyses (market_id, model_estimates, ensemble_probability,
                ensemble_stdev, quant_signals, edge)
                VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-            market_id, [], 0.0, 0.0, {}, edge,
+            market_id, json.dumps([]), 0.0, 0.0, json.dumps({}), edge,
         )
 
     async def _build_legs(self, opp: ArbOpportunity, size_usd: float, ctx: TradingContext) -> list[dict]:

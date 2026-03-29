@@ -1,3 +1,4 @@
+import json
 import structlog
 from datetime import datetime, timezone
 from polybot.strategies.base import Strategy, TradingContext
@@ -143,7 +144,7 @@ class ResolutionSnipeStrategy(Strategy):
                     """INSERT INTO analyses (market_id, model_estimates, ensemble_probability,
                        ensemble_stdev, quant_signals, edge)
                        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-                    market_id, [], buy_price, 0.0, {}, net_edge,
+                    market_id, json.dumps([]), buy_price, 0.0, json.dumps({}), net_edge,
                 )
 
                 token_id = m.get("yes_token_id", "") if side == "YES" else m.get("no_token_id", "")

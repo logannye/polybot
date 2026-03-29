@@ -1,4 +1,5 @@
 import asyncio
+import json
 import structlog
 from datetime import datetime, timezone
 
@@ -280,19 +281,19 @@ class EnsembleForecastStrategy(Strategy):
                ensemble_stdev, quant_signals, edge, web_research_summary)
                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id""",
             market_id,
-            [{"model": e.model, "probability": e.probability,
+            json.dumps([{"model": e.model, "probability": e.probability,
               "confidence": e.confidence, "reasoning": e.reasoning}
-             for e in ensemble_result.estimates],
+             for e in ensemble_result.estimates]),
             prob,
             ensemble_result.stdev,
-            {
+            json.dumps({
                 "composite": composite,
                 "line_movement": quant.line_movement,
                 "volume_spike": quant.volume_spike,
                 "book_imbalance": quant.book_imbalance,
                 "spread": quant.spread,
                 "time_decay": quant.time_decay,
-            },
+            }),
             kelly_result.edge,
             research,
         )
