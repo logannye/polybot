@@ -67,38 +67,52 @@ class TradingContext:
 2. If `dry_run=True`: set `status='dry_run'`, skip CLOB call, return
 3. If `dry_run=False`: call `clob.submit_order()`, store returned `clob_order_id` in trade row
 
+The `OrderExecutor` constructor gains two new fields: `clob` (ClobGateway or None) and `dry_run` (bool). These are set once at construction in `__main__.py`, not passed per-call. This avoids every strategy needing to thread `ctx.clob` and `ctx.settings.dry_run` through.
+
 ```python
-async def place_order(self, token_id, side, size_usd, price, market_id, analysis_id,
-                      strategy="forecast", clob=None, dry_run=False):
-    shares = self._wallet.compute_shares(size_usd, price)
-    if shares <= 0:
-        return None
+class OrderExecutor:
+    def __init__(self, scanner, wallet, db, fill_timeout_seconds=120,
+                 clob=None, dry_run=False):
+        self._scanner = scanner
+        self._wallet = wallet
+        self._db = db
+        self._fill_timeout_seconds = fill_timeout_seconds
+        self._clob = clob
+        self._dry_run = dry_run
 
-    status = "dry_run" if dry_run else "open"
-    trade_id = await self._db.fetchval(
-        """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd,
-           shares, kelly_inputs, status, strategy)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
-        market_id, analysis_id, side, price, size_usd, shares, "{}", status, strategy)
-
-    clob_order_id = None
-    if not dry_run and clob is not None:
-        try:
-            clob_order_id = await clob.submit_order(
-                token_id=token_id, side=side, price=price, size=shares)
-            await self._db.execute(
-                "UPDATE trades SET clob_order_id = $1 WHERE id = $2",
-                clob_order_id, trade_id)
-        except Exception as e:
-            log.error("clob_submit_failed", trade_id=trade_id, error=str(e))
-            await self._db.execute(
-                "UPDATE trades SET status = 'cancelled' WHERE id = $1", trade_id)
+    async def place_order(self, token_id, side, size_usd, price, market_id, analysis_id,
+                          strategy="forecast"):
+        shares = self._wallet.compute_shares(size_usd, price)
+        if shares <= 0:
             return None
 
-    return {"trade_id": trade_id, "order_id": clob_order_id, "shares": shares}
+        status = "dry_run" if self._dry_run else "open"
+        trade_id = await self._db.fetchval(
+            """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd,
+               shares, kelly_inputs, status, strategy)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
+            market_id, analysis_id, side, price, size_usd, shares, "{}", status, strategy)
+
+        clob_order_id = None
+        if not self._dry_run and self._clob is not None:
+            try:
+                clob_order_id = await self._clob.submit_order(
+                    token_id=token_id, side=side, price=price, size=shares)
+                await self._db.execute(
+                    "UPDATE trades SET clob_order_id = $1 WHERE id = $2",
+                    clob_order_id, trade_id)
+            except Exception as e:
+                log.error("clob_submit_failed", trade_id=trade_id, error=str(e))
+                await self._db.execute(
+                    "UPDATE trades SET status = 'cancelled' WHERE id = $1", trade_id)
+                return None
+
+        return {"trade_id": trade_id, "order_id": clob_order_id, "shares": shares}
 ```
 
-`place_multi_leg_order()` updated similarly — passes `clob` and `dry_run` through to each `place_order()` call.
+`place_multi_leg_order()` unchanged — it calls `self.place_order()` which already has access to `self._clob` and `self._dry_run`.
+
+Strategies continue calling `ctx.executor.place_order(token_id, side, ...)` exactly as before — no signature change from their perspective.
 
 ---
 
@@ -125,7 +139,7 @@ Safe by default. Must explicitly set `DRY_RUN=false` for live trading.
 
 ### Implementation
 
-The dry-run check lives in exactly one place: `OrderExecutor.place_order()`. The `dry_run` flag is passed from the strategy via `ctx.settings.dry_run`. All strategy logic runs identically in both modes.
+The dry-run check lives in exactly one place: `OrderExecutor.place_order()`. The `dry_run` flag is set on the executor at construction time (from `settings.dry_run`), not passed per-call. Strategies call `ctx.executor.place_order()` with the same signature regardless of mode. All strategy logic runs identically in both modes.
 
 ### Dry-Run Bankroll Simulation
 
