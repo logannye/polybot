@@ -52,9 +52,9 @@ class EnsembleForecastStrategy(Strategy):
             return
 
         bankroll = float(state_row["bankroll"])
-        kelly_mult = float(state_row.get("kelly_mult", self.kelly_multiplier))
-        edge_threshold = float(state_row.get("edge_threshold", getattr(self._settings, "edge_threshold", 0.03)))
-        calibration_corrections: dict[str, float] = state_row.get("calibration_corrections") or {}
+        kelly_mult = float(state_row["kelly_mult"])
+        edge_threshold = float(state_row["edge_threshold"])
+        calibration_corrections: dict[str, float] = state_row["calibration_corrections"] or {}
 
         # 3. Scan + filter markets
         raw_markets = await ctx.scanner.fetch_markets()

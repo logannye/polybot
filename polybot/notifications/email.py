@@ -109,7 +109,7 @@ class EmailNotifier:
             await asyncio.to_thread(
                 resend.Emails.send,
                 {
-                    "from": "Polybot <alerts@polybot.dev>",
+                    "from": "Polybot <onboarding@resend.dev>",
                     "to": [self._to],
                     "subject": formatted_subject,
                     "html": html,

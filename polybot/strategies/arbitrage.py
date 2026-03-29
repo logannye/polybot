@@ -132,6 +132,7 @@ class ArbitrageStrategy(Strategy):
         self.interval_seconds = float(getattr(settings, "arb_interval_seconds", 60.0))
         self.kelly_multiplier = float(getattr(settings, "arb_kelly_multiplier", 0.20))
         self.max_single_pct = float(getattr(settings, "arb_max_single_pct", 0.40))
+        self._seen_arbs: set[str] = set()
         self._settings = settings
 
     async def run_once(self, ctx: TradingContext) -> None:
@@ -168,7 +169,17 @@ class ArbitrageStrategy(Strategy):
                          gross_edge=opp.gross_edge, net_edge=opp.net_edge)
                 opportunities.append(opp)
 
+        # Deduplicate: only process new arb opportunities not seen recently
+        new_opps = []
         for opp in opportunities:
+            key = f"{opp.arb_type}:{','.join(m['polymarket_id'] for m in opp.markets)}"
+            if key not in self._seen_arbs:
+                new_opps.append((key, opp))
+
+        if opportunities and not new_opps:
+            log.debug("arb_all_known", total=len(opportunities))
+        for key, opp in new_opps:
+            self._seen_arbs.add(key)
             await self._execute_arb(opp, ctx)
 
     async def _execute_arb(self, opp: ArbOpportunity, ctx: TradingContext) -> None:
