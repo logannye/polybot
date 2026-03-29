@@ -69,6 +69,40 @@ INSERT INTO model_performance (model_name, trust_weight) VALUES
     ('gemini-2.5-flash', 0.333)
 ON CONFLICT (model_name) DO NOTHING;
 
+-- v2: Strategy column on trades
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy TEXT
+    CHECK (strategy IN ('arbitrage', 'snipe', 'forecast')) NOT NULL DEFAULT 'forecast';
+
+-- v2: Strategy performance tracking
+CREATE TABLE IF NOT EXISTS strategy_performance (
+    id SERIAL PRIMARY KEY,
+    strategy TEXT UNIQUE NOT NULL,
+    total_trades INT NOT NULL DEFAULT 0,
+    winning_trades INT NOT NULL DEFAULT 0,
+    total_pnl NUMERIC NOT NULL DEFAULT 0,
+    avg_edge NUMERIC(5,4) NOT NULL DEFAULT 0,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO strategy_performance (strategy) VALUES
+    ('arbitrage'), ('snipe'), ('forecast')
+ON CONFLICT (strategy) DO NOTHING;
+
+-- v2: Market relationships for arbitrage detection
+CREATE TABLE IF NOT EXISTS market_relationships (
+    id SERIAL PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    market_id INT NOT NULL REFERENCES markets(id),
+    relationship_type TEXT NOT NULL
+        CHECK (relationship_type IN ('exhaustive_group', 'temporal_subset', 'complement')),
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(group_id, market_id)
+);
+
+-- v2: Post-breaker cooldown tracking
+ALTER TABLE system_state ADD COLUMN IF NOT EXISTS post_breaker_until TIMESTAMPTZ;
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_markets_resolution ON markets(resolution_time);
 CREATE INDEX IF NOT EXISTS idx_markets_polymarket_id ON markets(polymarket_id);
@@ -76,3 +110,6 @@ CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_market_id ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_analyses_market_id ON analyses(market_id);
 CREATE INDEX IF NOT EXISTS idx_analyses_timestamp ON analyses(timestamp);
+CREATE INDEX IF NOT EXISTS idx_market_relationships_group ON market_relationships(group_id);
+CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
+CREATE INDEX IF NOT EXISTS idx_trades_closed_at ON trades(closed_at);

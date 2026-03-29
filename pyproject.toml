@@ -15,7 +15,6 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
     "resend>=2.0",
-    "twilio>=9.0",
     "structlog>=24.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
