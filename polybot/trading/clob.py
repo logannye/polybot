@@ -1,0 +1,45 @@
+import asyncio
+import structlog
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+
+log = structlog.get_logger()
+
+
+class ClobGateway:
+    def __init__(self, host: str, chain_id: int, private_key: str,
+                 api_key: str, api_secret: str, api_passphrase: str):
+        creds = ApiCreds(api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase)
+        self._client = ClobClient(host=host, chain_id=chain_id, key=private_key, creds=creds)
+        log.info("clob_gateway_initialized", address=self._client.get_address())
+
+    async def submit_order(self, token_id: str, side: str, price: float,
+                           size: float, order_type: str = "GTC") -> str:
+        order_args = OrderArgs(token_id=token_id, price=price, size=size, side=side)
+        ot = getattr(OrderType, order_type, OrderType.GTC)
+        def _create_and_post():
+            signed_order = self._client.create_order(order_args)
+            return self._client.post_order(signed_order, orderType=ot)
+        result = await asyncio.to_thread(_create_and_post)
+        order_id = result.get("orderID") or result.get("id", "")
+        log.info("clob_order_submitted", order_id=order_id, token_id=token_id, side=side, price=price, size=size)
+        return order_id
+
+    async def cancel_order(self, clob_order_id: str) -> bool:
+        try:
+            result = await asyncio.to_thread(self._client.cancel, clob_order_id)
+            log.info("clob_order_cancelled", order_id=clob_order_id)
+            return bool(result.get("canceled", False))
+        except Exception as e:
+            log.error("clob_cancel_failed", order_id=clob_order_id, error=str(e))
+            return False
+
+    async def get_order_status(self, clob_order_id: str) -> dict:
+        result = await asyncio.to_thread(self._client.get_order, clob_order_id)
+        status_raw = result.get("status", "").upper()
+        status_map = {"LIVE": "live", "MATCHED": "matched", "CANCELLED": "cancelled", "CANCELED": "cancelled"}
+        return {"status": status_map.get(status_raw, status_raw.lower()), "size_matched": float(result.get("size_matched", 0))}
+
+    async def get_balance(self) -> float:
+        result = await asyncio.to_thread(self._client.get_balance_allowance)
+        return float(result.get("balance", 0))
