@@ -38,7 +38,10 @@ class Strategy(ABC):
     max_single_pct: float        # max single position as % of bankroll
 
     @abstractmethod
-    async def run_once(self, ctx: TradingContext) -> list[TradeProposal]: ...
+    async def run_once(self, ctx: TradingContext) -> None: ...
+    # Strategies handle their own execution internally via ctx.executor.
+    # The bankroll contention protocol (acquire lock → check → write → release)
+    # is implemented within each strategy's run_once(), not in the engine.
 ```
 
 **`TradingContext`** — shared resources passed to all strategies:
@@ -136,7 +139,7 @@ Multiple markets cover all possible outcomes of the same event (e.g., "Who wins?
 - Sum of YES prices < 1.0: buy all YES outcomes. Pay `sum(price_i)`, collect $1.
 - Edge = `|1.0 - sum| - total_fees`
 
-Detection: Group markets by Polymarket's `group_id` / `condition_id` parent via `fetch_grouped_markets()`.
+Detection: Group markets by Polymarket's `group_id` / `condition_id` parent via `fetch_grouped_markets()`. This new method on `PolymarketScanner` calls the CLOB API's `/markets` endpoint with group-level filtering, then clusters markets that share the same `group_slug` or parent `condition_id`. If the API doesn't expose grouping metadata directly, fall back to question-stem heuristics (strip outcome-specific suffixes and group by matching stems).
 
 **Type 2 — Temporal Subset Arbitrage:**
 "Will X happen by June?" and "Will X happen by July?" — the July market must be >= June's price.
@@ -153,7 +156,7 @@ Detection: Check `yes_price + no_price` from data already returned by `parse_mar
 - **Sizing:** 0.80x Kelly. Max single position: 40% of bankroll.
 - **Interval:** 45 seconds.
 - **Min net edge:** 1% after fees.
-- **Multi-leg execution:** All legs placed with aggressive limit orders. If any leg fails to fill within 30s, cancel all legs.
+- **Multi-leg execution:** All legs placed as limit orders that cross the spread (buy at best ask, sell at best bid) to maximize fill probability. If any leg fails to fill within 30s, cancel all unfilled legs. Partial fills are acceptable — the bot holds the filled leg as a directional position and records it accordingly.
 - **Fee-aware:** `net_edge = gross_edge - (fee_rate x expected_payout)`.
 
 ### Market Relationship Storage
@@ -337,14 +340,13 @@ def compute_kelly(ensemble_prob, market_price, fee_rate=0.02) -> KellyResult:
 ```python
 def compute_position_size(
     bankroll, kelly_fraction, kelly_mult, confidence_mult,
-    max_single_pct, min_trade_size, fee_rate=0.02,
+    max_single_pct, min_trade_size,
 ) -> float:
     if kelly_fraction <= 0:
         return 0.0
-    adjusted_fraction = kelly_fraction - fee_rate
-    if adjusted_fraction <= 0:
-        return 0.0
-    raw_size = bankroll * adjusted_fraction * kelly_mult * confidence_mult
+    # Note: kelly_fraction is already fee-adjusted by compute_kelly().
+    # Do NOT subtract fees again here.
+    raw_size = bankroll * kelly_fraction * kelly_mult * confidence_mult
     max_size = bankroll * max_single_pct
     size = min(raw_size, max_size)
     if size < min_trade_size:
@@ -399,6 +401,8 @@ Additions to the existing daily self-assessment:
 
 **Strategy kill switch:** If a strategy has negative total P&L over 50+ trades, set `enabled = FALSE` in `strategy_performance`. The engine checks this before launching each strategy loop. Prevents a broken strategy from bleeding money.
 
+**Self-assessment Kelly scope:** The daily self-assessment adjusts only the *forecast* strategy's Kelly multiplier (stored in `system_state.kelly_mult` for backwards compatibility). Arbitrage (0.80) and snipe (0.50) multipliers are fixed — they're driven by mathematical properties of the edge type, not empirical tuning.
+
 **Bankroll-adaptive aggression:** Checked at the start of every strategy cycle (not just daily):
 
 | Bankroll Range | Kelly Adjustment | Max Deployed |
@@ -450,7 +454,7 @@ All notifications to `logan@galenhealth.org` via Resend. No SMS.
 
 ### End-of-Day Report
 
-Generated as part of daily self-assessment. Sent at midnight UTC.
+Generated as part of the daily self-assessment routine. The self-assessment uses wall-clock time (checks if current UTC hour is 0 and no assessment has run today) rather than a fixed 24h interval from startup. This ensures the report is sent at approximately midnight UTC regardless of when the bot started.
 
 ```
 POLYBOT DAILY REPORT — 2026-03-28
