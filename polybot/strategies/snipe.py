@@ -10,25 +10,34 @@ from polybot.notifications.email import format_trade_email
 log = structlog.get_logger()
 
 
-def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float = 6.0) -> int | None:
+def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float = 48.0) -> int | None:
     """
-    Classify a market as a snipe candidate.
+    Classify a market into snipe tiers based on price extremity and time remaining.
 
-    Returns:
-    - 0: High confidence tier (price >= 0.92 or <= 0.08, no LLM needed)
-    - 1: Medium confidence tier (0.80-0.92 or 0.08-0.20, requires LLM verification)
-    - None: Not a snipe candidate
+    Tier 0: Near-certain outcome, no LLM needed
+    Tier 1: Likely resolved, LLM verification required
+    Tier 2: Strong lean, conservative sizing
+
+    Returns None if not a snipe candidate.
     """
     if hours_remaining > max_hours or hours_remaining <= 0:
         return None
-    if price >= 0.92:
-        return 0
-    if price >= 0.80 and hours_remaining <= 3.0:
-        return 1
-    if price <= 0.08:
-        return 0
-    if price <= 0.20 and hours_remaining <= 3.0:
-        return 1
+
+    # Tier 0: Very extreme prices, close to resolution (high confidence)
+    if hours_remaining <= 24.0:
+        if price >= 0.95 or price <= 0.05:
+            return 0
+
+    # Tier 1: Extreme prices, moderate time window (LLM verify)
+    if hours_remaining <= 12.0:
+        if price >= 0.85 or price <= 0.15:
+            return 1
+
+    # Tier 2: Strong lean, wider window (conservative)
+    if hours_remaining <= 48.0:
+        if price >= 0.90 or price <= 0.10:
+            return 2
+
     return None
 
 
@@ -81,7 +90,7 @@ class ResolutionSnipeStrategy(Strategy):
             if net_edge < self._min_net_edge:
                 continue
 
-            if tier == 1 and self._ensemble:
+            if tier in (1, 2) and self._ensemble:
                 prompt = build_snipe_prompt(m["question"], str(m["resolution_time"]), hours_remaining, m["yes_price"])
                 try:
                     response = await self._ensemble._google.aio.models.generate_content(
@@ -109,6 +118,9 @@ class ResolutionSnipeStrategy(Strategy):
                     survival_threshold=ctx.settings.bankroll_survival_threshold,
                     growth_threshold=ctx.settings.bankroll_growth_threshold,
                 )
+                # Tier-dependent kelly scaling
+                tier_kelly_scale = {0: 1.0, 1: 0.70, 2: 0.40}
+                kelly_adj *= tier_kelly_scale.get(tier, 1.0)
                 kelly_fraction = net_edge / (1 - buy_price) if buy_price < 1.0 else 0.0
                 size = compute_position_size(
                     bankroll=bankroll, kelly_fraction=kelly_fraction, kelly_mult=kelly_adj,

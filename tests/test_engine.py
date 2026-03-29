@@ -39,21 +39,27 @@ async def test_run_strategy_calls_run_once():
         nonlocal call_count
         call_count += 1
         if call_count >= 3:
-            raise KeyboardInterrupt
+            raise asyncio.CancelledError
     strategy.run_once = fake_run_once
-    with pytest.raises(KeyboardInterrupt):
-        await engine._run_strategy(strategy)
+    await engine._run_strategy(strategy)
     assert call_count == 3
 
 
 @pytest.mark.asyncio
-async def test_run_strategy_disables_after_5_errors():
+async def test_run_strategy_disables_after_consecutive_errors(monkeypatch):
+    # Patch asyncio.sleep to be instant during backoff
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     engine = make_engine()
     strategy = MagicMock()
     strategy.name = "failing"
     strategy.interval_seconds = 0.001
+    call_count = 0
     async def always_fail(ctx):
+        nonlocal call_count
+        call_count += 1
         raise ValueError("boom")
     strategy.run_once = always_fail
     await engine._run_strategy(strategy)
+    # Should disable after 30 consecutive errors (with exp backoff)
+    assert call_count == 30
     assert engine._context.email_notifier.send.called

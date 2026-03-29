@@ -31,7 +31,7 @@ class OrderExecutor:
         return elapsed_seconds > self._fill_timeout_seconds
 
     async def place_order(self, token_id, side, size_usd, price, market_id, analysis_id,
-                          strategy: str = "forecast"):
+                          strategy: str = "forecast", kelly_inputs: dict | None = None):
         shares = self._wallet.compute_shares(size_usd, price)
         if shares <= 0:
             return None
@@ -40,11 +40,13 @@ class OrderExecutor:
         log.info("placing_order", market_id=market_id, side=side, size_usd=size_usd,
                  price=price, shares=shares, strategy=strategy, dry_run=self._dry_run)
 
+        import json as _json
+        kelly_json = _json.dumps(kelly_inputs) if kelly_inputs else "{}"
         trade_id = await self._db.fetchval(
             """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd,
                shares, kelly_inputs, status, strategy)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
-            market_id, analysis_id, side, price, size_usd, shares, "{}", status, strategy)
+            market_id, analysis_id, side, price, size_usd, shares, kelly_json, status, strategy)
 
         # Lock deployed capital
         await self._db.execute(
@@ -63,18 +65,22 @@ class OrderExecutor:
                 log.error("clob_submit_failed", trade_id=trade_id, error=str(e))
                 await self._db.execute(
                     "UPDATE trades SET status = 'cancelled' WHERE id = $1", trade_id)
+                await self._db.execute(
+                    "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
+                    size_usd)
                 return None
 
         return {"trade_id": trade_id, "order_id": clob_order_id, "shares": shares}
 
-    async def place_multi_leg_order(self, legs: list[dict], strategy: str = "arbitrage") -> list[dict | None]:
+    async def place_multi_leg_order(self, legs: list[dict], strategy: str = "arbitrage",
+                                    kelly_inputs: dict | None = None) -> list[dict | None]:
         results = []
         for leg in legs:
             result = await self.place_order(
                 token_id=leg["token_id"], side=leg["side"],
                 size_usd=leg["size_usd"], price=leg["price"],
                 market_id=leg["market_id"], analysis_id=leg.get("analysis_id"),
-                strategy=strategy)
+                strategy=strategy, kelly_inputs=kelly_inputs)
             results.append(result)
         return results
 

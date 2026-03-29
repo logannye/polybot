@@ -1,4 +1,5 @@
 import asyncio
+import signal
 import structlog
 import uvicorn
 from polybot.core.config import Settings
@@ -99,13 +100,46 @@ async def main():
     dashboard_server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=8080, log_level="warning"))
 
+    # Graceful shutdown on signals
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler(sig):
+        log.info("shutdown_signal_received", signal=sig.name)
+        shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _signal_handler, sig)
+
+    engine_task = asyncio.create_task(engine.run_forever())
+    dashboard_task = asyncio.create_task(dashboard_server.serve())
+
     try:
-        await asyncio.gather(engine.run_forever(), dashboard_server.serve())
+        # Wait until shutdown signal or engine exits
+        done, pending = await asyncio.wait(
+            [engine_task, dashboard_task, asyncio.create_task(shutdown_event.wait())],
+            return_when=asyncio.FIRST_COMPLETED)
+        # Cancel remaining tasks
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     finally:
+        # Log open positions on shutdown
+        try:
+            open_trades = await db.fetch(
+                """SELECT t.id, t.strategy, t.side, t.position_size_usd, m.question
+                   FROM trades t JOIN markets m ON t.market_id = m.id
+                   WHERE t.status IN ('open', 'filled', 'dry_run')""")
+            log.info("shutdown_open_positions", count=len(open_trades),
+                     positions=[{"id": t["id"], "strategy": t["strategy"],
+                                 "side": t["side"], "size": float(t["position_size_usd"])}
+                                for t in open_trades])
+        except Exception:
+            pass
         await scanner.close()
         await researcher.close()
         await db.close()
-        log.info("polybot_shutdown")
+        log.info("polybot_shutdown_complete")
 
 
 if __name__ == "__main__":

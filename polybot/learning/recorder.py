@@ -47,12 +47,12 @@ class TradeRecorder:
         models = await self._db.fetch("SELECT * FROM model_performance")
         total_resolved = sum(float(m["resolved_count"]) for m in models)
 
-        # Cold start enforcement: only apply Brier-weighted trust after minimum trades
+        # Rebalance trust weights after every resolution (Brier EMA provides smoothing)
+        # During cold start (< min trades), keep equal weights for stability
         if total_resolved >= self._cold_start_trades:
             total_inv = sum(1.0 / max(float(m["brier_score_ema"]), 0.01) for m in models)
             for m in models:
                 weight = (1.0 / max(float(m["brier_score_ema"]), 0.01)) / total_inv
                 await self._db.execute("UPDATE model_performance SET trust_weight=$1 WHERE model_name=$2", weight, m["model_name"])
-        # else: leave equal weights during cold start
 
         log.info("resolution_recorded", trade_id=trade_id, outcome=outcome, pnl=pnl)

@@ -167,6 +167,7 @@ class EnsembleForecastStrategy(Strategy):
 
         # 6. Full ensemble on remaining candidates (top 2-3 after quick screen)
         full_ensemble_limit: int = getattr(self._settings, "full_ensemble_limit", 3)
+        trades_placed = 0
         for candidate, quant in passed_screen[:full_ensemble_limit]:
             try:
                 await self._full_analyze_and_trade(
@@ -180,10 +181,16 @@ class EnsembleForecastStrategy(Strategy):
                     calibration_corrections=calibration_corrections,
                     ctx=ctx,
                 )
+                trades_placed += 1
             except Exception as e:
                 import traceback
                 log.error("forecast_analysis_error", market=candidate.polymarket_id,
                           error=str(e), traceback=traceback.format_exc())
+
+        log.info("forecast_cycle_complete",
+                 markets_scanned=len(raw_markets), filtered=len(filtered),
+                 passed_screen=len(passed_screen), analyzed=min(len(passed_screen), full_ensemble_limit),
+                 deployed_pct=round(total_deployed / max(bankroll, 1) * 100, 1))
 
     async def _full_analyze_and_trade(
         self,
@@ -267,6 +274,18 @@ class EnsembleForecastStrategy(Strategy):
             growth_threshold=getattr(ctx.settings, "bankroll_growth_threshold", 500.0),
         )
 
+        # Contrarian bet guard: be cautious when disagreeing with extreme market consensus
+        market_price = candidate.current_price
+        if (market_price > 0.95 or market_price < 0.05) and abs(prob - market_price) > 0.20:
+            log.info("contrarian_skip_extreme", market=candidate.polymarket_id,
+                     market_price=market_price, ensemble_prob=prob)
+            return
+        if (market_price > 0.90 or market_price < 0.10) and abs(prob - market_price) > 0.30:
+            # Halve the effective kelly for high-disagreement contrarian bets
+            effective_kelly *= 0.5
+            log.info("contrarian_halved", market=candidate.polymarket_id,
+                     market_price=market_price, ensemble_prob=prob)
+
         # 8c. Edge skepticism — large edges are more likely miscalibration
         skepticism = ctx.risk_manager.edge_skepticism_discount(kelly_result.edge)
 
@@ -292,6 +311,17 @@ class EnsembleForecastStrategy(Strategy):
             candidate.polymarket_id, candidate.question, candidate.category,
             candidate.resolution_time, candidate.current_price,
         )
+
+        # Check for existing open positions in this market
+        existing = await ctx.db.fetchval(
+            """SELECT COUNT(*) FROM trades
+               WHERE market_id = $1 AND status IN ('open', 'filled', 'dry_run')""",
+            market_id)
+        max_per_market = getattr(self._settings, "max_positions_per_market", 1)
+        if existing >= max_per_market:
+            log.info("market_dedup_skip", market=candidate.polymarket_id,
+                     existing=existing, max=max_per_market)
+            return
 
         # Record analysis
         analysis_id = await ctx.db.fetchval(
@@ -350,6 +380,17 @@ class EnsembleForecastStrategy(Strategy):
                 market_id=market_id,
                 analysis_id=analysis_id,
                 strategy=self.name,
+                kelly_inputs={
+                    "ensemble_prob": round(prob, 4),
+                    "market_price": round(candidate.current_price, 4),
+                    "edge": round(kelly_result.edge, 4),
+                    "kelly_fraction": round(kelly_result.kelly_fraction, 4),
+                    "confidence_mult": round(conf_mult, 4),
+                    "skepticism": round(skepticism, 4),
+                    "effective_kelly": round(effective_kelly, 4),
+                    "stdev": round(ensemble_result.stdev, 4),
+                    "composite_quant": round(composite, 4),
+                },
             )
             await ctx.email_notifier.send(
                 f"[POLYBOT] Trade executed: {candidate.question[:60]}",

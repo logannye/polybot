@@ -27,12 +27,13 @@ Sizing: Near-full Kelly (0.80x). Edge is mathematically certain — the only ris
 
 ### Strategy 2: Resolution Sniping (every 2 min)
 
-Targets markets within 1-6 hours of resolution where the outcome is effectively determined but the price hasn't converged.
+Targets markets approaching resolution where the outcome is effectively determined but the price hasn't converged. Three confidence tiers with expanding time windows:
 
-- **Tier 0** (no LLM): Price already at $0.92+ or $0.08- — near-certain, just collecting convergence
-- **Tier 1** (single Gemini Flash call): Price $0.80-$0.92, within 3h — cheap LLM verifies outcome is determined
+- **Tier 0** (no LLM): Price at $0.95+ or $0.05-, within 24h — near-certain, just collecting convergence
+- **Tier 1** (single Gemini Flash call): Price $0.85-$0.95, within 12h — cheap LLM verifies outcome is determined
+- **Tier 2** (single Gemini Flash call): Price $0.90-$0.95, within 48h — conservative sizing, LLM verified
 
-Sizing: Half-Kelly (0.50x). Near-certain but with residual risk.
+Sizing: Tier-dependent Kelly — T0: 0.50x (full snipe kelly), T1: 0.35x, T2: 0.20x.
 
 ### Strategy 3: Ensemble Forecast (every 5 min)
 
@@ -66,16 +67,22 @@ Single Python async process (`asyncio`). Each strategy runs as an independent co
 polybot/
 ├── core/           # Engine orchestrator, configuration
 ├── strategies/     # Strategy framework + arbitrage, snipe, forecast implementations
-├── markets/        # Polymarket API client, filters, WebSocket tracker
+├── markets/        # Polymarket API client (Gamma + CLOB), filters, WebSocket tracker
 ├── analysis/       # LLM ensemble, quant signals, web research, pre-scoring
-├── trading/        # Kelly sizing, risk management, order execution
+├── trading/        # Kelly sizing, risk management, order execution, CLOB gateway
 ├── learning/       # Brier calibration, category tracking, self-assessment
 ├── notifications/  # Email alerts (Resend) — trade events, daily reports
 ├── dashboard/      # FastAPI status dashboard
 └── db/             # PostgreSQL schema and connection pool
 ```
 
-If the process crashes, systemd restarts it within 10 seconds. On startup, the engine reconciles any positions that resolved during downtime.
+### Crash resilience
+
+- **Graceful shutdown** — SIGTERM/SIGINT handlers cancel all strategy tasks cleanly, log open positions on exit
+- **Exponential backoff** — Strategy errors trigger 30s→60s→...→10min backoff (30 consecutive failures to disable, not 5)
+- **Capital reconciliation** — Every 5 minutes, `total_deployed` is reconciled against actual open positions in the DB, auto-correcting any drift > $1
+- **Startup recovery** — On restart, reconciles positions that resolved during downtime
+- **systemd watchdog** — If the process crashes, systemd restarts it within 10 seconds
 
 ## Risk management
 
@@ -99,6 +106,12 @@ Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
 **Bankroll-adaptive aggression**: Below $50, all Kelly multipliers are halved (survival mode). Above $500, multipliers are reduced by 15% (wealth preservation).
 
+**Contrarian bet guard**: When the market consensus is >95% and the ensemble disagrees, the trade is skipped entirely. At >90% consensus with >30% disagreement, position size is halved. These extreme contrarian bets are the highest-risk — small calibration errors create large losses.
+
+**Position concentration limits**: Each market can have at most 1 open forecast position (configurable via `MAX_POSITIONS_PER_MARKET`). Arb groups are deduplicated for 24 hours, persisted across restarts via DB-backed dedup.
+
+**Edge skepticism**: Large edges (>10%) are progressively discounted — a 40%+ claimed edge gets only 30% of normal sizing, since extreme edges are more likely LLM miscalibration than genuine alpha.
+
 ## LLM ensemble
 
 Three models run concurrently for full forecast analysis:
@@ -113,13 +126,15 @@ Gemini Flash also serves as the cheap screening model for resolution sniping and
 
 ## Adaptive learning
 
-- **Model trust weights** — Updated after every resolved trade via EMA on per-model Brier scores. Cold start protection: equal weights for the first 30 trades.
-- **Strategy-level P&L** — Win rate, total P&L, and average edge tracked per strategy. Kill switch disables any strategy with negative P&L after 50+ trades.
+- **Model trust weights** — Rebalanced after every resolved trade via EMA on per-model Brier scores. Models with better calibration automatically receive higher weight in the ensemble. Cold start protection: equal weights for the first 30 trades.
+- **Strategy-level P&L** — Win rate, total P&L, and average edge tracked per strategy (including dry-run trades). Kill switch disables any strategy with negative P&L after 50+ trades.
 - **Category performance** — Tracks win rate and ROI per market category. Biases the forecast pre-scoring toward profitable categories.
-- **Calibration correction** — After 50+ trades, applies per-bucket correction to ensemble probabilities to fix systematic over/underconfidence.
+- **Calibration correction** — Computed from 30-day resolved trades during daily self-assessment. Per-bin probability corrections fix systematic over/underconfidence and are applied to ensemble estimates on every forecast cycle.
+- **Kelly inputs audit trail** — Every trade records the full sizing decision: ensemble probability, market price, edge, kelly fraction, confidence multiplier, skepticism discount, and effective kelly. Enables post-hoc analysis of sizing quality.
 - **Daily self-assessment** (midnight UTC):
   - Kelly multiplier tuning based on 7-day drawdown
   - Edge threshold tuning based on marginal trade profitability
+  - Calibration correction recomputation (5-bin probability calibration)
   - Strategy kill switch evaluation
   - Circuit breaker check with post-breaker cooldown activation
   - End-of-day report email with full P&L breakdown by strategy
@@ -154,8 +169,8 @@ All notifications to your configured email via Resend:
 
 | Priority | When |
 |----------|------|
-| Critical | Strategy disabled (5 consecutive errors), unresponsive 30+ min |
-| Warning | Circuit breaker triggered, stale position |
+| Critical | Strategy disabled (30 consecutive errors), unresponsive 30+ min |
+| Warning | Circuit breaker triggered, stale position, 5+ consecutive errors (every 5th) |
 | Trade | Trade executed, trade resolved |
 | Daily | End-of-day P&L report with strategy breakdown |
 
@@ -313,7 +328,7 @@ Or manually: `ssh polybot@vps "cd /opt/polybot && git pull && uv sync && sudo sy
 ## Testing
 
 ```bash
-uv run pytest tests/ -v                                    # Run all 188 tests
+uv run pytest tests/ -v                                    # Run all 199 tests
 uv run pytest tests/ --cov=polybot --cov-report=term       # With coverage
 uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 ```

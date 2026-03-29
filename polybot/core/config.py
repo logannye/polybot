@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     polymarket_fee_rate: float = 0.02
 
     # Snipe thresholds
-    snipe_hours_max: float = 6.0
+    snipe_hours_max: float = 48.0
     snipe_min_confidence: float = 0.90
     snipe_min_net_edge: float = 0.02
 
@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     max_per_category_pct: float = 0.25
     min_trade_size: float = 1.0
     max_concurrent_positions: int = 12
+    max_positions_per_market: int = 1
     daily_loss_limit_pct: float = 0.15
     circuit_breaker_hours: int = 6
     post_breaker_cooldown_hours: int = 24

@@ -133,9 +133,24 @@ class ArbitrageStrategy(Strategy):
         self.kelly_multiplier = float(getattr(settings, "arb_kelly_multiplier", 0.20))
         self.max_single_pct = float(getattr(settings, "arb_max_single_pct", 0.40))
         self._seen_arbs: set[str] = set()
+        self._dedup_loaded: bool = False
         self._settings = settings
 
     async def run_once(self, ctx: TradingContext) -> None:
+        # Warm dedup cache from recent DB trades (once per process lifetime)
+        if not self._dedup_loaded:
+            recent = await ctx.db.fetch(
+                """SELECT DISTINCT m.polymarket_id
+                   FROM trades t JOIN markets m ON t.market_id = m.id
+                   WHERE t.strategy = 'arbitrage'
+                     AND t.opened_at > NOW() - INTERVAL '24 hours'
+                     AND t.status IN ('open', 'filled', 'dry_run')""")
+            for r in recent:
+                self._seen_arbs.add(r["polymarket_id"])
+            self._dedup_loaded = True
+            if self._seen_arbs:
+                log.info("arb_dedup_loaded", count=len(self._seen_arbs))
+
         scanner = ctx.scanner
         markets = await scanner.fetch_markets()
         if not markets:
@@ -173,8 +188,21 @@ class ArbitrageStrategy(Strategy):
         new_opps = []
         for opp in opportunities:
             key = f"{opp.arb_type}:{','.join(m['polymarket_id'] for m in opp.markets)}"
-            if key not in self._seen_arbs:
-                new_opps.append((key, opp))
+            if key in self._seen_arbs:
+                continue
+            # Check DB for recent arb trades on any of the involved markets
+            market_ids = [m["polymarket_id"] for m in opp.markets]
+            recent_count = await ctx.db.fetchval(
+                """SELECT COUNT(*) FROM trades t JOIN markets m ON t.market_id = m.id
+                   WHERE t.strategy = 'arbitrage'
+                     AND m.polymarket_id = ANY($1)
+                     AND t.opened_at > NOW() - INTERVAL '24 hours'
+                     AND t.status IN ('open', 'filled', 'dry_run')""",
+                market_ids)
+            if recent_count and recent_count > 0:
+                self._seen_arbs.add(key)
+                continue
+            new_opps.append((key, opp))
 
         if opportunities and not new_opps:
             log.debug("arb_all_known", total=len(opportunities))
@@ -223,7 +251,14 @@ class ArbitrageStrategy(Strategy):
             if not legs:
                 return
 
-            results = await ctx.executor.place_multi_leg_order(legs, strategy=self.name)
+            results = await ctx.executor.place_multi_leg_order(
+                legs, strategy=self.name,
+                kelly_inputs={
+                    "arb_type": opp.arb_type,
+                    "gross_edge": round(opp.gross_edge, 4),
+                    "net_edge": round(opp.net_edge, 4),
+                    "num_legs": len(legs),
+                })
             placed = sum(1 for r in results if r is not None)
             log.info("arb_executed", arb_type=opp.arb_type, side=opp.side,
                      legs=len(legs), placed=placed, size_usd=size_usd)

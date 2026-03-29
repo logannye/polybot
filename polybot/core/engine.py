@@ -1,4 +1,5 @@
 import asyncio
+import json
 import resource
 import structlog
 from datetime import datetime, timezone, timedelta
@@ -42,31 +43,49 @@ class Engine:
         if not self._settings.dry_run and self._clob:
             tasks.append(self._run_periodic(self._fill_monitor, 30))
         tasks.append(self._run_periodic(self._resolution_monitor, 60))
+        tasks.append(self._run_periodic(self._reconcile_capital, 300))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):
         consecutive_errors = 0
+        max_backoff = 600  # 10 minutes
+        kill_threshold = 30  # permanent disable after this many consecutive
         while True:
             try:
                 await strategy.run_once(self._context)
                 consecutive_errors = 0
                 self._last_heartbeats[strategy.name] = datetime.now(timezone.utc)
+            except asyncio.CancelledError:
+                log.info("strategy_shutdown", strategy=strategy.name)
+                return
             except Exception as e:
                 consecutive_errors += 1
+                backoff = min(30 * (2 ** (consecutive_errors - 1)), max_backoff)
                 log.error("strategy_error", strategy=strategy.name,
-                          error=str(e), consecutive=consecutive_errors)
-                if consecutive_errors >= 5:
+                          error=str(e), consecutive=consecutive_errors,
+                          backoff_s=backoff)
+                if consecutive_errors >= kill_threshold:
                     log.critical("strategy_disabled", strategy=strategy.name)
                     await self._context.email_notifier.send(
                         f"[POLYBOT CRITICAL] {strategy.name} disabled",
-                        f"Strategy {strategy.name} disabled after 5 consecutive errors: {e}")
+                        f"Strategy {strategy.name} disabled after {kill_threshold} consecutive errors: {e}")
                     return
+                if consecutive_errors % 5 == 0:
+                    await self._context.email_notifier.send(
+                        f"[POLYBOT WARNING] {strategy.name} errors: {consecutive_errors}",
+                        f"Strategy {strategy.name} has {consecutive_errors} consecutive errors. "
+                        f"Backing off {backoff}s. Latest: {e}")
+                await asyncio.sleep(backoff)
+                continue
             await asyncio.sleep(strategy.interval_seconds)
 
     async def _run_periodic(self, func, interval_seconds):
         while True:
             try:
                 await func()
+            except asyncio.CancelledError:
+                log.info("periodic_shutdown", func=func.__name__)
+                return
             except Exception as e:
                 log.error("periodic_error", func=func.__name__, error=str(e))
             await asyncio.sleep(interval_seconds)
@@ -169,13 +188,16 @@ class Engine:
                     log.info("order_timed_out", trade_id=trade["id"], elapsed=elapsed)
 
     async def _resolution_monitor(self):
-        resolvable = await self._db.fetch(
-            "SELECT * FROM trades WHERE status IN ('filled', 'dry_run')")
         now = datetime.now(timezone.utc)
+        # Only check trades whose market resolution_time has passed (defense-in-depth)
+        resolvable = await self._db.fetch(
+            """SELECT t.* FROM trades t JOIN markets m ON t.market_id = m.id
+               WHERE t.status IN ('filled', 'dry_run')
+                 AND m.resolution_time <= $1""", now)
         for trade in resolvable:
             market = await self._db.fetchrow(
                 "SELECT * FROM markets WHERE id = $1", trade["market_id"])
-            if not market or market["resolution_time"] > now:
+            if not market:
                 continue
             try:
                 outcome = await self._scanner.fetch_market_resolution(market["polymarket_id"])
@@ -218,7 +240,34 @@ class Engine:
                        total_deployed = total_deployed - $2, daily_pnl = daily_pnl + $1
                        WHERE id = 1""",
                     pnl, float(trade["position_size_usd"]))
-                log.info("dry_run_resolved", trade_id=trade["id"], outcome=outcome, simulated_pnl=pnl)
+                # Update strategy_performance for dry-run tracking
+                await self._db.execute(
+                    """UPDATE strategy_performance SET
+                       total_trades = total_trades + 1,
+                       winning_trades = winning_trades + CASE WHEN $1 > 0 THEN 1 ELSE 0 END,
+                       total_pnl = total_pnl + $1, last_updated = $2
+                       WHERE strategy = $3""",
+                    pnl, now, trade["strategy"])
+                log.info("dry_run_resolved", trade_id=trade["id"], outcome=outcome,
+                         simulated_pnl=pnl, side=trade["side"],
+                         entry_price=entry, shares=shares)
+
+    async def _reconcile_capital(self):
+        """Periodic check: ensure total_deployed matches actual open positions."""
+        actual = await self._db.fetchval(
+            """SELECT COALESCE(SUM(position_size_usd), 0) FROM trades
+               WHERE status IN ('open', 'filled', 'dry_run')""")
+        actual = float(actual)
+        state = await self._db.fetchrow("SELECT total_deployed FROM system_state WHERE id = 1")
+        if not state:
+            return
+        recorded = float(state["total_deployed"])
+        divergence = abs(recorded - actual)
+        if divergence > 1.0:
+            log.warning("capital_reconciliation", recorded=recorded, actual=actual,
+                        divergence=divergence)
+            await self._db.execute(
+                "UPDATE system_state SET total_deployed = $1 WHERE id = 1", actual)
 
     async def _maybe_self_assess(self):
         now = datetime.now(timezone.utc)
@@ -263,6 +312,23 @@ class Engine:
         await self._db.execute(
             "UPDATE system_state SET kelly_mult=$1, edge_threshold=$2 WHERE id=1",
             new_kelly, new_edge)
+
+        # Calibration corrections
+        resolved_analyses = await self._db.fetch(
+            """SELECT a.ensemble_probability, t.exit_price as outcome
+               FROM trades t JOIN analyses a ON t.analysis_id = a.id
+               WHERE t.status IN ('closed', 'dry_run_resolved')
+                 AND t.closed_at > NOW() - INTERVAL '30 days'""")
+        if len(resolved_analyses) >= 20:
+            from polybot.learning.calibration import compute_calibration_correction
+            predictions = [float(r["ensemble_probability"]) for r in resolved_analyses]
+            outcomes = [int(r["outcome"]) for r in resolved_analyses]
+            corrections = compute_calibration_correction(predictions, outcomes)
+            if corrections:
+                await self._db.execute(
+                    "UPDATE system_state SET calibration_corrections = $1 WHERE id = 1",
+                    json.dumps(corrections))
+                log.info("calibration_updated", corrections=corrections)
 
         # Strategy kill switch
         strat_rows = await self._db.fetch("SELECT * FROM strategy_performance")
