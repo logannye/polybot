@@ -82,6 +82,9 @@ class Engine:
                         market["polymarket_id"])
                     if resolved is not None:
                         await self._recorder.record_resolution(trade["id"], resolved)
+                        await self._db.execute(
+                            "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
+                            float(trade["position_size_usd"]))
                         log.info("reconciled_stale_trade", trade_id=trade["id"], outcome=resolved)
             # Sync bankroll from CLOB on startup (live mode only)
             if not self._settings.dry_run and self._clob:

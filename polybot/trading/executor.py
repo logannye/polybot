@@ -46,6 +46,11 @@ class OrderExecutor:
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
             market_id, analysis_id, side, price, size_usd, shares, "{}", status, strategy)
 
+        # Lock deployed capital
+        await self._db.execute(
+            "UPDATE system_state SET total_deployed = total_deployed + $1 WHERE id = 1",
+            size_usd)
+
         clob_order_id = None
         if not self._dry_run and self._clob is not None:
             try:
