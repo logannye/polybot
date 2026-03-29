@@ -72,6 +72,7 @@ def create_app(db) -> FastAPI:
                 "exit_reason": t["exit_reason"],
                 "opened_at": str(t["opened_at"]),
                 "closed_at": str(t["closed_at"]) if t["closed_at"] else None,
+                "dry_run": t["status"] in ("dry_run", "dry_run_resolved"),
             }
             for t in rows
         ]
