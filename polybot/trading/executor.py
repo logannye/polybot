@@ -18,11 +18,14 @@ def compute_limit_price(side: str, best_bid: float, best_ask: float,
 
 
 class OrderExecutor:
-    def __init__(self, scanner, wallet, db, fill_timeout_seconds: int = 120):
+    def __init__(self, scanner, wallet, db, fill_timeout_seconds: int = 120,
+                 clob=None, dry_run: bool = False):
         self._scanner = scanner
         self._wallet = wallet
         self._db = db
         self._fill_timeout_seconds = fill_timeout_seconds
+        self._clob = clob
+        self._dry_run = dry_run
 
     def should_cancel_order(self, elapsed_seconds: float) -> bool:
         return elapsed_seconds > self._fill_timeout_seconds
@@ -32,20 +35,32 @@ class OrderExecutor:
         shares = self._wallet.compute_shares(size_usd, price)
         if shares <= 0:
             return None
-        order_data = {
-            "token_id": token_id,
-            "side": "BUY",
-            "size": str(shares),
-            "price": str(price),
-            "type": "GTC",
-        }
+
+        status = "dry_run" if self._dry_run else "open"
         log.info("placing_order", market_id=market_id, side=side, size_usd=size_usd,
-                 price=price, shares=shares, strategy=strategy)
+                 price=price, shares=shares, strategy=strategy, dry_run=self._dry_run)
+
         trade_id = await self._db.fetchval(
-            """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd, shares, kelly_inputs, status, strategy)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8) RETURNING id""",
-            market_id, analysis_id, side, price, size_usd, shares, "{}", strategy)
-        return {"trade_id": trade_id, "order": order_data, "shares": shares}
+            """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd,
+               shares, kelly_inputs, status, strategy)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
+            market_id, analysis_id, side, price, size_usd, shares, "{}", status, strategy)
+
+        clob_order_id = None
+        if not self._dry_run and self._clob is not None:
+            try:
+                clob_order_id = await self._clob.submit_order(
+                    token_id=token_id, side=side, price=price, size=shares)
+                await self._db.execute(
+                    "UPDATE trades SET clob_order_id = $1 WHERE id = $2",
+                    clob_order_id, trade_id)
+            except Exception as e:
+                log.error("clob_submit_failed", trade_id=trade_id, error=str(e))
+                await self._db.execute(
+                    "UPDATE trades SET status = 'cancelled' WHERE id = $1", trade_id)
+                return None
+
+        return {"trade_id": trade_id, "order_id": clob_order_id, "shares": shares}
 
     async def place_multi_leg_order(self, legs: list[dict], strategy: str = "arbitrage") -> list[dict | None]:
         results = []
@@ -65,7 +80,6 @@ class OrderExecutor:
             pnl = shares * ((1 - exit_price) - (1 - entry_price))
         await self._db.execute(
             """UPDATE trades SET status='closed', exit_price=$1, exit_reason=$2, pnl=$3, closed_at=$4 WHERE id=$5""",
-            exit_price, exit_reason, pnl, datetime.now(timezone.utc), trade_id,
-        )
+            exit_price, exit_reason, pnl, datetime.now(timezone.utc), trade_id)
         log.info("position_closed", trade_id=trade_id, pnl=pnl, reason=exit_reason)
         return pnl

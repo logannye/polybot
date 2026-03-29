@@ -86,3 +86,57 @@ async def test_place_multi_leg_order():
     results = await executor.place_multi_leg_order(legs, strategy="arbitrage")
     assert len(results) == 2
     assert all(r is not None for r in results)
+
+
+@pytest.mark.asyncio
+async def test_place_order_dry_run_skips_clob():
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    wallet.compute_shares = MagicMock(return_value=10.0)
+    clob = AsyncMock()
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db,
+                              fill_timeout_seconds=120, clob=clob, dry_run=True)
+    result = await executor.place_order(
+        token_id="tok", side="YES", size_usd=5.0, price=0.50,
+        market_id=1, analysis_id=1)
+    assert result is not None
+    assert result["order_id"] is None
+    clob.submit_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_place_order_live_calls_clob():
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    wallet.compute_shares = MagicMock(return_value=10.0)
+    clob = AsyncMock()
+    clob.submit_order = AsyncMock(return_value="order-abc")
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db,
+                              fill_timeout_seconds=120, clob=clob, dry_run=False)
+    result = await executor.place_order(
+        token_id="tok", side="YES", size_usd=5.0, price=0.50,
+        market_id=1, analysis_id=1)
+    assert result is not None
+    assert result["order_id"] == "order-abc"
+    clob.submit_order.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_place_order_clob_failure_cancels():
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    wallet.compute_shares = MagicMock(return_value=10.0)
+    clob = AsyncMock()
+    clob.submit_order = AsyncMock(side_effect=Exception("CLOB down"))
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db,
+                              fill_timeout_seconds=120, clob=clob, dry_run=False)
+    result = await executor.place_order(
+        token_id="tok", side="YES", size_usd=5.0, price=0.50,
+        market_id=1, analysis_id=1)
+    assert result is None
