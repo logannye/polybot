@@ -64,3 +64,59 @@ class TestPolymarketScanner:
         markets = await scanner.fetch_markets()
         assert len(markets) == 1
         assert markets[0]["polymarket_id"] == "0x111"
+
+    @pytest.mark.asyncio
+    async def test_fetch_market_resolution_resolved_yes(self, scanner):
+        mock_session = AsyncMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"resolved": True, "outcome": "Yes"})
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        mock_session.get = AsyncMock(return_value=mock_resp)
+        scanner._session = mock_session
+        result = await scanner.fetch_market_resolution("test-id")
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_market_resolution_unresolved(self, scanner):
+        mock_session = AsyncMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"resolved": False})
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        mock_session.get = AsyncMock(return_value=mock_resp)
+        scanner._session = mock_session
+        result = await scanner.fetch_market_resolution("test-id")
+        assert result is None
+
+    def test_fetch_grouped_markets_groups_by_slug(self):
+        markets = [
+            {"polymarket_id": "a", "group_slug": "election-2026"},
+            {"polymarket_id": "b", "group_slug": "election-2026"},
+            {"polymarket_id": "c", "group_slug": None},
+            {"polymarket_id": "d", "group_slug": "single-group"},
+        ]
+        groups = PolymarketScanner.fetch_grouped_markets(markets)
+        assert "election-2026" in groups
+        assert len(groups["election-2026"]) == 2
+        assert "single-group" not in groups  # only 1 market, not useful for arb
+
+    def test_parse_market_response_preserves_group_slug(self):
+        raw = {
+            "active": True, "closed": False,
+            "condition_id": "test-cond",
+            "question": "Test?",
+            "category": "politics",
+            "end_date_iso": "2026-04-01T00:00:00Z",
+            "tokens": [
+                {"outcome": "Yes", "price": "0.55", "token_id": "tok_yes"},
+                {"outcome": "No", "price": "0.45", "token_id": "tok_no"},
+            ],
+            "volume": "1000",
+            "group_slug": "my-group",
+        }
+        result = parse_market_response(raw)
+        assert result is not None
+        assert result["group_slug"] == "my-group"

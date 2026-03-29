@@ -27,6 +27,7 @@ def parse_market_response(raw: dict[str, Any]) -> dict[str, Any] | None:
         "yes_price": float(yes_token["price"]), "no_price": float(no_token["price"]),
         "yes_token_id": yes_token["token_id"], "no_token_id": no_token["token_id"],
         "volume_24h": float(raw.get("volume", 0)),
+        "group_slug": raw.get("group_slug"),
     }
 
 
@@ -94,3 +95,25 @@ class PolymarketScanner:
         if status != 200:
             return []
         return [float(p.get("p", 0)) for p in data.get("history", [])]
+
+    async def fetch_market_resolution(self, condition_id: str) -> int | None:
+        status, data = await self._get(f"{self._base_url}/markets/{condition_id}", {})
+        if status != 200 or not data:
+            return None
+        if not data.get("resolved", False):
+            return None
+        outcome = data.get("outcome", "").lower()
+        if outcome in ("yes", "true", "1"):
+            return 1
+        elif outcome in ("no", "false", "0"):
+            return 0
+        return None
+
+    @staticmethod
+    def fetch_grouped_markets(markets: list[dict]) -> dict[str, list[dict]]:
+        groups: dict[str, list[dict]] = {}
+        for m in markets:
+            slug = m.get("group_slug")
+            if slug:
+                groups.setdefault(slug, []).append(m)
+        return {k: v for k, v in groups.items() if len(v) >= 2}
