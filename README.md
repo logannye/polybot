@@ -1,8 +1,8 @@
 # Polybot
 
-Fully autonomous AI trading bot for [Polymarket](https://polymarket.com). Uses a multi-model LLM ensemble to estimate true probabilities of binary outcome markets, quantitative signals to confirm entry timing, and fractional Kelly criterion to size positions. The system learns from every resolved trade — adapting model weights, category preferences, and sizing parameters over time.
+Fully autonomous AI trading bot for [Polymarket](https://polymarket.com). Uses a multi-strategy architecture — arbitrage scanning, resolution sniping, and a multi-model LLM ensemble — to find and exploit edge in binary outcome markets. The system learns from every resolved trade, adapting model weights, category preferences, and sizing parameters over time.
 
-Built for micro-scale bankrolls ($100-500) targeting short-term markets that resolve within 72 hours.
+Built for micro-scale bankrolls ($100-500) targeting aggressive compounding through mathematically provable edge (arbitrage), near-certain edge (resolution sniping), and analytical edge (ensemble forecasting).
 
 ## Who is this for?
 
@@ -13,81 +13,151 @@ Built for micro-scale bankrolls ($100-500) targeting short-term markets that res
 
 ## How it works
 
-Polybot runs a continuous 5-minute cycle:
+Three concurrent strategies run at independent frequencies within a single async process:
+
+### Strategy 1: Arbitrage Scanner (every 45s)
+
+Detects mathematically provable mispricings between related markets. No LLMs, pure math.
+
+- **Complement arbitrage** — YES + NO prices on a single market sum to less than $1.00 (buy both for guaranteed profit)
+- **Exhaustive outcome arbitrage** — Multi-outcome groups (e.g., "Who wins?" with candidates A, B, C) where YES prices don't sum to $1.00
+- **Temporal subset arbitrage** — "Will X happen by June?" priced higher than "Will X happen by July?" (logically impossible)
+
+Sizing: Near-full Kelly (0.80x). Edge is mathematically certain — the only risk is execution.
+
+### Strategy 2: Resolution Sniping (every 2 min)
+
+Targets markets within 1-6 hours of resolution where the outcome is effectively determined but the price hasn't converged.
+
+- **Tier 0** (no LLM): Price already at $0.92+ or $0.08- — near-certain, just collecting convergence
+- **Tier 1** (single Gemini Flash call): Price $0.80-$0.92, within 3h — cheap LLM verifies outcome is determined
+
+Sizing: Half-Kelly (0.50x). Near-certain but with residual risk.
+
+### Strategy 3: Ensemble Forecast (every 5 min)
+
+The full analysis pipeline with a cost-efficient tiered funnel:
 
 ```
-SCAN → FILTER → ANALYZE → SCORE → SIZE → EXECUTE → MANAGE → LEARN
+~200-500 active markets
+    |
+    v  Filter (no LLM) — resolution time, liquidity, price range
+~30-60 markets
+    |
+    v  Pre-score (no LLM) — rank by quant signals + book depth + category history
+~5 markets
+    |
+    v  Quick screen (single Gemini Flash) — discard if <3% edge
+~2-3 markets
+    |
+    v  Full ensemble (Claude + GPT-4o + Gemini) — 3-model blind analysis + web research
+~0-2 trades
 ```
 
-1. **Scan** — Pulls all active markets from Polymarket's CLOB API
-2. **Filter** — Keeps only short-term markets (<72h) with sufficient liquidity (>$500 book depth), reasonable prices ($0.05-$0.95), and respects cooldown periods
-3. **Analyze** — For each candidate:
-   - Runs a web search (Brave API) to gather recent context
-   - Fires 3 LLM models concurrently (Claude, GPT-4o, Gemini) — each estimates the true probability *without* seeing the market price (anti-anchoring)
-   - Computes 5 quantitative signals in parallel (line movement, volume spike, book imbalance, spread, time decay)
-4. **Score** — Computes edge as `|ensemble_probability - market_price|`, discards if below threshold (default 5%)
-5. **Size** — Fractional Kelly (quarter-Kelly) with confidence modulation based on model agreement and quant signals
-6. **Execute** — Places limit orders, monitors fills, manages open positions
-7. **Manage** — Checks open positions every 30 minutes for early exit (edge evaporated) or stop loss
-8. **Learn** — After each resolved market: updates per-model Brier scores, adjusts ensemble trust weights, tracks category performance, runs daily self-assessment to tune Kelly multiplier and edge threshold
+Three models estimate probability **blind** — the market price is intentionally withheld to prevent anchoring bias. Estimates are aggregated using confidence-weighted averaging with trust weights that evolve based on each model's historical Brier score.
+
+Sizing: Quarter-Kelly (0.25x) with confidence modulation.
 
 ## Architecture
 
-Single Python async process (`asyncio`). No threads, no message brokers, no microservices. All state in PostgreSQL. If the process crashes, systemd restarts it within 10 seconds — the process is stateless on restart.
+Single Python async process (`asyncio`). Each strategy runs as an independent coroutine with its own scan interval, Kelly multiplier, and risk limits. Shared resources (DB, scanner, executor) are passed via a `TradingContext` dataclass. Bankroll contention between strategies is managed by an `asyncio.Lock` held only during the DB read-check-write window (~5ms).
 
 ```
 polybot/
-├── core/           # Main engine loop, configuration
+├── core/           # Engine orchestrator, configuration
+├── strategies/     # Strategy framework + arbitrage, snipe, forecast implementations
 ├── markets/        # Polymarket API client, filters, WebSocket tracker
-├── analysis/       # LLM ensemble, quant signals, web research
+├── analysis/       # LLM ensemble, quant signals, web research, pre-scoring
 ├── trading/        # Kelly sizing, risk management, order execution
 ├── learning/       # Brier calibration, category tracking, self-assessment
-├── notifications/  # Email (Resend) + SMS (Twilio) alerts
+├── notifications/  # Email alerts (Resend) — trade events, daily reports
 ├── dashboard/      # FastAPI status dashboard
 └── db/             # PostgreSQL schema and connection pool
 ```
 
+If the process crashes, systemd restarts it within 10 seconds. On startup, the engine reconciles any positions that resolved during downtime.
+
 ## Risk management
 
-Designed for capital preservation at micro-scale:
+Strategy-aware risk management with aggressive sizing for high-certainty trades:
+
+| Rule | Arbitrage | Snipe | Forecast |
+|------|-----------|-------|----------|
+| Kelly multiplier | 0.80x | 0.50x | 0.25x |
+| Max single position | 40% | 25% | 15% |
 
 | Rule | Default |
 |------|---------|
-| Position sizing | Quarter-Kelly (0.25x) |
-| Max single position | 15% of bankroll |
-| Max total deployed | 50% of bankroll |
+| Max total deployed | 70% of bankroll |
 | Max per category | 25% of bankroll |
-| Max concurrent positions | 8 |
-| Daily loss limit | 20% of bankroll (triggers 12h circuit breaker) |
-| Min trade size | $2 |
+| Max concurrent positions | 12 |
+| Daily loss limit | 15% of bankroll (triggers 6h circuit breaker) |
+| Post-breaker cooldown | 24h at 50% Kelly |
+| Min trade size | $1 |
 
-Confidence modulation further reduces position sizes when LLM models disagree or quant signals are unfavorable.
+**Fee-adjusted edge**: All edge calculations account for Polymarket's ~2% fee on winnings. Marginal edges that don't survive fee drag are automatically discarded.
+
+**Bankroll-adaptive aggression**: Below $50, all Kelly multipliers are halved (survival mode). Above $500, multipliers are reduced by 15% (wealth preservation).
 
 ## LLM ensemble
 
-Three models run concurrently on every market analysis:
+Three models run concurrently for full forecast analysis:
 
 | Model | Role |
 |-------|------|
 | Claude Sonnet 4.6 | Strong reasoning, calibrated probability estimates |
 | GPT-4o | Broad knowledge base |
-| Gemini 2.5 Flash | Fast, diverse training data for independent perspective |
+| Gemini 2.5 Flash | Fast screening + diverse training data |
 
-Each model estimates probability **blind** — the current market price is intentionally withheld to prevent anchoring bias. Estimates are aggregated using confidence-weighted averaging with trust weights that evolve based on each model's historical Brier score.
-
-Inter-model agreement (standard deviation) is itself a signal: high agreement increases position sizing, high disagreement reduces it.
+Gemini Flash also serves as the cheap screening model for resolution sniping and the pre-ensemble quick screen gate, keeping LLM costs under $2/day.
 
 ## Adaptive learning
 
-The system gets smarter over time:
+- **Model trust weights** — Updated after every resolved trade via EMA on per-model Brier scores. Cold start protection: equal weights for the first 30 trades.
+- **Strategy-level P&L** — Win rate, total P&L, and average edge tracked per strategy. Kill switch disables any strategy with negative P&L after 50+ trades.
+- **Category performance** — Tracks win rate and ROI per market category. Biases the forecast pre-scoring toward profitable categories.
+- **Calibration correction** — After 50+ trades, applies per-bucket correction to ensemble probabilities to fix systematic over/underconfidence.
+- **Daily self-assessment** (midnight UTC):
+  - Kelly multiplier tuning based on 7-day drawdown
+  - Edge threshold tuning based on marginal trade profitability
+  - Strategy kill switch evaluation
+  - Circuit breaker check with post-breaker cooldown activation
+  - End-of-day report email with full P&L breakdown by strategy
 
-- **Model trust weights** — Updated after every resolved trade via EMA on per-model Brier scores. Better-calibrated models earn more influence.
-- **Category performance** — Tracks win rate and ROI per market category (politics, sports, crypto, etc.). Biases scanning toward profitable categories after 20+ resolved trades.
-- **Daily self-assessment** (every 24h):
-  - Calibration curve analysis — detects systematic over/underconfidence
-  - Edge threshold tuning — raises threshold if marginal trades lose money, lowers if they're profitable
-  - Kelly multiplier adjustment — nudges sizing up if drawdowns are within tolerance, down if too volatile
-- **Cold start** — First 30 trades use minimum sizes and equal model weights until enough data accumulates
+## Monitoring
+
+### Dashboard
+
+Access via SSH tunnel (binds to localhost only):
+
+```bash
+ssh -L 8080:localhost:8080 polybot@your-vps
+```
+
+Endpoints:
+- `GET /` — Bankroll, P&L, open positions, system health
+- `GET /trades` — Recent trade history with outcomes
+- `GET /models` — Per-model Brier scores and trust weights
+- `GET /strategies` — Per-strategy performance (trades, P&L, enabled/disabled)
+- `GET /arb` — Recent arbitrage opportunities and trades
+- `GET /health` — JSON health check (use with UptimeRobot)
+
+### Health monitor (every 60s)
+
+- **Heartbeat**: alerts if any strategy hasn't completed a cycle in 10+ minutes
+- **Stale positions**: warns if a trade has been open for >80% of the market's resolution time
+- **Memory**: logs warning if RSS exceeds 512MB
+
+### Email alerts
+
+All notifications to your configured email via Resend:
+
+| Priority | When |
+|----------|------|
+| Critical | Strategy disabled (5 consecutive errors), unresponsive 30+ min |
+| Warning | Circuit breaker triggered, stale position |
+| Trade | Trade executed, trade resolved |
+| Daily | End-of-day P&L report with strategy breakdown |
 
 ## Setup
 
@@ -96,7 +166,7 @@ The system gets smarter over time:
 - Python 3.12+
 - PostgreSQL 16
 - [uv](https://docs.astral.sh/uv/) package manager
-- API keys: Anthropic, OpenAI, Google AI, Brave Search, Resend, Twilio
+- API keys: Anthropic, OpenAI, Google AI, Brave Search, Resend
 - Polymarket account with API key and a funded Polygon wallet (USDC)
 
 ### Installation
@@ -135,11 +205,7 @@ DATABASE_URL=postgresql://polybot:password@localhost:5432/polybot
 
 # Notifications
 RESEND_API_KEY=               # For email alerts
-TWILIO_ACCOUNT_SID=           # For SMS alerts
-TWILIO_AUTH_TOKEN=
-TWILIO_FROM_NUMBER=           # Your Twilio phone number
-ALERT_EMAIL=you@example.com   # Where to send email alerts
-ALERT_PHONE=+1234567890       # Where to send SMS alerts
+ALERT_EMAIL=you@example.com   # Where to send alerts and daily reports
 
 # Bot Config (all optional — defaults shown)
 STARTING_BANKROLL=300.00
@@ -163,7 +229,7 @@ The schema is applied automatically on first run.
 uv run python -m polybot
 ```
 
-The bot starts scanning immediately. A dashboard is available at `http://localhost:8080`.
+The bot starts all three strategies immediately. A dashboard is available at `http://localhost:8080`.
 
 ### Running on a VPS (recommended)
 
@@ -201,56 +267,33 @@ sudo journalctl -u polybot -f  # Live logs
 
 Or manually: `ssh polybot@vps "cd /opt/polybot && git pull && uv sync && sudo systemctl restart polybot"`
 
-## Monitoring
-
-### Dashboard
-
-Access via SSH tunnel (dashboard binds to localhost only):
-
-```bash
-ssh -L 8080:localhost:8080 polybot@your-vps
-# Then open http://localhost:8080
-```
-
-Endpoints:
-- `GET /` — Bankroll, P&L, open positions, system health
-- `GET /trades` — Recent trade history with outcomes
-- `GET /models` — Per-model Brier scores and trust weights
-- `GET /health` — JSON health check (use with UptimeRobot)
-
-### Alerts
-
-- **Email** — Trade executed, trade resolved, daily summary, weekly report
-- **SMS** — Circuit breaker triggered, system down, wallet balance low, exceptional P&L events
-
 ## Monthly operating cost
 
 | Item | Cost |
 |------|------|
 | VPS (1 vCPU, 1GB RAM) | $5-7 |
-| LLM API calls (~50 markets/day x 3 models) | $3-8 |
-| Twilio SMS | ~$1 |
+| LLM API calls (tiered funnel, ~$1-2/day) | $30-60 |
 | Resend email | Free tier |
 | Brave Search API | $3 |
-| **Total** | **~$12-19/mo** |
-
-The system needs to earn ~$0.50/day to cover its own costs.
+| **Total** | **~$38-70/mo** |
 
 ## Testing
 
 ```bash
-uv run pytest tests/ -v                                    # Run all 110 tests
+uv run pytest tests/ -v                                    # Run all 172 tests
 uv run pytest tests/ --cov=polybot --cov-report=term       # With coverage
-uv run pytest tests/test_kelly.py -v                       # Run specific module
+uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 ```
 
 ## Key design decisions
 
-- **Anti-anchoring** — LLMs never see the market price when estimating probability. This prevents them from simply parroting the market consensus and forces independent analysis.
-- **Quarter-Kelly** — Full Kelly is theoretically optimal but assumes perfect probability estimates. Quarter-Kelly sacrifices ~50% of growth rate but reduces variance by ~75%.
-- **Ensemble disagreement as signal** — When models disagree significantly, it means the question is genuinely uncertain. The system automatically reduces position sizes rather than forcing a bet.
-- **No market orders** — Always uses limit orders for entries to avoid slippage. Aggressive limits (crossing the spread) only for exits when speed matters.
-- **Single process** — At $300 bankroll, the bottleneck is edge detection quality, not execution speed. A single async process is the right complexity level.
+- **Multi-strategy architecture** — Arb, snipe, and forecast run at different frequencies (45s/2min/5min) because different edge types have different time sensitivities. A single loop would bottleneck arb detection behind slow LLM calls.
+- **Anti-anchoring** — LLMs never see the market price when estimating probability. This prevents them from simply parroting the market consensus.
+- **Fee-adjusted Kelly** — Edge calculations subtract Polymarket's ~2% fee on winnings, which disproportionately affects high-probability trades. This prevents the system from chasing thin-edge, high-probability bets that are unprofitable after fees.
+- **Strategy-specific Kelly** — Full Kelly for mathematically certain arb (0.80x), half for near-certain snipes (0.50x), quarter for uncertain forecasts (0.25x). This maximizes compounding on the highest-confidence trades.
+- **Tiered LLM funnel** — Most markets are eliminated before any LLM is called. The few that pass get a $0.001 Gemini Flash screen before the $0.15 full ensemble. This cuts LLM costs from ~$10/day to ~$1-2/day.
+- **Portfolio lock, not process lock** — Strategies only hold the asyncio.Lock during the 5ms DB read-check-write window, not during analysis. This means all three strategies analyze markets concurrently.
+- **Single process** — At $100-500 bankroll, the bottleneck is edge detection quality, not execution speed. A single async process is the right complexity level.
 
 ## Disclaimer
 
