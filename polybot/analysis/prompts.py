@@ -104,6 +104,33 @@ def _validate_snipe(data: dict) -> dict | None:
     return {"determined": determined, "outcome": outcome, "confidence": confidence, "reason": data.get("reason", "")}
 
 
+def build_challenge_prompt(question: str, initial_prob: float,
+                           market_price: float, reasoning: str) -> str:
+    """Second-pass prompt: reveal market price and ask LLM to revise."""
+    return f"""You previously estimated this prediction market question at {initial_prob:.0%} probability:
+
+## Question
+{question}
+
+## Your initial reasoning
+{reasoning}
+
+## Market information
+The market is currently trading at ${market_price:.2f} (i.e., the crowd estimates {market_price:.0%}).
+
+## Instructions
+The market price represents real money from many participants. If your estimate differs significantly from the market, one of you is likely wrong.
+
+Consider: What might the market know that you don't? Are there specific facts, deadlines, or developments that could explain the market price?
+
+After considering this, give your REVISED probability estimate.
+
+Return ONLY JSON:
+```json
+{{"probability": <float between 0.01 and 0.99>, "confidence": "<low|medium|high>", "reasoning": "<why you revised or maintained your estimate>"}}
+```"""
+
+
 def build_quick_screen_prompt(question: str, price: float, resolution_time: str) -> str:
     return f"""Prediction market question: {question}
 Current YES price: ${price}

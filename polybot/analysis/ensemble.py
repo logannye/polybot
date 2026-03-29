@@ -5,10 +5,12 @@ import anthropic
 import openai
 from google import genai
 from dataclasses import dataclass
-from polybot.analysis.prompts import build_analysis_prompt, parse_llm_response
+from polybot.analysis.prompts import (
+    build_analysis_prompt, build_challenge_prompt, parse_llm_response,
+)
 
 log = structlog.get_logger()
-CONFIDENCE_WEIGHTS = {"high": 1.0, "medium": 0.7, "low": 0.4}
+CONFIDENCE_WEIGHTS = {"high": 1.0, "medium": 0.6, "low": 0.2}
 
 
 @dataclass
@@ -24,6 +26,23 @@ class EnsembleResult:
     estimates: list[ModelEstimate]
     ensemble_probability: float
     stdev: float
+
+
+def shrink_toward_market(ensemble_prob: float, market_price: float,
+                         shrinkage: float = 0.30) -> float:
+    """
+    Apply Bayesian shrinkage toward the market price.
+
+    The market has real money behind it and is usually more calibrated than
+    LLMs on extreme-priced markets. LLMs exhibit central tendency bias:
+    they rarely output probabilities below 0.15 or above 0.85, so they
+    systematically overestimate edge on extreme-priced markets.
+
+    shrinkage=0.30 means: move 30% of the way from the raw ensemble
+    estimate toward the market price. This reduces a 43% raw edge to ~30%.
+    The calibration correction system will tune this over time.
+    """
+    return ensemble_prob * (1 - shrinkage) + market_price * shrinkage
 
 
 def aggregate_estimates(estimates: list[ModelEstimate], trust_weights: dict[str, float]) -> EnsembleResult:
@@ -110,6 +129,30 @@ class EnsembleAnalyzer:
             confidence=parsed["confidence"],
             reasoning=parsed["reasoning"],
         )
+
+    async def challenge_estimate(self, question: str, initial_prob: float,
+                                  market_price: float, reasoning: str) -> float | None:
+        """
+        Second-pass: reveal market price to Gemini Flash and ask it to revise.
+        Returns revised probability or None on failure.
+
+        Only triggered when the initial ensemble disagrees with the market
+        by more than 15%. This is the cheapest LLM call (~$0.001) and acts
+        as a sanity check against LLM central tendency bias.
+        """
+        prompt = build_challenge_prompt(question, initial_prob, market_price, reasoning)
+        try:
+            response = await self._google.aio.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt)
+            parsed = parse_llm_response(response.text)
+            if parsed:
+                log.info("challenge_revised", initial=initial_prob,
+                         revised=parsed["probability"], market=market_price,
+                         reasoning=parsed["reasoning"][:100])
+                return parsed["probability"]
+        except Exception as e:
+            log.error("challenge_failed", error=str(e))
+        return None
 
     async def quick_screen(self, question: str, price: float, resolution_time: str) -> float | None:
         """

@@ -16,6 +16,7 @@ from polybot.analysis.quant import (
     QuantSignals,
 )
 from polybot.trading.kelly import compute_kelly, compute_position_size
+from polybot.analysis.ensemble import shrink_toward_market
 from polybot.trading.risk import PortfolioState, TradeProposal, bankroll_kelly_adjustment
 from polybot.notifications.email import format_trade_email
 
@@ -209,19 +210,30 @@ class EnsembleForecastStrategy(Strategy):
             log.info("quant_skip", market=candidate.polymarket_id, composite=composite)
             return
 
-        # 7. Apply calibration correction if available
-        prob = ensemble_result.ensemble_probability
+        # 7. Market-efficiency shrinkage + calibration correction
+        raw_prob = ensemble_result.ensemble_probability
+        prob = shrink_toward_market(raw_prob, candidate.current_price, shrinkage=0.30)
+
+        # Challenge pass: if ensemble disagrees with market by >15%,
+        # ask Gemini Flash to revise after seeing the market price
+        disagreement = abs(raw_prob - candidate.current_price)
+        if disagreement > 0.15:
+            best_reasoning = max(ensemble_result.estimates,
+                                 key=lambda e: abs(e.probability - candidate.current_price)).reasoning
+            revised = await self._ensemble.challenge_estimate(
+                candidate.question, raw_prob, candidate.current_price, best_reasoning)
+            if revised is not None:
+                # Blend: 50% shrunk ensemble + 50% challenge revision
+                prob = prob * 0.5 + revised * 0.5
+                log.info("challenge_blended", market=candidate.polymarket_id,
+                         raw=raw_prob, shrunk=shrink_toward_market(raw_prob, candidate.current_price),
+                         revised=revised, final=prob)
+
         if calibration_corrections:
             correction = calibration_corrections.get(candidate.category, 0.0)
             prob = max(0.01, min(0.99, prob + correction))
-            if correction != 0.0:
-                log.debug(
-                    "calibration_applied",
-                    market=candidate.polymarket_id,
-                    category=candidate.category,
-                    correction=correction,
-                    adjusted_prob=prob,
-                )
+
+        prob = max(0.01, min(0.99, prob))
 
         # 8a. Fee-adjusted Kelly
         kelly_result = compute_kelly(
@@ -255,12 +267,15 @@ class EnsembleForecastStrategy(Strategy):
             growth_threshold=getattr(ctx.settings, "bankroll_growth_threshold", 500.0),
         )
 
-        # 8c. Position size
+        # 8c. Edge skepticism — large edges are more likely miscalibration
+        skepticism = ctx.risk_manager.edge_skepticism_discount(kelly_result.edge)
+
+        # 8d. Position size
         size = compute_position_size(
             bankroll=bankroll,
             kelly_fraction=kelly_result.kelly_fraction,
             kelly_mult=effective_kelly,
-            confidence_mult=conf_mult,
+            confidence_mult=conf_mult * skepticism,
             max_single_pct=self.max_single_pct,
             min_trade_size=getattr(self._settings, "min_trade_size", 1.0),
         )
