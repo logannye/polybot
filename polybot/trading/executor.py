@@ -4,10 +4,13 @@ from datetime import datetime, timezone
 log = structlog.get_logger()
 
 
-def compute_limit_price(side: str, best_bid: float, best_ask: float, is_exit: bool = False) -> float:
-    spread = best_ask - best_bid
+def compute_limit_price(side: str, best_bid: float, best_ask: float,
+                        is_exit: bool = False, cross_spread: bool = False) -> float:
     if is_exit:
         return round(best_bid, 4)
+    if cross_spread:
+        return round(best_ask, 4)
+    spread = best_ask - best_bid
     tick = max(0.001, spread * 0.1)
     price = best_bid + tick
     price = min(price, best_ask)
@@ -24,7 +27,8 @@ class OrderExecutor:
     def should_cancel_order(self, elapsed_seconds: float) -> bool:
         return elapsed_seconds > self._fill_timeout_seconds
 
-    async def place_order(self, token_id, side, size_usd, price, market_id, analysis_id):
+    async def place_order(self, token_id, side, size_usd, price, market_id, analysis_id,
+                          strategy: str = "forecast"):
         shares = self._wallet.compute_shares(size_usd, price)
         if shares <= 0:
             return None
@@ -35,13 +39,24 @@ class OrderExecutor:
             "price": str(price),
             "type": "GTC",
         }
-        log.info("placing_order", market_id=market_id, side=side, size_usd=size_usd, price=price, shares=shares)
+        log.info("placing_order", market_id=market_id, side=side, size_usd=size_usd,
+                 price=price, shares=shares, strategy=strategy)
         trade_id = await self._db.fetchval(
-            """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd, shares, kelly_inputs, status)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'open') RETURNING id""",
-            market_id, analysis_id, side, price, size_usd, shares, "{}",
-        )
+            """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd, shares, kelly_inputs, status, strategy)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8) RETURNING id""",
+            market_id, analysis_id, side, price, size_usd, shares, "{}", strategy)
         return {"trade_id": trade_id, "order": order_data, "shares": shares}
+
+    async def place_multi_leg_order(self, legs: list[dict], strategy: str = "arbitrage") -> list[dict | None]:
+        results = []
+        for leg in legs:
+            result = await self.place_order(
+                token_id=leg["token_id"], side=leg["side"],
+                size_usd=leg["size_usd"], price=leg["price"],
+                market_id=leg["market_id"], analysis_id=leg.get("analysis_id"),
+                strategy=strategy)
+            results.append(result)
+        return results
 
     async def close_position(self, trade_id, exit_price, exit_reason, shares, entry_price, side):
         if side == "YES":

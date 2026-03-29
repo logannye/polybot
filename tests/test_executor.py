@@ -1,6 +1,7 @@
 import pytest
 from polybot.trading.executor import OrderExecutor, compute_limit_price
 from polybot.trading.wallet import WalletManager
+from unittest.mock import AsyncMock, MagicMock
 
 
 class TestComputeLimitPrice:
@@ -39,3 +40,49 @@ class TestOrderExecutor:
 
     def test_should_not_cancel_fresh_order(self, executor):
         assert executor.should_cancel_order(elapsed_seconds=60) is False
+
+
+def test_compute_limit_price_cross_spread():
+    price = compute_limit_price("YES", best_bid=0.40, best_ask=0.42, cross_spread=True)
+    assert price == 0.42
+
+
+def test_compute_limit_price_normal():
+    price = compute_limit_price("YES", best_bid=0.40, best_ask=0.42, cross_spread=False)
+    assert 0.40 < price <= 0.42
+
+
+def test_compute_limit_price_exit_unchanged():
+    price = compute_limit_price("YES", best_bid=0.40, best_ask=0.42, is_exit=True)
+    assert price == 0.40
+
+
+@pytest.mark.asyncio
+async def test_place_order_records_strategy():
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    wallet = MagicMock()
+    wallet.compute_shares = MagicMock(return_value=10.0)
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    result = await executor.place_order(
+        token_id="tok", side="YES", size_usd=5.0, price=0.50,
+        market_id=1, analysis_id=1, strategy="snipe")
+    assert result is not None
+    call_args = db.fetchval.call_args
+    assert "strategy" in call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_place_multi_leg_order():
+    db = AsyncMock()
+    db.fetchval = AsyncMock(side_effect=[1, 2])
+    wallet = MagicMock()
+    wallet.compute_shares = MagicMock(return_value=10.0)
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    legs = [
+        {"token_id": "tok_a", "side": "YES", "price": 0.45, "size_usd": 5.0, "market_id": 1, "analysis_id": None},
+        {"token_id": "tok_b", "side": "YES", "price": 0.35, "size_usd": 5.0, "market_id": 2, "analysis_id": None},
+    ]
+    results = await executor.place_multi_leg_order(legs, strategy="arbitrage")
+    assert len(results) == 2
+    assert all(r is not None for r in results)
