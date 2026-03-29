@@ -10,7 +10,7 @@ log = structlog.get_logger()
 
 class Engine:
     def __init__(self, db, scanner, researcher, ensemble, executor, recorder,
-                 risk_manager, settings, email_notifier, position_manager):
+                 risk_manager, settings, email_notifier, position_manager, clob=None):
         self._db = db
         self._scanner = scanner
         self._researcher = researcher
@@ -21,6 +21,7 @@ class Engine:
         self._settings = settings
         self._email = email_notifier
         self._position_manager = position_manager
+        self._clob = clob
         self._context = TradingContext(
             db=db, scanner=scanner, risk_manager=risk_manager,
             portfolio_lock=asyncio.Lock(), executor=executor,
@@ -38,6 +39,9 @@ class Engine:
         tasks = [self._run_strategy(s) for s in self._strategies]
         tasks.append(self._run_periodic(self._health_check, self._settings.health_check_interval))
         tasks.append(self._run_periodic(self._maybe_self_assess, 60))
+        if not self._settings.dry_run and self._clob:
+            tasks.append(self._run_periodic(self._fill_monitor, 30))
+        tasks.append(self._run_periodic(self._resolution_monitor, 60))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):
@@ -79,6 +83,14 @@ class Engine:
                     if resolved is not None:
                         await self._recorder.record_resolution(trade["id"], resolved)
                         log.info("reconciled_stale_trade", trade_id=trade["id"], outcome=resolved)
+            # Sync bankroll from CLOB on startup (live mode only)
+            if not self._settings.dry_run and self._clob:
+                try:
+                    balance = await self._clob.get_balance()
+                    await self._db.execute("UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
+                    log.info("startup_bankroll_synced", balance=balance)
+                except Exception as e:
+                    log.error("startup_bankroll_sync_failed", error=str(e))
         except Exception as e:
             log.error("reconciliation_error", error=str(e))
 
@@ -114,6 +126,96 @@ class Engine:
                                 pct_elapsed=elapsed / total_duration)
         except Exception as e:
             log.error("stale_check_failed", error=str(e))
+
+    async def _fill_monitor(self):
+        open_orders = await self._db.fetch(
+            "SELECT * FROM trades WHERE status = 'open' AND clob_order_id IS NOT NULL")
+        for trade in open_orders:
+            try:
+                status = await self._clob.get_order_status(trade["clob_order_id"])
+            except Exception as e:
+                log.error("fill_check_failed", trade_id=trade["id"], error=str(e))
+                continue
+            if status["status"] == "matched":
+                await self._db.execute("UPDATE trades SET status = 'filled' WHERE id = $1", trade["id"])
+                try:
+                    balance = await self._clob.get_balance()
+                    await self._db.execute("UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
+                except Exception as e:
+                    log.error("bankroll_sync_failed", error=str(e))
+                await self._context.email_notifier.send(
+                    f"Trade filled: order {trade['clob_order_id']}",
+                    f"<p>Trade #{trade['id']} filled. Strategy: {trade['strategy']}</p>")
+                log.info("order_filled", trade_id=trade["id"], clob_order_id=trade["clob_order_id"])
+            elif status["status"] == "cancelled":
+                await self._db.execute("UPDATE trades SET status = 'cancelled' WHERE id = $1", trade["id"])
+                await self._db.execute(
+                    "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
+                    float(trade["position_size_usd"]))
+                log.info("order_cancelled_externally", trade_id=trade["id"])
+            elif status["status"] == "live":
+                elapsed = (datetime.now(timezone.utc) - trade["opened_at"]).total_seconds()
+                timeout = (self._settings.arb_fill_timeout_seconds if trade["strategy"] == "arbitrage"
+                           else self._settings.fill_timeout_seconds)
+                if elapsed > timeout:
+                    await self._clob.cancel_order(trade["clob_order_id"])
+                    await self._db.execute("UPDATE trades SET status = 'cancelled' WHERE id = $1", trade["id"])
+                    await self._db.execute(
+                        "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
+                        float(trade["position_size_usd"]))
+                    log.info("order_timed_out", trade_id=trade["id"], elapsed=elapsed)
+
+    async def _resolution_monitor(self):
+        resolvable = await self._db.fetch(
+            "SELECT * FROM trades WHERE status IN ('filled', 'dry_run')")
+        now = datetime.now(timezone.utc)
+        for trade in resolvable:
+            market = await self._db.fetchrow(
+                "SELECT * FROM markets WHERE id = $1", trade["market_id"])
+            if not market or market["resolution_time"] > now:
+                continue
+            try:
+                outcome = await self._scanner.fetch_market_resolution(market["polymarket_id"])
+            except Exception as e:
+                log.error("resolution_check_failed", trade_id=trade["id"], error=str(e))
+                continue
+            if outcome is None:
+                continue
+            if trade["status"] == "filled":
+                await self._recorder.record_resolution(trade["id"], outcome)
+                await self._db.execute(
+                    "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
+                    float(trade["position_size_usd"]))
+                # Update daily_pnl
+                resolved_trade = await self._db.fetchrow("SELECT pnl FROM trades WHERE id = $1", trade["id"])
+                if resolved_trade and resolved_trade["pnl"] is not None:
+                    await self._db.execute(
+                        "UPDATE system_state SET daily_pnl = daily_pnl + $1 WHERE id = 1",
+                        float(resolved_trade["pnl"]))
+                if self._clob:
+                    try:
+                        balance = await self._clob.get_balance()
+                        await self._db.execute("UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
+                    except Exception as e:
+                        log.error("bankroll_sync_failed", error=str(e))
+                log.info("trade_resolved", trade_id=trade["id"], outcome=outcome)
+            elif trade["status"] == "dry_run":
+                entry = float(trade["entry_price"])
+                shares = float(trade["shares"])
+                if trade["side"] == "YES":
+                    pnl = shares * (outcome - entry)
+                else:
+                    pnl = shares * ((1 - outcome) - (1 - entry))
+                await self._db.execute(
+                    """UPDATE trades SET status='dry_run_resolved', pnl=$1, exit_price=$2,
+                       exit_reason='resolution', closed_at=$3 WHERE id=$4""",
+                    pnl, float(outcome), now, trade["id"])
+                await self._db.execute(
+                    """UPDATE system_state SET bankroll = bankroll + $1,
+                       total_deployed = total_deployed - $2, daily_pnl = daily_pnl + $1
+                       WHERE id = 1""",
+                    pnl, float(trade["position_size_usd"]))
+                log.info("dry_run_resolved", trade_id=trade["id"], outcome=outcome, simulated_pnl=pnl)
 
     async def _maybe_self_assess(self):
         now = datetime.now(timezone.utc)
@@ -234,6 +336,9 @@ class Engine:
 
         await self._context.email_notifier.send(
             f"[POLYBOT] Daily Report — {now.strftime('%Y-%m-%d')}", f"<pre>{report}</pre>")
+
+        # Reset daily P&L for next day
+        await self._db.execute("UPDATE system_state SET daily_pnl = 0 WHERE id = 1")
 
         self._last_self_assess = now
         log.info("self_assessment_complete", kelly=new_kelly, edge=new_edge, max_dd=max_dd)
