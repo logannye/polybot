@@ -231,6 +231,32 @@ uv run python -m polybot
 
 The bot starts all three strategies immediately. A dashboard is available at `http://localhost:8080`.
 
+### Going live
+
+1. Derive your CLOB credentials:
+
+```bash
+uv run python scripts/derive_creds.py
+# Copy the output into your .env file
+```
+
+2. Run in observation mode first (default):
+
+```bash
+uv run python -m polybot
+# DRY_RUN=true by default — monitors and records but doesn't trade
+# Watch daily report emails for 24-48h
+```
+
+3. When ready for live trading:
+
+```bash
+# In .env, set:
+# DRY_RUN=false
+# STARTING_BANKROLL=20  (start small)
+uv run python -m polybot
+```
+
 ### Running on a VPS (recommended)
 
 For 24/7 operation on a $5/mo VPS (DigitalOcean, Hetzner):
