@@ -10,6 +10,7 @@ from polybot.analysis.ensemble import EnsembleAnalyzer
 from polybot.trading.executor import OrderExecutor
 from polybot.trading.wallet import WalletManager
 from polybot.trading.risk import RiskManager
+from polybot.trading.clob import ClobGateway
 from polybot.learning.recorder import TradeRecorder
 from polybot.notifications.email import EmailNotifier
 from polybot.markets.websocket import PositionTracker
@@ -45,9 +46,23 @@ async def main():
         openai_key=settings.openai_api_key,
         google_key=settings.google_api_key)
     wallet = WalletManager(private_key=settings.polymarket_private_key)
+    clob = None
+    if settings.polymarket_api_secret and settings.polymarket_api_passphrase:
+        clob = ClobGateway(
+            host="https://clob.polymarket.com",
+            chain_id=settings.polymarket_chain_id,
+            private_key=settings.polymarket_private_key,
+            api_key=settings.polymarket_api_key,
+            api_secret=settings.polymarket_api_secret,
+            api_passphrase=settings.polymarket_api_passphrase)
+
+    if not settings.dry_run and clob is None:
+        log.error("live_mode_requires_clob_credentials")
+        return
     executor = OrderExecutor(
         scanner=scanner, wallet=wallet, db=db,
-        fill_timeout_seconds=settings.fill_timeout_seconds)
+        fill_timeout_seconds=settings.fill_timeout_seconds,
+        clob=clob, dry_run=settings.dry_run)
     recorder = TradeRecorder(
         db=db, cold_start_trades=settings.cold_start_trades,
         brier_ema_alpha=settings.brier_ema_alpha)
@@ -61,7 +76,8 @@ async def main():
         min_trade_size=settings.min_trade_size,
         book_depth_max_pct=settings.book_depth_max_pct)
     email_notifier = EmailNotifier(
-        api_key=settings.resend_api_key, to_email=settings.alert_email)
+        api_key=settings.resend_api_key, to_email=settings.alert_email,
+        dry_run=settings.dry_run)
     position_manager = PositionTracker(
         on_early_exit=lambda tid, p: executor.close_position(tid, p, "early_exit", 0, 0, "YES"),
         on_stop_loss=lambda tid, p: executor.close_position(tid, p, "stop_loss", 0, 0, "YES"))
@@ -70,7 +86,9 @@ async def main():
         db=db, scanner=scanner, researcher=researcher, ensemble=ensemble,
         executor=executor, recorder=recorder, risk_manager=risk_manager,
         settings=settings, email_notifier=email_notifier,
-        position_manager=position_manager)
+        position_manager=position_manager, clob=clob)
+
+    log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
     engine.add_strategy(ArbitrageStrategy(settings=settings))
     engine.add_strategy(ResolutionSnipeStrategy(settings=settings, ensemble=ensemble))
