@@ -22,6 +22,3 @@ class WalletManager:
         if price <= 0:
             return 0.0
         return usd_amount / price
-
-    def sign_order(self, order_data: dict) -> dict:
-        return {"signature": "0x...", "order": order_data}

@@ -21,7 +21,7 @@ def make_context():
     return TradingContext(
         db=MagicMock(), scanner=MagicMock(), risk_manager=MagicMock(),
         portfolio_lock=asyncio.Lock(), executor=MagicMock(),
-        email_notifier=MagicMock(), settings=MagicMock())
+        email_notifier=MagicMock(), settings=MagicMock(), clob=None)
 
 
 def test_strategy_abc_requires_run_once():

@@ -13,6 +13,7 @@ class TradingContext:
     executor: Any
     email_notifier: Any
     settings: Any
+    clob: Any = None
 
 
 class Strategy(ABC):
