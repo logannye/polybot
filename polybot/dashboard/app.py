@@ -90,4 +90,41 @@ def create_app(db) -> FastAPI:
             for r in rows
         ]
 
+    @app.get("/strategies")
+    async def strategies():
+        rows = await db.fetch("SELECT * FROM strategy_performance ORDER BY strategy")
+        return [
+            {
+                "strategy": r["strategy"],
+                "total_trades": r["total_trades"],
+                "winning_trades": r["winning_trades"],
+                "total_pnl": float(r["total_pnl"]),
+                "avg_edge": float(r["avg_edge"]),
+                "enabled": r["enabled"],
+                "last_updated": str(r["last_updated"]),
+            }
+            for r in rows
+        ]
+
+    @app.get("/arb")
+    async def arb_opportunities():
+        rows = await db.fetch(
+            """SELECT t.*, m.question FROM trades t
+               JOIN markets m ON t.market_id = m.id
+               WHERE t.strategy = 'arbitrage'
+               ORDER BY t.opened_at DESC LIMIT 20""")
+        return [
+            {
+                "id": t["id"],
+                "market": t["question"],
+                "side": t["side"],
+                "entry_price": float(t["entry_price"]),
+                "size_usd": float(t["position_size_usd"]),
+                "pnl": float(t["pnl"]) if t["pnl"] else None,
+                "status": t["status"],
+                "opened_at": str(t["opened_at"]),
+            }
+            for t in rows
+        ]
+
     return app

@@ -53,3 +53,28 @@ class TestDashboard:
         ])
         resp = client.get("/models")
         assert resp.status_code == 200
+
+    def test_strategies(self, client, mock_db):
+        mock_db.fetch = AsyncMock(return_value=[
+            {"strategy": "arbitrage", "total_trades": 10, "winning_trades": 8,
+             "total_pnl": 5.0, "avg_edge": 0.03, "enabled": True,
+             "last_updated": "2026-03-28T00:00:00Z"},
+        ])
+        resp = client.get("/strategies")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["strategy"] == "arbitrage"
+        assert data[0]["enabled"] is True
+
+    def test_arb(self, client, mock_db):
+        mock_db.fetch = AsyncMock(return_value=[
+            {"id": 1, "question": "Test arb?", "side": "YES", "entry_price": 0.45,
+             "position_size_usd": 10.0, "pnl": 0.50, "status": "closed",
+             "opened_at": "2026-03-28T00:00:00Z"},
+        ])
+        resp = client.get("/arb")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["market"] == "Test arb?"
