@@ -1,3 +1,4 @@
+import asyncio
 import resend
 import structlog
 
@@ -105,12 +106,15 @@ class EmailNotifier:
     async def send(self, subject: str, html: str) -> None:
         formatted_subject = self._format_subject(subject)
         try:
-            resend.Emails.send({
-                "from": "Polybot <alerts@polybot.dev>",
-                "to": [self._to],
-                "subject": formatted_subject,
-                "html": html,
-            })
+            await asyncio.to_thread(
+                resend.Emails.send,
+                {
+                    "from": "Polybot <alerts@polybot.dev>",
+                    "to": [self._to],
+                    "subject": formatted_subject,
+                    "html": html,
+                },
+            )
             log.info("email_sent", subject=formatted_subject)
         except Exception as e:
             log.error("email_failed", subject=formatted_subject, error=str(e))

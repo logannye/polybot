@@ -85,6 +85,25 @@ class RiskManager:
             return True, until
         return False, None
 
+    async def get_portfolio_state(self, db) -> PortfolioState:
+        state = await db.fetchrow("SELECT * FROM system_state WHERE id = 1")
+        open_trades = await db.fetch(
+            """SELECT t.position_size_usd, m.category
+               FROM trades t JOIN markets m ON t.market_id = m.id
+               WHERE t.status IN ('open', 'filled', 'dry_run')""")
+        cat_deployed: dict[str, float] = {}
+        for t in open_trades:
+            cat = t["category"]
+            cat_deployed[cat] = cat_deployed.get(cat, 0.0) + float(t["position_size_usd"])
+        return PortfolioState(
+            bankroll=float(state["bankroll"]),
+            total_deployed=float(state["total_deployed"]),
+            daily_pnl=float(state["daily_pnl"]),
+            open_count=len(open_trades),
+            category_deployed=cat_deployed,
+            circuit_breaker_until=state.get("circuit_breaker_until"),
+        )
+
     @staticmethod
     def confidence_multiplier(stdev, quant_score, stdev_low, stdev_high,
                               mult_low, mult_mid, mult_high, quant_neg_mult):

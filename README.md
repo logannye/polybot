@@ -207,6 +207,13 @@ DATABASE_URL=postgresql://polybot:password@localhost:5432/polybot
 RESEND_API_KEY=               # For email alerts
 ALERT_EMAIL=you@example.com   # Where to send alerts and daily reports
 
+# Polymarket CLOB L2 Credentials (run: uv run python scripts/derive_creds.py)
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
+
+# Dry-run mode (set to false for live trading)
+DRY_RUN=true
+
 # Bot Config (all optional — defaults shown)
 STARTING_BANKROLL=300.00
 KELLY_MULT=0.25
@@ -306,7 +313,7 @@ Or manually: `ssh polybot@vps "cd /opt/polybot && git pull && uv sync && sudo sy
 ## Testing
 
 ```bash
-uv run pytest tests/ -v                                    # Run all 172 tests
+uv run pytest tests/ -v                                    # Run all 188 tests
 uv run pytest tests/ --cov=polybot --cov-report=term       # With coverage
 uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 ```

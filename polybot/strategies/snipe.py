@@ -127,8 +127,33 @@ class ResolutionSnipeStrategy(Strategy):
                 risk_result = ctx.risk_manager.check(portfolio, proposal, max_single_pct=self.max_single_pct)
                 if not risk_result.allowed:
                     continue
-                await ctx.db.execute(
-                    "UPDATE system_state SET total_deployed = total_deployed + $1 WHERE id = 1", size)
+
+                # Upsert market record
+                market_id = await ctx.db.fetchval(
+                    """INSERT INTO markets (polymarket_id, question, category, resolution_time, current_price)
+                       VALUES ($1, $2, $3, $4, $5)
+                       ON CONFLICT (polymarket_id) DO UPDATE SET current_price=$5, last_updated=NOW()
+                       RETURNING id""",
+                    m["polymarket_id"], m["question"], m.get("category", "unknown"),
+                    m["resolution_time"], m["yes_price"],
+                )
+
+                # Create analysis record for the snipe
+                analysis_id = await ctx.db.fetchval(
+                    """INSERT INTO analyses (market_id, model_estimates, ensemble_probability,
+                       ensemble_stdev, quant_signals, edge)
+                       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
+                    market_id, [], buy_price, 0.0, {}, net_edge,
+                )
+
+                token_id = m.get("yes_token_id", "") if side == "YES" else m.get("no_token_id", "")
+                result = await ctx.executor.place_order(
+                    token_id=token_id, side=side, size_usd=size,
+                    price=buy_price, market_id=market_id,
+                    analysis_id=analysis_id, strategy=self.name,
+                )
+                if not result:
+                    continue
 
             log.info("snipe_trade", market=m["polymarket_id"], side=side, price=buy_price,
                      edge=net_edge, size=size, tier=tier)

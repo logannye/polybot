@@ -74,6 +74,9 @@ class EnsembleForecastStrategy(Strategy):
                 book_depth=m.get("book_depth", 0),
                 last_analyzed_at=last_analysis["timestamp"] if last_analysis else None,
                 previous_price=float(last_analysis["ensemble_probability"]) if last_analysis else None,
+                yes_token_id=m.get("yes_token_id", ""),
+                no_token_id=m.get("no_token_id", ""),
+                no_price=m.get("no_price", 0.0),
             ))
 
         filtered = filter_markets(
@@ -189,13 +192,8 @@ class EnsembleForecastStrategy(Strategy):
         calibration_corrections: dict[str, float],
         ctx: TradingContext,
     ) -> None:
-        # 6a. Web research + ensemble (parallel)
-        research, ensemble_result = await asyncio.gather(
-            self._researcher.search(candidate.question),
-            self._ensemble.analyze(candidate.question, "", trust_weights),
-        )
-
-        # Re-run ensemble with research context
+        # 6a. Web research first, then ensemble with full context
+        research = await self._researcher.search(candidate.question)
         ensemble_result = await self._ensemble.analyze(
             candidate.question, research, trust_weights
         )
@@ -225,7 +223,7 @@ class EnsembleForecastStrategy(Strategy):
         kelly_result = compute_kelly(
             prob,
             candidate.current_price,
-            fee_rate=getattr(self._settings, "fee_rate", 0.02),
+            fee_rate=self._settings.polymarket_fee_rate,
         )
         if kelly_result.edge < edge_threshold:
             log.debug("low_edge", market=candidate.polymarket_id, edge=kelly_result.edge)
@@ -277,7 +275,7 @@ class EnsembleForecastStrategy(Strategy):
         )
 
         # Record analysis
-        await ctx.db.fetchval(
+        analysis_id = await ctx.db.fetchval(
             """INSERT INTO analyses (market_id, model_estimates, ensemble_probability,
                ensemble_stdev, quant_signals, edge, web_research_summary)
                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id""",
@@ -313,6 +311,9 @@ class EnsembleForecastStrategy(Strategy):
                 log.info("risk_rejected", market=candidate.polymarket_id, reason=risk_result.reason)
                 return
 
+            token_id = candidate.yes_token_id if kelly_result.side == "YES" else candidate.no_token_id
+            price = candidate.current_price if kelly_result.side == "YES" else candidate.no_price
+
             log.info(
                 "forecast_trade",
                 strategy=self.name,
@@ -322,12 +323,14 @@ class EnsembleForecastStrategy(Strategy):
                 edge=kelly_result.edge,
                 ensemble_prob=prob,
             )
-            # Execution delegated to executor via context
-            await ctx.executor.execute_trade(
-                market_id=market_id,
+            await ctx.executor.place_order(
+                token_id=token_id,
                 side=kelly_result.side,
                 size_usd=size,
-                price=candidate.current_price,
+                price=price,
+                market_id=market_id,
+                analysis_id=analysis_id,
+                strategy=self.name,
             )
             await ctx.email_notifier.send(
                 f"[POLYBOT] Trade executed: {candidate.question[:60]}",

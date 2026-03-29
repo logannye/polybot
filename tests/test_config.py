@@ -3,7 +3,8 @@ import pytest
 from polybot.core.config import Settings
 
 
-def test_settings_loads_defaults():
+def test_settings_loads_defaults(monkeypatch):
+    monkeypatch.delenv("STARTING_BANKROLL", raising=False)
     settings = Settings(
         polymarket_api_key="test",
         polymarket_private_key="0x" + "ab" * 32,
@@ -14,6 +15,7 @@ def test_settings_loads_defaults():
         database_url="postgresql://localhost/test",
         resend_api_key="test",
         alert_email="test@test.com",
+        _env_file=None,
     )
     assert settings.starting_bankroll == 300.0
     assert settings.kelly_mult == 0.25

@@ -15,6 +15,9 @@ class MarketCandidate:
     book_depth: float
     last_analyzed_at: datetime | None = None
     previous_price: float | None = None
+    yes_token_id: str = ""
+    no_token_id: str = ""
+    no_price: float = 0.0
 
 
 def filter_markets(markets, resolution_hours_max=72, min_book_depth=500.0, min_price=0.05, max_price=0.95, cooldown_minutes=30, price_move_threshold=0.03):

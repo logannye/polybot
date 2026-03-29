@@ -1,6 +1,7 @@
 import asyncio
 import structlog
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from polybot.strategies.base import Strategy, TradingContext
 from polybot.trading.risk import TradeProposal, bankroll_kelly_adjustment
@@ -147,7 +148,7 @@ class ArbitrageStrategy(Strategy):
                 polymarket_id=m["polymarket_id"],
                 yes_price=m["yes_price"],
                 no_price=m["no_price"],
-                fee_rate=getattr(self._settings, "fee_rate", 0.02),
+                fee_rate=self._settings.polymarket_fee_rate,
             )
             if opp:
                 log.info("complement_arb_found", market=m["polymarket_id"],
@@ -159,7 +160,7 @@ class ArbitrageStrategy(Strategy):
         for slug, group_markets in groups.items():
             opp = detect_exhaustive_arb(
                 group_markets,
-                fee_rate=getattr(self._settings, "fee_rate", 0.02),
+                fee_rate=self._settings.polymarket_fee_rate,
             )
             if opp:
                 log.info("exhaustive_arb_found", group=slug, side=opp.side,
@@ -206,7 +207,7 @@ class ArbitrageStrategy(Strategy):
                 log.info("arb_risk_blocked", reason=check.reason)
                 return
 
-            legs = self._build_legs(opp, size_usd)
+            legs = await self._build_legs(opp, size_usd, ctx)
             if not legs:
                 return
 
@@ -219,31 +220,53 @@ class ArbitrageStrategy(Strategy):
                 format_trade_email(event="executed", market=f"Arb: {opp.arb_type}", side=opp.side,
                                    size=size_usd, price=0.0, edge=opp.net_edge))
 
-    def _build_legs(self, opp: ArbOpportunity, size_usd: float) -> list[dict]:
+    async def _upsert_market(self, m: dict, ctx: TradingContext) -> int:
+        return await ctx.db.fetchval(
+            """INSERT INTO markets (polymarket_id, question, category, resolution_time, current_price)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (polymarket_id) DO UPDATE SET current_price=$5, last_updated=NOW()
+               RETURNING id""",
+            m["polymarket_id"], m.get("question", ""), m.get("category", "unknown"),
+            m.get("resolution_time", datetime.now(timezone.utc)), m["yes_price"],
+        )
+
+    async def _create_arb_analysis(self, market_id: int, edge: float, ctx: TradingContext) -> int:
+        return await ctx.db.fetchval(
+            """INSERT INTO analyses (market_id, model_estimates, ensemble_probability,
+               ensemble_stdev, quant_signals, edge)
+               VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
+            market_id, [], 0.0, 0.0, {}, edge,
+        )
+
+    async def _build_legs(self, opp: ArbOpportunity, size_usd: float, ctx: TradingContext) -> list[dict]:
         legs: list[dict] = []
         if opp.arb_type == "complement":
             m = opp.markets[0]
+            market_id = await self._upsert_market(m, ctx)
+            analysis_id = await self._create_arb_analysis(market_id, opp.net_edge, ctx)
             legs = [
                 {
                     "token_id": m.get("yes_token_id", ""),
                     "side": "YES",
                     "size_usd": size_usd / 2,
                     "price": m["yes_price"],
-                    "market_id": m["polymarket_id"],
-                    "analysis_id": None,
+                    "market_id": market_id,
+                    "analysis_id": analysis_id,
                 },
                 {
                     "token_id": m.get("no_token_id", ""),
                     "side": "NO",
                     "size_usd": size_usd / 2,
                     "price": m["no_price"],
-                    "market_id": m["polymarket_id"],
-                    "analysis_id": None,
+                    "market_id": market_id,
+                    "analysis_id": analysis_id,
                 },
             ]
         elif opp.arb_type == "exhaustive":
             size_per_leg = size_usd / len(opp.markets)
             for m in opp.markets:
+                market_id = await self._upsert_market(m, ctx)
+                analysis_id = await self._create_arb_analysis(market_id, opp.net_edge, ctx)
                 if opp.side == "NO":
                     price = m.get("no_price", 1.0 - m["yes_price"])
                     token_id = m.get("no_token_id", "")
@@ -255,7 +278,7 @@ class ArbitrageStrategy(Strategy):
                     "side": opp.side,
                     "size_usd": size_per_leg,
                     "price": price,
-                    "market_id": m["polymarket_id"],
-                    "analysis_id": None,
+                    "market_id": market_id,
+                    "analysis_id": analysis_id,
                 })
         return legs
