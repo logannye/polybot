@@ -1,63 +1,59 @@
+import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone, timedelta
-from polybot.core.engine import Engine, CycleResult
+from unittest.mock import AsyncMock, MagicMock
+from polybot.core.engine import Engine
 
 
-class TestEngine:
-    @pytest.fixture
-    def mock_deps(self):
-        risk = MagicMock()
-        risk.check_circuit_breaker.return_value = (False, None)
-        return {
-            "db": AsyncMock(),
-            "scanner": AsyncMock(),
-            "researcher": AsyncMock(),
-            "ensemble": AsyncMock(),
-            "executor": AsyncMock(),
-            "recorder": AsyncMock(),
-            "risk_manager": risk,
-            "settings": MagicMock(),
-        }
+def make_engine():
+    return Engine(
+        db=AsyncMock(), scanner=MagicMock(), researcher=MagicMock(),
+        ensemble=MagicMock(), executor=MagicMock(), recorder=MagicMock(),
+        risk_manager=MagicMock(),
+        settings=MagicMock(health_check_interval=60, heartbeat_warn_seconds=600,
+                           heartbeat_critical_seconds=1800, balance_divergence_pct=0.05,
+                           strategy_kill_min_trades=50, daily_loss_limit_pct=0.15),
+        email_notifier=AsyncMock(), position_manager=MagicMock())
 
-    @pytest.mark.asyncio
-    async def test_cycle_skips_during_circuit_breaker(self, mock_deps):
-        mock_deps["db"].fetchrow = AsyncMock(return_value={
-            "circuit_breaker_until": datetime.now(timezone.utc) + timedelta(hours=6),
-            "bankroll": 300.0,
-            "total_deployed": 0.0,
-            "daily_pnl": -70.0,
-        })
-        mock_deps["settings"].scan_interval_seconds = 300
 
-        engine = Engine(**mock_deps)
-        result = await engine.run_cycle()
-        assert result.skipped is True
-        assert result.reason == "circuit_breaker"
+def test_engine_constructs():
+    engine = make_engine()
+    assert engine is not None
 
-    @pytest.mark.asyncio
-    async def test_cycle_processes_markets(self, mock_deps):
-        mock_deps["db"].fetchrow = AsyncMock(return_value={
-            "circuit_breaker_until": None,
-            "bankroll": 300.0,
-            "total_deployed": 50.0,
-            "daily_pnl": 5.0,
-            "kelly_mult": 0.25,
-            "edge_threshold": 0.05,
-            "category_scores": {},
-        })
-        mock_deps["db"].fetch = AsyncMock(return_value=[])
-        mock_deps["scanner"].fetch_markets = AsyncMock(return_value=[])
-        mock_deps["settings"].scan_interval_seconds = 300
-        mock_deps["settings"].resolution_hours_max = 72
-        mock_deps["settings"].min_book_depth = 500.0
-        mock_deps["settings"].min_price = 0.05
-        mock_deps["settings"].max_price = 0.95
-        mock_deps["settings"].cooldown_minutes = 30
-        mock_deps["settings"].price_move_threshold = 0.03
-        mock_deps["settings"].edge_threshold = 0.05
 
-        engine = Engine(**mock_deps)
-        result = await engine.run_cycle()
-        assert result.skipped is False
-        assert result.markets_scanned == 0
+def test_add_strategy():
+    engine = make_engine()
+    strategy = MagicMock()
+    strategy.name = "test"
+    engine.add_strategy(strategy)
+    assert len(engine._strategies) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_strategy_calls_run_once():
+    engine = make_engine()
+    strategy = MagicMock()
+    strategy.name = "test"
+    strategy.interval_seconds = 0.001
+    call_count = 0
+    async def fake_run_once(ctx):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            raise KeyboardInterrupt
+    strategy.run_once = fake_run_once
+    with pytest.raises(KeyboardInterrupt):
+        await engine._run_strategy(strategy)
+    assert call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_run_strategy_disables_after_5_errors():
+    engine = make_engine()
+    strategy = MagicMock()
+    strategy.name = "failing"
+    strategy.interval_seconds = 0.001
+    async def always_fail(ctx):
+        raise ValueError("boom")
+    strategy.run_once = always_fail
+    await engine._run_strategy(strategy)
+    assert engine._context.email_notifier.send.called
