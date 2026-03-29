@@ -13,23 +13,19 @@ def test_settings_loads_defaults():
         brave_api_key="test",
         database_url="postgresql://localhost/test",
         resend_api_key="test",
-        twilio_account_sid="test",
-        twilio_auth_token="test",
-        twilio_from_number="+10000000000",
         alert_email="test@test.com",
-        alert_phone="+10000000000",
     )
     assert settings.starting_bankroll == 300.0
     assert settings.kelly_mult == 0.25
     assert settings.edge_threshold == 0.05
     assert settings.scan_interval_seconds == 300
     assert settings.max_single_position_pct == 0.15
-    assert settings.max_total_deployed_pct == 0.50
+    assert settings.max_total_deployed_pct == 0.70
     assert settings.max_per_category_pct == 0.25
-    assert settings.min_trade_size == 2.0
-    assert settings.max_concurrent_positions == 8
-    assert settings.daily_loss_limit_pct == 0.20
-    assert settings.circuit_breaker_hours == 12
+    assert settings.min_trade_size == 1.0
+    assert settings.max_concurrent_positions == 12
+    assert settings.daily_loss_limit_pct == 0.15
+    assert settings.circuit_breaker_hours == 6
     assert settings.resolution_hours_max == 72
     assert settings.min_book_depth == 500.0
     assert settings.min_price == 0.05
@@ -53,7 +49,7 @@ def test_settings_loads_defaults():
     assert settings.confidence_mult_high == 0.4
     assert settings.quant_negative_mult == 0.75
     assert settings.cold_start_trades == 30
-    assert settings.brier_ema_alpha == 0.1
+    assert settings.brier_ema_alpha == 0.15
     assert settings.category_min_trades == 20
 
 
@@ -67,11 +63,7 @@ def test_settings_overrides():
         brave_api_key="test",
         database_url="postgresql://localhost/test",
         resend_api_key="test",
-        twilio_account_sid="test",
-        twilio_auth_token="test",
-        twilio_from_number="+10000000000",
         alert_email="test@test.com",
-        alert_phone="+10000000000",
         starting_bankroll=500.0,
         kelly_mult=0.30,
         edge_threshold=0.08,
@@ -79,3 +71,60 @@ def test_settings_overrides():
     assert settings.starting_bankroll == 500.0
     assert settings.kelly_mult == 0.30
     assert settings.edge_threshold == 0.08
+
+
+def test_v2_strategy_settings_defaults():
+    """Verify all v2 settings have correct defaults."""
+    required = {
+        "POLYMARKET_API_KEY": "test",
+        "POLYMARKET_PRIVATE_KEY": "0x" + "a" * 64,
+        "ANTHROPIC_API_KEY": "test",
+        "OPENAI_API_KEY": "test",
+        "GOOGLE_API_KEY": "test",
+        "BRAVE_API_KEY": "test",
+        "DATABASE_URL": "postgresql://localhost/test",
+        "RESEND_API_KEY": "test",
+        "ALERT_EMAIL": "test@test.com",
+    }
+    for k, v in required.items():
+        os.environ[k] = v
+    s = Settings()
+    assert s.arb_interval_seconds == 45
+    assert s.snipe_interval_seconds == 120
+    assert s.forecast_interval_seconds == 300
+    assert s.arb_kelly_mult == 0.80
+    assert s.snipe_kelly_mult == 0.50
+    assert s.forecast_kelly_mult == 0.25
+    assert s.arb_max_single_pct == 0.40
+    assert s.snipe_max_single_pct == 0.25
+    assert s.forecast_max_single_pct == 0.15
+    assert s.polymarket_fee_rate == 0.02
+    assert s.max_total_deployed_pct == 0.70
+    assert s.max_concurrent_positions == 12
+    assert s.daily_loss_limit_pct == 0.15
+    assert s.circuit_breaker_hours == 6
+    assert s.min_trade_size == 1.0
+    assert not hasattr(s, "twilio_account_sid")
+    assert not hasattr(s, "alert_phone")
+
+
+def test_v2_bankroll_tier_settings():
+    """Verify bankroll tier settings have correct defaults."""
+    required = {
+        "POLYMARKET_API_KEY": "test",
+        "POLYMARKET_PRIVATE_KEY": "0x" + "a" * 64,
+        "ANTHROPIC_API_KEY": "test",
+        "OPENAI_API_KEY": "test",
+        "GOOGLE_API_KEY": "test",
+        "BRAVE_API_KEY": "test",
+        "DATABASE_URL": "postgresql://localhost/test",
+        "RESEND_API_KEY": "test",
+        "ALERT_EMAIL": "test@test.com",
+    }
+    for k, v in required.items():
+        os.environ[k] = v
+    s = Settings()
+    assert s.bankroll_survival_threshold == 50.0
+    assert s.bankroll_growth_threshold == 500.0
+    assert s.post_breaker_cooldown_hours == 24
+    assert s.post_breaker_kelly_reduction == 0.50

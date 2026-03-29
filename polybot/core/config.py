@@ -11,11 +11,7 @@ class Settings(BaseSettings):
     brave_api_key: str
     database_url: str
     resend_api_key: str
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_from_number: str
-    alert_email: str
-    alert_phone: str
+    alert_email: str = "logan@galenhealth.org"
 
     # Bot parameters
     starting_bankroll: float = 300.0
@@ -23,14 +19,47 @@ class Settings(BaseSettings):
     edge_threshold: float = 0.05
     scan_interval_seconds: int = 300
 
+    # Strategy intervals
+    arb_interval_seconds: int = 45
+    snipe_interval_seconds: int = 120
+    forecast_interval_seconds: int = 300
+
+    # Strategy Kelly multipliers
+    arb_kelly_mult: float = 0.80
+    snipe_kelly_mult: float = 0.50
+    forecast_kelly_mult: float = 0.25
+
+    # Strategy position limits
+    arb_max_single_pct: float = 0.40
+    snipe_max_single_pct: float = 0.25
+    forecast_max_single_pct: float = 0.15
+
+    # Fee
+    polymarket_fee_rate: float = 0.02
+
+    # Snipe thresholds
+    snipe_hours_max: float = 6.0
+    snipe_min_confidence: float = 0.90
+    snipe_min_net_edge: float = 0.02
+
+    # Arb thresholds
+    arb_min_net_edge: float = 0.01
+    arb_fill_timeout_seconds: int = 30
+
+    # Pre-scoring
+    prescore_top_n: int = 5
+    quick_screen_max_edge_gap: float = 0.03
+
     # Portfolio limits
     max_single_position_pct: float = 0.15
-    max_total_deployed_pct: float = 0.50
+    max_total_deployed_pct: float = 0.70
     max_per_category_pct: float = 0.25
-    min_trade_size: float = 2.0
-    max_concurrent_positions: int = 8
-    daily_loss_limit_pct: float = 0.20
-    circuit_breaker_hours: int = 12
+    min_trade_size: float = 1.0
+    max_concurrent_positions: int = 12
+    daily_loss_limit_pct: float = 0.15
+    circuit_breaker_hours: int = 6
+    post_breaker_cooldown_hours: int = 24
+    post_breaker_kelly_reduction: float = 0.50
 
     # Market filters
     resolution_hours_max: int = 72
@@ -62,9 +91,23 @@ class Settings(BaseSettings):
     confidence_mult_high: float = 0.4
     quant_negative_mult: float = 0.75
 
+    # Bankroll tiers
+    bankroll_survival_threshold: float = 50.0
+    bankroll_normal_low: float = 50.0
+    bankroll_normal_high: float = 150.0
+    bankroll_growth_threshold: float = 500.0
+
     # Learning
     cold_start_trades: int = 30
-    brier_ema_alpha: float = 0.1
+    brier_ema_alpha: float = 0.15
     category_min_trades: int = 20
+    calibration_min_trades: int = 50
+    strategy_kill_min_trades: int = 50
+
+    # Monitoring
+    health_check_interval: int = 60
+    heartbeat_warn_seconds: int = 600
+    heartbeat_critical_seconds: int = 1800
+    balance_divergence_pct: float = 0.05
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
