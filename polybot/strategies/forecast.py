@@ -16,6 +16,7 @@ from polybot.analysis.quant import (
 )
 from polybot.trading.kelly import compute_kelly, compute_position_size
 from polybot.trading.risk import PortfolioState, TradeProposal, bankroll_kelly_adjustment
+from polybot.notifications.email import format_trade_email
 
 log = structlog.get_logger()
 
@@ -247,6 +248,9 @@ class EnsembleForecastStrategy(Strategy):
             bankroll=bankroll,
             base_kelly=kelly_mult,
             post_breaker_until=portfolio.circuit_breaker_until,
+            post_breaker_reduction=getattr(ctx.settings, "post_breaker_kelly_reduction", 0.50),
+            survival_threshold=getattr(ctx.settings, "bankroll_survival_threshold", 50.0),
+            growth_threshold=getattr(ctx.settings, "bankroll_growth_threshold", 500.0),
         )
 
         # 8c. Position size
@@ -325,6 +329,10 @@ class EnsembleForecastStrategy(Strategy):
                 size_usd=size,
                 price=candidate.current_price,
             )
+            await ctx.email_notifier.send(
+                f"[POLYBOT] Trade executed: {candidate.question[:60]}",
+                format_trade_email(event="executed", market=candidate.question, side=kelly_result.side,
+                                   size=size, price=candidate.current_price, edge=kelly_result.edge))
 
     async def _compute_quant(self, candidate: MarketCandidate, ctx: TradingContext) -> QuantSignals:
         try:

@@ -100,6 +100,21 @@ class Engine:
         except Exception:
             pass
 
+        # Stale positions check
+        try:
+            open_trades = await self._db.fetch(
+                """SELECT t.id, t.opened_at, m.resolution_time
+                   FROM trades t JOIN markets m ON t.market_id = m.id
+                   WHERE t.status = 'open'""")
+            for t in open_trades:
+                total_duration = (t["resolution_time"] - t["opened_at"]).total_seconds()
+                elapsed = (datetime.now(timezone.utc) - t["opened_at"]).total_seconds()
+                if total_duration > 0 and elapsed / total_duration > 0.80:
+                    log.warning("stale_position", trade_id=t["id"],
+                                pct_elapsed=elapsed / total_duration)
+        except Exception as e:
+            log.error("stale_check_failed", error=str(e))
+
     async def _maybe_self_assess(self):
         now = datetime.now(timezone.utc)
         if now.hour != 0:

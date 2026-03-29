@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from polybot.strategies.base import Strategy, TradingContext
 from polybot.trading.risk import TradeProposal, bankroll_kelly_adjustment
 from polybot.trading.kelly import compute_position_size
+from polybot.notifications.email import format_trade_email
 
 log = structlog.get_logger()
 
@@ -177,6 +178,9 @@ class ArbitrageStrategy(Strategy):
                 bankroll=bankroll,
                 base_kelly=self.kelly_multiplier,
                 post_breaker_until=state.circuit_breaker_until,
+                post_breaker_reduction=getattr(ctx.settings, "post_breaker_kelly_reduction", 0.50),
+                survival_threshold=getattr(ctx.settings, "bankroll_survival_threshold", 50.0),
+                growth_threshold=getattr(ctx.settings, "bankroll_growth_threshold", 500.0),
             )
 
             # Use net_edge as a proxy for kelly fraction (guaranteed-profit arb)
@@ -210,6 +214,10 @@ class ArbitrageStrategy(Strategy):
             placed = sum(1 for r in results if r is not None)
             log.info("arb_executed", arb_type=opp.arb_type, side=opp.side,
                      legs=len(legs), placed=placed, size_usd=size_usd)
+            await ctx.email_notifier.send(
+                f"[POLYBOT] Trade executed: arb ({opp.arb_type})",
+                format_trade_email(event="executed", market=f"Arb: {opp.arb_type}", side=opp.side,
+                                   size=size_usd, price=0.0, edge=opp.net_edge))
 
     def _build_legs(self, opp: ArbOpportunity, size_usd: float) -> list[dict]:
         legs: list[dict] = []

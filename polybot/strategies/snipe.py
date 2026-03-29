@@ -4,6 +4,7 @@ from polybot.strategies.base import Strategy, TradingContext
 from polybot.trading.risk import PortfolioState, TradeProposal, bankroll_kelly_adjustment
 from polybot.trading.kelly import compute_position_size
 from polybot.analysis.prompts import build_snipe_prompt, parse_snipe_response
+from polybot.notifications.email import format_trade_email
 
 log = structlog.get_logger()
 
@@ -102,7 +103,11 @@ class ResolutionSnipeStrategy(Strategy):
                 bankroll = float(state_row["bankroll"])
                 kelly_adj = bankroll_kelly_adjustment(
                     bankroll=bankroll, base_kelly=self.kelly_multiplier,
-                    post_breaker_until=state_row.get("post_breaker_until"))
+                    post_breaker_until=state_row.get("post_breaker_until"),
+                    post_breaker_reduction=ctx.settings.post_breaker_kelly_reduction,
+                    survival_threshold=ctx.settings.bankroll_survival_threshold,
+                    growth_threshold=ctx.settings.bankroll_growth_threshold,
+                )
                 kelly_fraction = net_edge / (1 - buy_price) if buy_price < 1.0 else 0.0
                 size = compute_position_size(
                     bankroll=bankroll, kelly_fraction=kelly_fraction, kelly_mult=kelly_adj,
@@ -127,3 +132,7 @@ class ResolutionSnipeStrategy(Strategy):
 
             log.info("snipe_trade", market=m["polymarket_id"], side=side, price=buy_price,
                      edge=net_edge, size=size, tier=tier)
+            await ctx.email_notifier.send(
+                f"[POLYBOT] Trade executed: {m['question'][:60]}",
+                format_trade_email(event="executed", market=m["question"], side=side,
+                                   size=size, price=buy_price, edge=net_edge))
