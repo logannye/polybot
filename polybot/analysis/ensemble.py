@@ -110,3 +110,20 @@ class EnsembleAnalyzer:
             confidence=parsed["confidence"],
             reasoning=parsed["reasoning"],
         )
+
+    async def quick_screen(self, question: str, price: float, resolution_time: str) -> float | None:
+        """
+        Fast single-LLM quick screening using Gemini Flash.
+        Returns probability estimate or None on failure.
+        """
+        from polybot.analysis.prompts import build_quick_screen_prompt, parse_llm_response
+        prompt = build_quick_screen_prompt(question, price, resolution_time)
+        try:
+            response = await self._google.aio.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt)
+            parsed = parse_llm_response(response.text)
+            if parsed:
+                return parsed["probability"]
+        except Exception as e:
+            log.error("quick_screen_failed", error=str(e))
+        return None
