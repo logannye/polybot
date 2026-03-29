@@ -37,7 +37,7 @@ class EnsembleForecastStrategy(Strategy):
     async def run_once(self, ctx: TradingContext) -> None:
         # 1. Check if this strategy is enabled
         enabled_row = await ctx.db.fetchrow(
-            "SELECT enabled FROM strategy_performance WHERE strategy_name = $1",
+            "SELECT enabled FROM strategy_performance WHERE strategy = $1",
             self.name,
         )
         if enabled_row and not enabled_row["enabled"]:

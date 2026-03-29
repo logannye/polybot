@@ -18,7 +18,10 @@ def parse_market_response(raw: dict[str, Any]) -> dict[str, Any] | None:
     if not yes_token or not no_token:
         return None
     try:
-        end_date = datetime.fromisoformat(raw["end_date_iso"].replace("Z", "+00:00"))
+        end_date_str = raw.get("end_date_iso")
+        if not end_date_str:
+            return None
+        end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
     except (KeyError, ValueError):
         return None
     return {
