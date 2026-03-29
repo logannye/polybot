@@ -54,7 +54,8 @@ class EnsembleForecastStrategy(Strategy):
         bankroll = float(state_row["bankroll"])
         kelly_mult = float(state_row["kelly_mult"])
         edge_threshold = float(state_row["edge_threshold"])
-        calibration_corrections: dict[str, float] = state_row["calibration_corrections"] or {}
+        raw_cal = state_row["calibration_corrections"] or {}
+        calibration_corrections: dict[str, float] = json.loads(raw_cal) if isinstance(raw_cal, str) else raw_cal
 
         # 3. Scan + filter markets
         raw_markets = await ctx.scanner.fetch_markets()
@@ -179,7 +180,9 @@ class EnsembleForecastStrategy(Strategy):
                     ctx=ctx,
                 )
             except Exception as e:
-                log.error("forecast_analysis_error", market=candidate.polymarket_id, error=str(e))
+                import traceback
+                log.error("forecast_analysis_error", market=candidate.polymarket_id,
+                          error=str(e), traceback=traceback.format_exc())
 
     async def _full_analyze_and_trade(
         self,
