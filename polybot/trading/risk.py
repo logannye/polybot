@@ -25,10 +25,26 @@ class RiskCheckResult:
     reason: str = ""
 
 
+def bankroll_kelly_adjustment(
+    bankroll: float, base_kelly: float, post_breaker_until: datetime | None,
+    post_breaker_reduction: float = 0.50, survival_threshold: float = 50.0,
+    growth_threshold: float = 500.0,
+) -> float:
+    mult = base_kelly
+    if post_breaker_until and post_breaker_until > datetime.now(timezone.utc):
+        return mult * post_breaker_reduction
+    if bankroll < survival_threshold:
+        return mult * 0.50
+    elif bankroll > growth_threshold:
+        return mult * 0.85
+    return mult
+
+
 class RiskManager:
-    def __init__(self, max_single_pct=0.15, max_total_deployed_pct=0.50, max_per_category_pct=0.25,
-                 max_concurrent=8, daily_loss_limit_pct=0.20, circuit_breaker_hours=12,
-                 min_trade_size=2.0, book_depth_max_pct=0.10):
+    def __init__(self, max_single_pct=0.15, max_total_deployed_pct=0.70,
+                 max_per_category_pct=0.25, max_concurrent=12,
+                 daily_loss_limit_pct=0.15, circuit_breaker_hours=6,
+                 min_trade_size=1.0, book_depth_max_pct=0.10):
         self.max_single_pct = max_single_pct
         self.max_total_deployed_pct = max_total_deployed_pct
         self.max_per_category_pct = max_per_category_pct
@@ -38,7 +54,9 @@ class RiskManager:
         self.min_trade_size = min_trade_size
         self.book_depth_max_pct = book_depth_max_pct
 
-    def check(self, state: PortfolioState, proposal: TradeProposal) -> RiskCheckResult:
+    def check(self, state: PortfolioState, proposal: TradeProposal,
+              max_single_pct: float | None = None) -> RiskCheckResult:
+        effective_max_single = max_single_pct if max_single_pct is not None else self.max_single_pct
         now = datetime.now(timezone.utc)
         if state.circuit_breaker_until and state.circuit_breaker_until > now:
             return RiskCheckResult(False, "circuit_breaker active")
@@ -46,7 +64,7 @@ class RiskManager:
             return RiskCheckResult(False, "max concurrent positions reached")
         if state.total_deployed + proposal.size_usd > state.bankroll * self.max_total_deployed_pct:
             return RiskCheckResult(False, "total_deployed would exceed limit")
-        if proposal.size_usd > state.bankroll * self.max_single_pct:
+        if proposal.size_usd > state.bankroll * effective_max_single:
             return RiskCheckResult(False, "single position exceeds limit")
         cat_deployed = state.category_deployed.get(proposal.category, 0.0)
         if cat_deployed + proposal.size_usd > state.bankroll * self.max_per_category_pct:
@@ -68,7 +86,8 @@ class RiskManager:
         return False, None
 
     @staticmethod
-    def confidence_multiplier(stdev, quant_score, stdev_low, stdev_high, mult_low, mult_mid, mult_high, quant_neg_mult):
+    def confidence_multiplier(stdev, quant_score, stdev_low, stdev_high,
+                              mult_low, mult_mid, mult_high, quant_neg_mult):
         if stdev < stdev_low:
             mult = mult_low
         elif stdev < stdev_high:
