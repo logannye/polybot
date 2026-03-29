@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     resend_api_key: str
     alert_email: str = "logan@galenhealth.org"
 
+    # CLOB L2 credentials
+    polymarket_api_secret: str = ""
+    polymarket_api_passphrase: str = ""
+    polymarket_chain_id: int = 137
+
+    # Dry-run mode
+    dry_run: bool = True
+
     # Bot parameters
     starting_bankroll: float = 300.0
     kelly_mult: float = 0.25

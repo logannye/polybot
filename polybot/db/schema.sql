@@ -103,6 +103,15 @@ CREATE TABLE IF NOT EXISTS market_relationships (
 -- v2: Post-breaker cooldown tracking
 ALTER TABLE system_state ADD COLUMN IF NOT EXISTS post_breaker_until TIMESTAMPTZ;
 
+-- v2.1: CLOB order tracking
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS clob_order_id TEXT;
+
+-- v2.1: Expand trade status for dry-run and fill tracking
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_status_check;
+ALTER TABLE trades ADD CONSTRAINT trades_status_check
+    CHECK (status IN ('open', 'filled', 'partial', 'cancelled', 'closed',
+                      'dry_run', 'dry_run_resolved'));
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_markets_resolution ON markets(resolution_time);
 CREATE INDEX IF NOT EXISTS idx_markets_polymarket_id ON markets(polymarket_id);
@@ -113,3 +122,4 @@ CREATE INDEX IF NOT EXISTS idx_analyses_timestamp ON analyses(timestamp);
 CREATE INDEX IF NOT EXISTS idx_market_relationships_group ON market_relationships(group_id);
 CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 CREATE INDEX IF NOT EXISTS idx_trades_closed_at ON trades(closed_at);
+CREATE INDEX IF NOT EXISTS idx_trades_clob_order_id ON trades(clob_order_id);
