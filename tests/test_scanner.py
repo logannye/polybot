@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock
 from datetime import datetime, timezone, timedelta
-from polybot.markets.scanner import PolymarketScanner, parse_market_response
+from polybot.markets.scanner import PolymarketScanner, parse_market_response, parse_gamma_market
 
 
 class TestParseMarketResponse:
@@ -44,18 +44,18 @@ class TestPolymarketScanner:
 
     @pytest.mark.asyncio
     async def test_fetch_markets_returns_parsed(self, scanner):
-        mock_response = {
-            "data": [{
-                "condition_id": "0x111", "question": "Test market?",
-                "tokens": [{"token_id": "t1", "outcome": "Yes", "price": 0.50}, {"token_id": "t2", "outcome": "No", "price": 0.50}],
-                "end_date_iso": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-                "volume": 10000.0, "active": True, "closed": False, "category": "Politics",
-            }],
-            "next_cursor": None,
-        }
+        gamma_response = [{
+            "conditionId": "0x111", "question": "Test market?",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["0.50", "0.50"]',
+            "clobTokenIds": '["t1", "t2"]',
+            "endDate": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+            "volume24hr": 10000.0, "liquidityNum": 5000.0,
+            "active": True, "closed": False, "slug": "test-market",
+        }]
         mock_session = AsyncMock()
         mock_resp = AsyncMock()
-        mock_resp.json = AsyncMock(return_value=mock_response)
+        mock_resp.json = AsyncMock(return_value=gamma_response)
         mock_resp.status = 200
         mock_session.get = AsyncMock(return_value=mock_resp)
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -64,6 +64,27 @@ class TestPolymarketScanner:
         markets = await scanner.fetch_markets()
         assert len(markets) == 1
         assert markets[0]["polymarket_id"] == "0x111"
+
+    def test_parse_gamma_market_valid(self):
+        raw = {
+            "conditionId": "0xabc", "question": "Will X happen?",
+            "outcomes": '["Yes", "No"]', "outcomePrices": '["0.65", "0.35"]',
+            "clobTokenIds": '["tok1", "tok2"]',
+            "endDate": "2026-04-15T00:00:00Z", "volume24hr": 5000,
+            "liquidityNum": 3000, "active": True, "closed": False,
+            "slug": "will-x-happen",
+        }
+        result = parse_gamma_market(raw)
+        assert result is not None
+        assert result["polymarket_id"] == "0xabc"
+        assert result["yes_price"] == pytest.approx(0.65)
+        assert result["book_depth"] == pytest.approx(3000)
+
+    def test_parse_gamma_market_rejects_closed(self):
+        raw = {"conditionId": "0x1", "outcomes": '["Y","N"]',
+               "outcomePrices": '["0.5","0.5"]', "clobTokenIds": '["a","b"]',
+               "endDate": "2026-05-01T00:00:00Z", "active": True, "closed": True}
+        assert parse_gamma_market(raw) is None
 
     @pytest.mark.asyncio
     async def test_fetch_market_resolution_resolved_yes(self, scanner):
