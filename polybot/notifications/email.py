@@ -93,18 +93,24 @@ def format_daily_report(
 
 
 class EmailNotifier:
-    def __init__(self, api_key: str, to_email: str):
+    def __init__(self, api_key: str, to_email: str, dry_run: bool = False):
         resend.api_key = api_key
         self._to = to_email
+        self._dry_run = dry_run
+
+    def _format_subject(self, subject: str) -> str:
+        prefix = "[Polybot] [DRY RUN] " if self._dry_run else "[Polybot] "
+        return f"{prefix}{subject}"
 
     async def send(self, subject: str, html: str) -> None:
+        formatted_subject = self._format_subject(subject)
         try:
             resend.Emails.send({
                 "from": "Polybot <alerts@polybot.dev>",
                 "to": [self._to],
-                "subject": f"[Polybot] {subject}",
+                "subject": formatted_subject,
                 "html": html,
             })
-            log.info("email_sent", subject=subject)
+            log.info("email_sent", subject=formatted_subject)
         except Exception as e:
-            log.error("email_failed", subject=subject, error=str(e))
+            log.error("email_failed", subject=formatted_subject, error=str(e))

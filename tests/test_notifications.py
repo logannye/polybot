@@ -51,3 +51,13 @@ class TestEmailNotifier:
             notifier = EmailNotifier(api_key="test", to_email="test@test.com")
             await notifier.send("Test Subject", "<p>Hello</p>")
             mock_resend.Emails.send.assert_called_once()
+
+    def test_email_dry_run_prefix(self):
+        from polybot.notifications.email import EmailNotifier
+        notifier = EmailNotifier(api_key="test", to_email="test@test.com", dry_run=True)
+        assert notifier._format_subject("Trade executed") == "[Polybot] [DRY RUN] Trade executed"
+
+    def test_email_live_no_prefix(self):
+        from polybot.notifications.email import EmailNotifier
+        notifier = EmailNotifier(api_key="test", to_email="test@test.com", dry_run=False)
+        assert notifier._format_subject("Trade executed") == "[Polybot] Trade executed"
