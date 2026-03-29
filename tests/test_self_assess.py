@@ -1,5 +1,5 @@
 import pytest
-from polybot.learning.self_assess import suggest_kelly_adjustment, suggest_edge_threshold
+from polybot.learning.self_assess import suggest_kelly_adjustment, suggest_edge_threshold, check_strategy_kill_switch
 
 
 class TestKellyAdjustment:
@@ -31,3 +31,14 @@ class TestEdgeThreshold:
 
     def test_empty_buckets_no_change(self):
         assert suggest_edge_threshold(current_threshold=0.05, edge_buckets={}) == 0.05
+
+
+class TestStrategyKillSwitch:
+    def test_strategy_kill_switch_disables_losing(self):
+        assert check_strategy_kill_switch(total_trades=60, total_pnl=-15.0, min_trades=50) is True
+
+    def test_strategy_kill_switch_spares_profitable(self):
+        assert check_strategy_kill_switch(total_trades=60, total_pnl=10.0, min_trades=50) is False
+
+    def test_strategy_kill_switch_spares_insufficient_data(self):
+        assert check_strategy_kill_switch(total_trades=20, total_pnl=-15.0, min_trades=50) is False

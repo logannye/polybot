@@ -39,3 +39,9 @@ def suggest_edge_threshold(current_threshold, edge_buckets):
     new_threshold = max(EDGE_MIN, min(EDGE_MAX, new_threshold))
     log.info("edge_threshold_adjustment", old=current_threshold, new=new_threshold)
     return new_threshold
+
+def check_strategy_kill_switch(total_trades: int, total_pnl: float, min_trades: int = 50) -> bool:
+    """Returns True if strategy should be disabled (negative P&L over enough trades)."""
+    if total_trades < min_trades:
+        return False
+    return total_pnl < 0
