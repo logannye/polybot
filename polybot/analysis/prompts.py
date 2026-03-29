@@ -57,3 +57,57 @@ def _validate_parsed(data: dict) -> dict | None:
     if confidence not in ("low", "medium", "high"):
         confidence = "medium"
     return {"probability": prob, "confidence": confidence, "reasoning": data.get("reasoning", "")}
+
+
+def build_snipe_prompt(question: str, resolution_time: str, hours_remaining: float, price: float) -> str:
+    return f"""You are verifying whether a prediction market's outcome is already determined.
+
+Question: {question}
+Resolves at: {resolution_time} ({hours_remaining:.1f}h from now)
+Current YES price: {price}
+
+Is the outcome of this question ALREADY DETERMINED based on events that have occurred? Answer ONLY with JSON:
+{{"determined": true/false, "outcome": "YES"/"NO"/"UNKNOWN", "confidence": 0.0-1.0, "reason": "..."}}
+
+Return ONLY the JSON object, no other text."""
+
+
+def parse_snipe_response(response: str) -> dict | None:
+    try:
+        data = json.loads(response.strip())
+        return _validate_snipe(data)
+    except json.JSONDecodeError:
+        pass
+    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
+    if json_match:
+        try:
+            return _validate_snipe(json.loads(json_match.group(1)))
+        except json.JSONDecodeError:
+            pass
+    json_match = re.search(r'\{[^{}]*"determined"[^{}]*\}', response)
+    if json_match:
+        try:
+            return _validate_snipe(json.loads(json_match.group(0)))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _validate_snipe(data: dict) -> dict | None:
+    if "determined" not in data:
+        return None
+    determined = bool(data["determined"])
+    outcome = data.get("outcome", "UNKNOWN")
+    if outcome not in ("YES", "NO", "UNKNOWN"):
+        outcome = "UNKNOWN"
+    confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+    return {"determined": determined, "outcome": outcome, "confidence": confidence, "reason": data.get("reason", "")}
+
+
+def build_quick_screen_prompt(question: str, price: float, resolution_time: str) -> str:
+    return f"""Prediction market question: {question}
+Current YES price: ${price}
+Resolves: {resolution_time}
+
+Estimate the true probability this resolves YES.
+Return ONLY: {{"probability": <float>, "reasoning": "<1 sentence>"}}"""
