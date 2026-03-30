@@ -40,12 +40,13 @@ class OrderExecutor:
         log.info("placing_order", market_id=market_id, side=side, size_usd=size_usd,
                  price=price, shares=shares, strategy=strategy, dry_run=self._dry_run)
 
-        kelly_data = kelly_inputs or {}
+        import json as _json
+        kelly_json = _json.dumps(kelly_inputs) if kelly_inputs else "{}"
         trade_id = await self._db.fetchval(
             """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd,
                shares, kelly_inputs, status, strategy)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
-            market_id, analysis_id, side, price, size_usd, shares, kelly_data, status, strategy)
+            market_id, analysis_id, side, price, size_usd, shares, kelly_json, status, strategy)
 
         # Lock deployed capital
         await self._db.execute(

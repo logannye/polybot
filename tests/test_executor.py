@@ -143,8 +143,9 @@ async def test_place_order_clob_failure_cancels():
 
 
 @pytest.mark.asyncio
-async def test_place_order_passes_kelly_dict_not_string():
-    """kelly_inputs must be passed as a Python dict (not JSON string) for asyncpg JSONB."""
+async def test_place_order_serializes_kelly_as_json_string():
+    """kelly_inputs must be JSON-serialized to a string for asyncpg JSONB columns."""
+    import json
     db = AsyncMock()
     db.fetchval = AsyncMock(return_value=1)
     db.execute = AsyncMock()
@@ -155,16 +156,17 @@ async def test_place_order_passes_kelly_dict_not_string():
     await executor.place_order(
         token_id="tok", side="YES", size_usd=5.0, price=0.50,
         market_id=1, analysis_id=1, kelly_inputs=kelly)
-    # The 7th positional arg (index 6) to fetchval should be the dict, not a string
     args = db.fetchval.call_args[0]
     kelly_arg = args[7]  # $7 = kelly_inputs (args[0] is the SQL, args[1-9] are params)
-    assert isinstance(kelly_arg, dict), f"Expected dict, got {type(kelly_arg)}: {kelly_arg}"
-    assert kelly_arg["edge"] == 0.05
+    assert isinstance(kelly_arg, str), f"Expected str, got {type(kelly_arg)}: {kelly_arg}"
+    parsed = json.loads(kelly_arg)
+    assert parsed["edge"] == 0.05
+    assert parsed["ensemble_prob"] == 0.65
 
 
 @pytest.mark.asyncio
-async def test_place_order_passes_empty_dict_for_none_kelly():
-    """When kelly_inputs is None, an empty dict should be passed (not a string)."""
+async def test_place_order_passes_empty_json_for_none_kelly():
+    """When kelly_inputs is None, an empty JSON object string should be passed."""
     db = AsyncMock()
     db.fetchval = AsyncMock(return_value=1)
     db.execute = AsyncMock()
@@ -176,5 +178,5 @@ async def test_place_order_passes_empty_dict_for_none_kelly():
         market_id=1, analysis_id=1, kelly_inputs=None)
     args = db.fetchval.call_args[0]
     kelly_arg = args[7]
-    assert isinstance(kelly_arg, dict), f"Expected dict, got {type(kelly_arg)}: {kelly_arg}"
-    assert kelly_arg == {}
+    assert isinstance(kelly_arg, str), f"Expected str, got {type(kelly_arg)}: {kelly_arg}"
+    assert kelly_arg == "{}"
