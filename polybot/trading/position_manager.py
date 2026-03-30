@@ -1,0 +1,131 @@
+import structlog
+from polybot.markets.websocket import should_early_exit
+
+log = structlog.get_logger()
+
+
+def compute_unrealized_return(side: str, entry_price: float,
+                               current_yes_price: float) -> float:
+    """
+    Compute unrealized return as a fraction of cost basis.
+
+    For YES: bought at entry_price, current value is current_yes_price.
+    For NO:  bought at entry_price (the NO price paid), current NO value
+             is (1 - current_yes_price).
+    """
+    if entry_price <= 0:
+        return 0.0
+    if side == "YES":
+        return (current_yes_price - entry_price) / entry_price
+    else:
+        current_no_price = 1.0 - current_yes_price
+        return (current_no_price - entry_price) / entry_price
+
+
+def should_take_profit(side: str, entry_price: float,
+                        current_yes_price: float,
+                        threshold: float = 0.20) -> bool:
+    return compute_unrealized_return(side, entry_price, current_yes_price) >= threshold
+
+
+def should_cut_loss(side: str, entry_price: float,
+                     current_yes_price: float,
+                     threshold: float = 0.25) -> bool:
+    return compute_unrealized_return(side, entry_price, current_yes_price) <= -threshold
+
+
+class ActivePositionManager:
+    def __init__(self, db, executor, scanner, email_notifier, settings,
+                 portfolio_lock=None):
+        self._db = db
+        self._executor = executor
+        self._scanner = scanner
+        self._email = email_notifier
+        self._take_profit = settings.take_profit_threshold
+        self._stop_loss = settings.stop_loss_threshold
+        self._early_exit_edge = settings.early_exit_edge
+        self._portfolio_lock = portfolio_lock
+
+    async def check_positions(self):
+        positions = await self._db.fetch(
+            """SELECT t.id, t.side, t.entry_price, t.shares,
+                      t.position_size_usd, t.strategy, t.status,
+                      m.polymarket_id, m.question,
+                      a.ensemble_probability
+               FROM trades t
+               JOIN markets m ON t.market_id = m.id
+               LEFT JOIN analyses a ON t.analysis_id = a.id
+               WHERE t.status IN ('filled', 'dry_run')
+                 AND t.strategy != 'arbitrage'""")
+
+        if not positions:
+            return
+
+        price_cache = self._scanner.get_all_cached_prices()
+        if not price_cache:
+            log.debug("position_manager_no_prices")
+            return
+
+        exits_triggered = 0
+        for pos in positions:
+            market_data = price_cache.get(pos["polymarket_id"])
+            if not market_data:
+                continue
+
+            current_yes_price = market_data["yes_price"]
+            entry_price = float(pos["entry_price"])
+            side = pos["side"]
+            trade_id = pos["id"]
+
+            exit_reason = None
+
+            if should_take_profit(side, entry_price, current_yes_price,
+                                   self._take_profit):
+                exit_reason = "take_profit"
+            elif should_cut_loss(side, entry_price, current_yes_price,
+                                  self._stop_loss):
+                exit_reason = "stop_loss"
+            elif pos["ensemble_probability"] is not None:
+                ensemble_prob = float(pos["ensemble_probability"])
+                if should_early_exit(
+                    entry_price=entry_price,
+                    current_price=current_yes_price,
+                    side=side,
+                    ensemble_prob=ensemble_prob,
+                    early_exit_edge=self._early_exit_edge,
+                ):
+                    exit_reason = "early_exit"
+
+            if not exit_reason:
+                continue
+
+            exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+            unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
+
+            if self._portfolio_lock:
+                async with self._portfolio_lock:
+                    pnl = await self._executor.exit_position(
+                        trade_id=trade_id, exit_price=exit_price,
+                        exit_reason=exit_reason)
+            else:
+                pnl = await self._executor.exit_position(
+                    trade_id=trade_id, exit_price=exit_price,
+                    exit_reason=exit_reason)
+
+            if pnl is not None:
+                exits_triggered += 1
+                log.info("position_exit_triggered",
+                         trade_id=trade_id, reason=exit_reason,
+                         unrealized_return=round(unrealized, 4),
+                         pnl=round(pnl, 4),
+                         market=pos["question"][:60])
+                await self._email.send(
+                    f"[POLYBOT] Position exited: {exit_reason}",
+                    f"<p><b>Market:</b> {pos['question']}</p>"
+                    f"<p><b>Side:</b> {side} | Entry: ${entry_price:.4f} | "
+                    f"Exit: ${exit_price:.4f}</p>"
+                    f"<p><b>P&L:</b> ${pnl:+.2f} ({unrealized:.1%})</p>")
+
+        if exits_triggered > 0:
+            log.info("position_manager_cycle",
+                     checked=len(positions), exits=exits_triggered)

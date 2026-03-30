@@ -94,3 +94,77 @@ class OrderExecutor:
             exit_price, exit_reason, pnl, datetime.now(timezone.utc), trade_id)
         log.info("position_closed", trade_id=trade_id, pnl=pnl, reason=exit_reason)
         return pnl
+
+    async def exit_position(self, trade_id: int, exit_price: float,
+                            exit_reason: str) -> float | None:
+        """
+        Self-contained position exit: looks up trade data, computes PnL,
+        updates trade + system_state + strategy_performance.
+
+        Works for both dry_run and live trades.
+        """
+        trade = await self._db.fetchrow(
+            "SELECT * FROM trades WHERE id = $1", trade_id)
+        if not trade or trade["status"] not in ("filled", "dry_run"):
+            return None
+
+        entry_price = float(trade["entry_price"])
+        shares = float(trade["shares"])
+        side = trade["side"]
+        position_size = float(trade["position_size_usd"])
+        strategy = trade.get("strategy", "forecast")
+
+        # PnL: exit_price is the share value we're selling at
+        pnl = shares * (exit_price - entry_price)
+
+        now = datetime.now(timezone.utc)
+        closed_status = "dry_run_resolved" if trade["status"] == "dry_run" else "closed"
+
+        # For live filled trades, submit sell order
+        if trade["status"] == "filled" and not self._dry_run and self._clob:
+            market = await self._db.fetchrow(
+                "SELECT polymarket_id FROM markets WHERE id = $1", trade["market_id"])
+            if market:
+                market_data = self._scanner.get_cached_price(market["polymarket_id"])
+                if market_data:
+                    token_id = market_data.get("yes_token_id") if side == "YES" else market_data.get("no_token_id")
+                    if token_id:
+                        try:
+                            await self._clob.sell_shares(
+                                token_id=token_id, price=exit_price, size=shares)
+                        except Exception as e:
+                            log.error("exit_sell_failed", trade_id=trade_id, error=str(e))
+                            return None
+
+        await self._db.execute(
+            """UPDATE trades SET status=$1, exit_price=$2, exit_reason=$3,
+               pnl=$4, closed_at=$5 WHERE id=$6""",
+            closed_status, exit_price, exit_reason, pnl, now, trade_id)
+
+        # Free deployed capital + update bankroll for dry_run
+        if trade["status"] == "dry_run":
+            await self._db.execute(
+                """UPDATE system_state SET
+                   bankroll = bankroll + $1,
+                   total_deployed = total_deployed - $2,
+                   daily_pnl = daily_pnl + $1
+                   WHERE id = 1""",
+                pnl, position_size)
+        else:
+            await self._db.execute(
+                "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
+                position_size)
+
+        # Update strategy_performance
+        await self._db.execute(
+            """UPDATE strategy_performance SET
+               total_trades = total_trades + 1,
+               winning_trades = winning_trades + CASE WHEN $1 > 0 THEN 1 ELSE 0 END,
+               total_pnl = total_pnl + $1, last_updated = $2
+               WHERE strategy = $3""",
+            pnl, now, strategy)
+
+        log.info("position_exited", trade_id=trade_id, pnl=round(pnl, 4),
+                 reason=exit_reason, side=side, entry=entry_price,
+                 exit=exit_price, strategy=strategy)
+        return pnl

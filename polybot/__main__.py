@@ -14,7 +14,7 @@ from polybot.trading.risk import RiskManager
 from polybot.trading.clob import ClobGateway
 from polybot.learning.recorder import TradeRecorder
 from polybot.notifications.email import EmailNotifier
-from polybot.markets.websocket import PositionTracker
+from polybot.trading.position_manager import ActivePositionManager
 from polybot.dashboard.app import create_app
 from polybot.strategies.arbitrage import ArbitrageStrategy
 from polybot.strategies.snipe import ResolutionSnipeStrategy
@@ -79,15 +79,18 @@ async def main():
     email_notifier = EmailNotifier(
         api_key=settings.resend_api_key, to_email=settings.alert_email,
         dry_run=settings.dry_run)
-    position_manager = PositionTracker(
-        on_early_exit=lambda tid, p: executor.close_position(tid, p, "early_exit", 0, 0, "YES"),
-        on_stop_loss=lambda tid, p: executor.close_position(tid, p, "stop_loss", 0, 0, "YES"))
+    portfolio_lock = asyncio.Lock()
+    position_manager = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email_notifier, settings=settings,
+        portfolio_lock=portfolio_lock)
 
     engine = Engine(
         db=db, scanner=scanner, researcher=researcher, ensemble=ensemble,
         executor=executor, recorder=recorder, risk_manager=risk_manager,
         settings=settings, email_notifier=email_notifier,
-        position_manager=position_manager, clob=clob)
+        position_manager=position_manager, clob=clob,
+        portfolio_lock=portfolio_lock)
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 

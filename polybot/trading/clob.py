@@ -40,6 +40,18 @@ class ClobGateway:
         status_map = {"LIVE": "live", "MATCHED": "matched", "CANCELLED": "cancelled", "CANCELED": "cancelled"}
         return {"status": status_map.get(status_raw, status_raw.lower()), "size_matched": float(result.get("size_matched", 0))}
 
+    async def sell_shares(self, token_id: str, price: float, size: float) -> str:
+        """Place a sell order for shares we already own."""
+        order_args = OrderArgs(token_id=token_id, price=price, size=size, side="SELL")
+        def _create_and_post():
+            signed_order = self._client.create_order(order_args)
+            return self._client.post_order(signed_order, orderType=OrderType.GTC)
+        result = await asyncio.to_thread(_create_and_post)
+        order_id = result.get("orderID") or result.get("id", "")
+        log.info("clob_sell_submitted", order_id=order_id, token_id=token_id,
+                 price=price, size=size)
+        return order_id
+
     async def get_balance(self) -> float:
         result = await asyncio.to_thread(self._client.get_balance_allowance)
         return float(result.get("balance", 0))

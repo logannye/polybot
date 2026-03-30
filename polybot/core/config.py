@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     fill_timeout_seconds: int = 120
     book_depth_max_pct: float = 0.10
 
+    # Active position management
+    take_profit_threshold: float = 0.20
+    stop_loss_threshold: float = 0.25
+    position_check_interval: int = 60
+
     # Quant signal weights
     quant_weights: dict[str, float] = {
         "line_movement": 0.30,

@@ -112,6 +112,11 @@ ALTER TABLE trades ADD CONSTRAINT trades_status_check
     CHECK (status IN ('open', 'filled', 'partial', 'cancelled', 'closed',
                       'dry_run', 'dry_run_resolved'));
 
+-- v2.2: Expand exit_reason for active position management
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_exit_reason_check;
+ALTER TABLE trades ADD CONSTRAINT trades_exit_reason_check
+    CHECK (exit_reason IN ('resolution', 'early_exit', 'stop_loss', 'take_profit'));
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_markets_resolution ON markets(resolution_time);
 CREATE INDEX IF NOT EXISTS idx_markets_polymarket_id ON markets(polymarket_id);

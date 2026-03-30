@@ -93,6 +93,7 @@ class PolymarketScanner:
         self._api_key = api_key
         self._base_url = base_url
         self._session: aiohttp.ClientSession | None = None
+        self._price_cache: dict[str, dict] = {}
 
     async def start(self):
         self._session = aiohttp.ClientSession(
@@ -136,8 +137,15 @@ class PolymarketScanner:
             if len(data) < 100:
                 break
             offset += 100
+        self._price_cache = {m["polymarket_id"]: m for m in markets}
         log.info("scanner_fetched", count=len(markets), source="gamma")
         return markets
+
+    def get_cached_price(self, polymarket_id: str) -> dict | None:
+        return self._price_cache.get(polymarket_id)
+
+    def get_all_cached_prices(self) -> dict[str, dict]:
+        return self._price_cache
 
     async def fetch_order_book(self, token_id: str) -> dict[str, Any]:
         status, data = await self._get(f"{self._base_url}/book", {"token_id": token_id})

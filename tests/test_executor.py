@@ -165,6 +165,75 @@ async def test_place_order_serializes_kelly_as_json_string():
 
 
 @pytest.mark.asyncio
+async def test_exit_position_computes_pnl_yes():
+    """exit_position should compute correct PnL for YES trades."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "id": 1, "status": "dry_run", "side": "YES", "entry_price": 0.50,
+        "shares": 20.0, "position_size_usd": 10.0, "strategy": "forecast",
+        "market_id": 1,
+    })
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    pnl = await executor.exit_position(trade_id=1, exit_price=0.60, exit_reason="take_profit")
+    assert pnl == pytest.approx(2.0)  # 20 shares * (0.60 - 0.50)
+
+
+@pytest.mark.asyncio
+async def test_exit_position_computes_pnl_no():
+    """exit_position should compute correct PnL for NO trades."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "id": 2, "status": "dry_run", "side": "NO", "entry_price": 0.40,
+        "shares": 25.0, "position_size_usd": 10.0, "strategy": "snipe",
+        "market_id": 1,
+    })
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    # NO entry at 0.40, now NO is worth 0.50 → PnL = 25 * (0.50 - 0.40) = 2.50
+    pnl = await executor.exit_position(trade_id=2, exit_price=0.50, exit_reason="take_profit")
+    assert pnl == pytest.approx(2.50)
+
+
+@pytest.mark.asyncio
+async def test_exit_position_frees_deployed_capital():
+    """exit_position should reduce total_deployed in system_state."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "id": 3, "status": "dry_run", "side": "YES", "entry_price": 0.50,
+        "shares": 20.0, "position_size_usd": 10.0, "strategy": "forecast",
+        "market_id": 1,
+    })
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    await executor.exit_position(trade_id=3, exit_price=0.55, exit_reason="take_profit")
+
+    # Should have 3 execute calls: update trade, update system_state, update strategy_performance
+    assert db.execute.call_count == 3
+    # The system_state update should subtract position_size
+    system_call = db.execute.call_args_list[1]
+    assert "total_deployed = total_deployed - $2" in system_call[0][0]
+
+
+@pytest.mark.asyncio
+async def test_exit_position_prevents_double_exit():
+    """exit_position should return None if trade is already closed."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "id": 4, "status": "closed", "side": "YES", "entry_price": 0.50,
+        "shares": 20.0, "position_size_usd": 10.0, "strategy": "forecast",
+        "market_id": 1,
+    })
+    wallet = MagicMock()
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    pnl = await executor.exit_position(trade_id=4, exit_price=0.60, exit_reason="take_profit")
+    assert pnl is None
+
+
+@pytest.mark.asyncio
 async def test_place_order_passes_empty_json_for_none_kelly():
     """When kelly_inputs is None, an empty JSON object string should be passed."""
     db = AsyncMock()

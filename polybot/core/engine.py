@@ -11,7 +11,8 @@ log = structlog.get_logger()
 
 class Engine:
     def __init__(self, db, scanner, researcher, ensemble, executor, recorder,
-                 risk_manager, settings, email_notifier, position_manager, clob=None):
+                 risk_manager, settings, email_notifier, position_manager, clob=None,
+                 portfolio_lock=None):
         self._db = db
         self._scanner = scanner
         self._researcher = researcher
@@ -25,7 +26,7 @@ class Engine:
         self._clob = clob
         self._context = TradingContext(
             db=db, scanner=scanner, risk_manager=risk_manager,
-            portfolio_lock=asyncio.Lock(), executor=executor,
+            portfolio_lock=portfolio_lock or asyncio.Lock(), executor=executor,
             email_notifier=email_notifier, settings=settings)
         self._strategies: list[Strategy] = []
         self._last_heartbeats: dict[str, datetime] = {}
@@ -44,6 +45,8 @@ class Engine:
             tasks.append(self._run_periodic(self._fill_monitor, 30))
         tasks.append(self._run_periodic(self._resolution_monitor, 60))
         tasks.append(self._run_periodic(self._reconcile_capital, 300))
+        tasks.append(self._run_periodic(self._check_positions,
+                                         self._settings.position_check_interval))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):
@@ -254,6 +257,10 @@ class Engine:
                 log.info("dry_run_resolved", trade_id=trade["id"], outcome=outcome,
                          simulated_pnl=pnl, side=trade["side"],
                          entry_price=entry, shares=shares)
+
+    async def _check_positions(self):
+        """Periodic task: check all non-arb positions for take-profit/stop-loss/edge-erosion."""
+        await self._position_manager.check_positions()
 
     async def _reconcile_capital(self):
         """Periodic check: ensure total_deployed matches actual open positions."""
