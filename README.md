@@ -31,7 +31,7 @@ Targets markets approaching resolution where the outcome is effectively determin
 
 - **Tier 0** (no LLM): Price at $0.95+ or $0.05-, within 24h — near-certain, just collecting convergence
 - **Tier 1** (single Gemini Flash call): Price $0.85-$0.95, within 12h — cheap LLM verifies outcome is determined
-- **Tier 2** (single Gemini Flash call): Price $0.90-$0.95, within 48h — conservative sizing, LLM verified
+- **Tier 2** (single Gemini Flash call): Price $0.85-$0.95, within 72h — conservative sizing, LLM verified
 
 Sizing: Tier-dependent Kelly — T0: 0.50x (full snipe kelly), T1: 0.35x, T2: 0.20x.
 
@@ -328,7 +328,7 @@ Or manually: `ssh polybot@vps "cd /opt/polybot && git pull && uv sync && sudo sy
 ## Testing
 
 ```bash
-uv run pytest tests/ -v                                    # Run all 199 tests
+uv run pytest tests/ -v                                    # Run all 209 tests
 uv run pytest tests/ --cov=polybot --cov-report=term       # With coverage
 uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 ```
