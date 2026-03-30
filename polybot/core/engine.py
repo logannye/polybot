@@ -194,6 +194,7 @@ class Engine:
             """SELECT t.* FROM trades t JOIN markets m ON t.market_id = m.id
                WHERE t.status IN ('filled', 'dry_run')
                  AND m.resolution_time <= $1""", now)
+        log.info("resolution_monitor_check", resolvable_count=len(resolvable))
         for trade in resolvable:
             market = await self._db.fetchrow(
                 "SELECT * FROM markets WHERE id = $1", trade["market_id"])
@@ -205,6 +206,8 @@ class Engine:
                 log.error("resolution_check_failed", trade_id=trade["id"], error=str(e))
                 continue
             if outcome is None:
+                log.debug("resolution_pending", trade_id=trade["id"],
+                          market=market["polymarket_id"])
                 continue
             if trade["status"] == "filled":
                 await self._recorder.record_resolution(trade["id"], outcome)

@@ -140,3 +140,41 @@ async def test_place_order_clob_failure_cancels():
         token_id="tok", side="YES", size_usd=5.0, price=0.50,
         market_id=1, analysis_id=1)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_place_order_passes_kelly_dict_not_string():
+    """kelly_inputs must be passed as a Python dict (not JSON string) for asyncpg JSONB."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    wallet.compute_shares = MagicMock(return_value=10.0)
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    kelly = {"edge": 0.05, "kelly_fraction": 0.12, "ensemble_prob": 0.65}
+    await executor.place_order(
+        token_id="tok", side="YES", size_usd=5.0, price=0.50,
+        market_id=1, analysis_id=1, kelly_inputs=kelly)
+    # The 7th positional arg (index 6) to fetchval should be the dict, not a string
+    args = db.fetchval.call_args[0]
+    kelly_arg = args[7]  # $7 = kelly_inputs (args[0] is the SQL, args[1-9] are params)
+    assert isinstance(kelly_arg, dict), f"Expected dict, got {type(kelly_arg)}: {kelly_arg}"
+    assert kelly_arg["edge"] == 0.05
+
+
+@pytest.mark.asyncio
+async def test_place_order_passes_empty_dict_for_none_kelly():
+    """When kelly_inputs is None, an empty dict should be passed (not a string)."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    wallet.compute_shares = MagicMock(return_value=10.0)
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    await executor.place_order(
+        token_id="tok", side="YES", size_usd=5.0, price=0.50,
+        market_id=1, analysis_id=1, kelly_inputs=None)
+    args = db.fetchval.call_args[0]
+    kelly_arg = args[7]
+    assert isinstance(kelly_arg, dict), f"Expected dict, got {type(kelly_arg)}: {kelly_arg}"
+    assert kelly_arg == {}

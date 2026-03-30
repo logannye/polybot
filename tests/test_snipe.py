@@ -35,18 +35,38 @@ def test_tier1_boundary():
     assert classify_snipe_tier(price=0.85, hours_remaining=12.0) == 1
 
 
-# --- Tier 2: Strong lean, wider window (<=48h) ---
+# --- Tier 2: Moderate lean, wider window (<=72h) ---
 
 def test_tier2_high_price():
     assert classify_snipe_tier(price=0.90, hours_remaining=36.0) == 2
 
 
 def test_tier2_low_price():
-    assert classify_snipe_tier(price=0.10, hours_remaining=40.0) == 2
+    assert classify_snipe_tier(price=0.15, hours_remaining=40.0) == 2
 
 
 def test_tier2_boundary():
     assert classify_snipe_tier(price=0.92, hours_remaining=47.0) == 2
+
+
+def test_tier2_relaxed_85_at_30h():
+    """0.85 at 30h: now falls into relaxed Tier 2 (>= 0.85, <= 72h)."""
+    assert classify_snipe_tier(price=0.85, hours_remaining=30.0) == 2
+
+
+def test_tier2_relaxed_85_at_60h():
+    """0.85 at 60h: within relaxed Tier 2 window."""
+    assert classify_snipe_tier(price=0.85, hours_remaining=60.0) == 2
+
+
+def test_tier2_relaxed_72h():
+    """0.90 at 60h: within relaxed Tier 2 window."""
+    assert classify_snipe_tier(price=0.90, hours_remaining=60.0) == 2
+
+
+def test_tier2_extreme_at_50h():
+    """0.95 at 50h: outside Tier 0 (>24h) but inside Tier 2 (<=72h)."""
+    assert classify_snipe_tier(price=0.95, hours_remaining=50.0) == 2
 
 
 # --- Not a snipe candidate ---
@@ -56,12 +76,13 @@ def test_no_snipe_low_price():
 
 
 def test_no_snipe_too_far():
-    assert classify_snipe_tier(price=0.95, hours_remaining=50.0) is None
+    """0.95 at 80h: beyond even the relaxed 72h Tier 2 window."""
+    assert classify_snipe_tier(price=0.95, hours_remaining=80.0) is None
 
 
 def test_no_snipe_moderate_price_far():
-    """0.85 at 30h: beyond tier 1 window (12h), below tier 2 threshold (0.90)."""
-    assert classify_snipe_tier(price=0.85, hours_remaining=30.0) is None
+    """0.80 at 30h: below Tier 2 threshold (0.85), not a snipe candidate."""
+    assert classify_snipe_tier(price=0.80, hours_remaining=30.0) is None
 
 
 def test_no_snipe_zero_hours():

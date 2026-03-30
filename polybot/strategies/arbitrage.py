@@ -187,11 +187,10 @@ class ArbitrageStrategy(Strategy):
         # Deduplicate: only process new arb opportunities not seen recently
         new_opps = []
         for opp in opportunities:
-            key = f"{opp.arb_type}:{','.join(m['polymarket_id'] for m in opp.markets)}"
-            if key in self._seen_arbs:
+            market_ids = [m["polymarket_id"] for m in opp.markets]
+            if any(mid in self._seen_arbs for mid in market_ids):
                 continue
             # Check DB for recent arb trades on any of the involved markets
-            market_ids = [m["polymarket_id"] for m in opp.markets]
             recent_count = await ctx.db.fetchval(
                 """SELECT COUNT(*) FROM trades t JOIN markets m ON t.market_id = m.id
                    WHERE t.strategy = 'arbitrage'
@@ -200,14 +199,14 @@ class ArbitrageStrategy(Strategy):
                      AND t.status IN ('open', 'filled', 'dry_run')""",
                 market_ids)
             if recent_count and recent_count > 0:
-                self._seen_arbs.add(key)
+                self._seen_arbs.update(market_ids)
                 continue
-            new_opps.append((key, opp))
+            new_opps.append((market_ids, opp))
 
         if opportunities and not new_opps:
             log.debug("arb_all_known", total=len(opportunities))
-        for key, opp in new_opps:
-            self._seen_arbs.add(key)
+        for market_ids, opp in new_opps:
+            self._seen_arbs.update(market_ids)
             await self._execute_arb(opp, ctx)
 
     async def _execute_arb(self, opp: ArbOpportunity, ctx: TradingContext) -> None:
@@ -269,12 +268,15 @@ class ArbitrageStrategy(Strategy):
 
     async def _upsert_market(self, m: dict, ctx: TradingContext) -> int:
         return await ctx.db.fetchval(
-            """INSERT INTO markets (polymarket_id, question, category, resolution_time, current_price)
-               VALUES ($1, $2, $3, $4, $5)
-               ON CONFLICT (polymarket_id) DO UPDATE SET current_price=$5, last_updated=NOW()
+            """INSERT INTO markets (polymarket_id, question, category, resolution_time,
+                   current_price, volume_24h, book_depth)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (polymarket_id) DO UPDATE SET
+                   current_price=$5, volume_24h=$6, book_depth=$7, last_updated=NOW()
                RETURNING id""",
             m["polymarket_id"], m.get("question", ""), m.get("category", "unknown"),
             m.get("resolution_time", datetime.now(timezone.utc)), m["yes_price"],
+            m.get("volume_24h"), m.get("book_depth"),
         )
 
     async def _create_arb_analysis(self, market_id: int, edge: float, ctx: TradingContext) -> int:

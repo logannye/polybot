@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     polymarket_fee_rate: float = 0.02
 
     # Snipe thresholds
-    snipe_hours_max: float = 48.0
+    snipe_hours_max: float = 72.0
     snipe_min_confidence: float = 0.90
     snipe_min_net_edge: float = 0.02
 

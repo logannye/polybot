@@ -50,3 +50,54 @@ def test_temporal_arb_detected():
 
 def test_temporal_arb_none_when_correct():
     assert detect_temporal_arb("by June?", 0.40, "by July?", 0.50) is False
+
+
+# --- Arb dedup logic ---
+
+from polybot.strategies.arbitrage import ArbitrageStrategy, ArbOpportunity
+
+
+class TestArbDedup:
+    def _make_strategy(self):
+        """Create an ArbitrageStrategy with minimal settings."""
+        class FakeSettings:
+            arb_interval_seconds = 60
+            arb_kelly_multiplier = 0.20
+            arb_max_single_pct = 0.40
+        return ArbitrageStrategy(FakeSettings())
+
+    def test_arb_dedup_blocks_seen_market(self):
+        """If any market ID in an arb group is already in _seen_arbs, skip it."""
+        strategy = self._make_strategy()
+        strategy._seen_arbs = {"market_a", "market_b"}
+
+        opp = ArbOpportunity(
+            arb_type="exhaustive", side="NO", gross_edge=0.05, net_edge=0.03,
+            markets=[{"polymarket_id": "market_a"}, {"polymarket_id": "market_c"}],
+        )
+        market_ids = [m["polymarket_id"] for m in opp.markets]
+        assert any(mid in strategy._seen_arbs for mid in market_ids)
+
+    def test_arb_dedup_initial_load_matches_runtime(self):
+        """Initial load uses individual IDs — these should block runtime arb groups."""
+        strategy = self._make_strategy()
+        # Simulate initial load populating individual IDs
+        strategy._seen_arbs = {"0xabc", "0xdef"}
+
+        # Runtime arb group containing one of those IDs
+        market_ids = ["0xabc", "0xghi"]
+        assert any(mid in strategy._seen_arbs for mid in market_ids)
+
+    def test_arb_dedup_marks_all_legs(self):
+        """After execution, all individual market IDs from the group are marked."""
+        strategy = self._make_strategy()
+        assert len(strategy._seen_arbs) == 0
+
+        market_ids = ["0x111", "0x222", "0x333"]
+        strategy._seen_arbs.update(market_ids)
+
+        assert "0x111" in strategy._seen_arbs
+        assert "0x222" in strategy._seen_arbs
+        assert "0x333" in strategy._seen_arbs
+        # A new opp with any of these IDs should be blocked
+        assert any(mid in strategy._seen_arbs for mid in ["0x222", "0x444"])

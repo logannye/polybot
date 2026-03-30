@@ -75,6 +75,7 @@ class EnsembleForecastStrategy(Strategy):
                 resolution_time=m["resolution_time"],
                 current_price=m["yes_price"],
                 book_depth=m.get("book_depth", 0),
+                volume_24h=m.get("volume_24h", 0),
                 last_analyzed_at=last_analysis["timestamp"] if last_analysis else None,
                 previous_price=float(last_analysis["ensemble_probability"]) if last_analysis else None,
                 yes_token_id=m.get("yes_token_id", ""),
@@ -304,24 +305,16 @@ class EnsembleForecastStrategy(Strategy):
 
         # Upsert market record
         market_id = await ctx.db.fetchval(
-            """INSERT INTO markets (polymarket_id, question, category, resolution_time, current_price)
-               VALUES ($1, $2, $3, $4, $5)
-               ON CONFLICT (polymarket_id) DO UPDATE SET current_price=$5, last_updated=NOW()
+            """INSERT INTO markets (polymarket_id, question, category, resolution_time,
+                   current_price, volume_24h, book_depth)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (polymarket_id) DO UPDATE SET
+                   current_price=$5, volume_24h=$6, book_depth=$7, last_updated=NOW()
                RETURNING id""",
             candidate.polymarket_id, candidate.question, candidate.category,
             candidate.resolution_time, candidate.current_price,
+            candidate.volume_24h, candidate.book_depth,
         )
-
-        # Check for existing open positions in this market
-        existing = await ctx.db.fetchval(
-            """SELECT COUNT(*) FROM trades
-               WHERE market_id = $1 AND status IN ('open', 'filled', 'dry_run')""",
-            market_id)
-        max_per_market = getattr(self._settings, "max_positions_per_market", 1)
-        if existing >= max_per_market:
-            log.info("market_dedup_skip", market=candidate.polymarket_id,
-                     existing=existing, max=max_per_market)
-            return
 
         # Record analysis
         analysis_id = await ctx.db.fetchval(
@@ -346,7 +339,7 @@ class EnsembleForecastStrategy(Strategy):
             research,
         )
 
-        # 9. Risk check under portfolio lock
+        # 9. Dedup + risk check under portfolio lock (atomic with trade insert)
         proposal = TradeProposal(
             size_usd=size,
             category=candidate.category,
@@ -354,6 +347,28 @@ class EnsembleForecastStrategy(Strategy):
         )
 
         async with ctx.portfolio_lock:
+            # Dedup: check for existing positions in this market
+            existing = await ctx.db.fetchval(
+                """SELECT COUNT(*) FROM trades
+                   WHERE market_id = $1 AND status IN ('open', 'filled', 'dry_run')""",
+                market_id)
+            max_per_market = getattr(self._settings, "max_positions_per_market", 1)
+            if existing >= max_per_market:
+                log.info("market_dedup_skip", market=candidate.polymarket_id,
+                         existing=existing, max=max_per_market)
+                return
+
+            # Fresh portfolio state for risk check
+            fresh_state = await ctx.db.fetchrow("SELECT * FROM system_state WHERE id = 1")
+            portfolio = PortfolioState(
+                bankroll=float(fresh_state["bankroll"]),
+                total_deployed=float(fresh_state["total_deployed"]),
+                daily_pnl=float(fresh_state["daily_pnl"]),
+                open_count=portfolio.open_count,
+                category_deployed=portfolio.category_deployed,
+                circuit_breaker_until=fresh_state["circuit_breaker_until"],
+            )
+
             risk_result = ctx.risk_manager.check(proposal=proposal, state=portfolio,
                                                  max_single_pct=self.max_single_pct)
             if not risk_result.allowed:

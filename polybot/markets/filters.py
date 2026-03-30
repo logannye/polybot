@@ -13,6 +13,7 @@ class MarketCandidate:
     resolution_time: datetime
     current_price: float
     book_depth: float
+    volume_24h: float = 0.0
     last_analyzed_at: datetime | None = None
     previous_price: float | None = None
     yes_token_id: str = ""

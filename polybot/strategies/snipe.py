@@ -10,7 +10,7 @@ from polybot.notifications.email import format_trade_email
 log = structlog.get_logger()
 
 
-def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float = 48.0) -> int | None:
+def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float = 72.0) -> int | None:
     """
     Classify a market into snipe tiers based on price extremity and time remaining.
 
@@ -33,9 +33,9 @@ def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float =
         if price >= 0.85 or price <= 0.15:
             return 1
 
-    # Tier 2: Strong lean, wider window (conservative)
-    if hours_remaining <= 48.0:
-        if price >= 0.90 or price <= 0.10:
+    # Tier 2: Moderate lean, wider window (conservative)
+    if hours_remaining <= 72.0:
+        if price >= 0.85 or price <= 0.15:
             return 2
 
     return None
@@ -73,21 +73,30 @@ class ResolutionSnipeStrategy(Strategy):
         raw_markets = await ctx.scanner.fetch_markets()
         now = datetime.now(timezone.utc)
 
+        snipe_candidates = 0
         for m in raw_markets:
             hours_remaining = (m["resolution_time"] - now).total_seconds() / 3600
             tier = classify_snipe_tier(m["yes_price"], hours_remaining, self._max_hours)
             if tier is None:
                 continue
 
+            snipe_candidates += 1
+            log.info("snipe_candidate", market=m["polymarket_id"],
+                     price=m["yes_price"], hours=round(hours_remaining, 1), tier=tier)
+
             if m["yes_price"] >= 0.80:
                 side, buy_price = "YES", m["yes_price"]
             elif m["yes_price"] <= 0.20:
                 side, buy_price = "NO", 1 - m["yes_price"]
             else:
+                log.debug("snipe_rejected_price_range", market=m["polymarket_id"],
+                          price=m["yes_price"])
                 continue
 
             net_edge = compute_snipe_edge(buy_price, self._fee_rate)
             if net_edge < self._min_net_edge:
+                log.debug("snipe_rejected_edge", market=m["polymarket_id"],
+                          edge=round(net_edge, 4), min_edge=self._min_net_edge)
                 continue
 
             if tier in (1, 2) and self._ensemble:
@@ -97,10 +106,16 @@ class ResolutionSnipeStrategy(Strategy):
                         model="gemini-2.5-flash", contents=prompt)
                     parsed = parse_snipe_response(response.text)
                     if not parsed or not parsed["determined"] or parsed["confidence"] < self._min_confidence:
+                        log.info("snipe_rejected_llm", market=m["polymarket_id"],
+                                 tier=tier, parsed=parsed)
                         continue
                     if parsed["outcome"] == "NO" and side == "YES":
+                        log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
+                                 side=side, llm_outcome=parsed["outcome"])
                         continue
                     if parsed["outcome"] == "YES" and side == "NO":
+                        log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
+                                 side=side, llm_outcome=parsed["outcome"])
                         continue
                 except Exception as e:
                     log.error("snipe_llm_error", error=str(e))
@@ -127,6 +142,7 @@ class ResolutionSnipeStrategy(Strategy):
                     confidence_mult=1.0, max_single_pct=self.max_single_pct,
                     min_trade_size=ctx.settings.min_trade_size)
                 if size <= 0:
+                    log.debug("snipe_rejected_size_zero", market=m["polymarket_id"])
                     continue
 
                 open_trades = await ctx.db.fetch("SELECT * FROM trades WHERE status = 'open'")
@@ -139,16 +155,21 @@ class ResolutionSnipeStrategy(Strategy):
                                           book_depth=m.get("book_depth", 1000.0))
                 risk_result = ctx.risk_manager.check(portfolio, proposal, max_single_pct=self.max_single_pct)
                 if not risk_result.allowed:
+                    log.info("snipe_rejected_risk", market=m["polymarket_id"],
+                             reason=risk_result.reason)
                     continue
 
                 # Upsert market record
                 market_id = await ctx.db.fetchval(
-                    """INSERT INTO markets (polymarket_id, question, category, resolution_time, current_price)
-                       VALUES ($1, $2, $3, $4, $5)
-                       ON CONFLICT (polymarket_id) DO UPDATE SET current_price=$5, last_updated=NOW()
+                    """INSERT INTO markets (polymarket_id, question, category, resolution_time,
+                           current_price, volume_24h, book_depth)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)
+                       ON CONFLICT (polymarket_id) DO UPDATE SET
+                           current_price=$5, volume_24h=$6, book_depth=$7, last_updated=NOW()
                        RETURNING id""",
                     m["polymarket_id"], m["question"], m.get("category", "unknown"),
                     m["resolution_time"], m["yes_price"],
+                    m.get("volume_24h"), m.get("book_depth"),
                 )
 
                 # Create analysis record for the snipe
@@ -174,3 +195,6 @@ class ResolutionSnipeStrategy(Strategy):
                 f"[POLYBOT] Trade executed: {m['question'][:60]}",
                 format_trade_email(event="executed", market=m["question"], side=side,
                                    size=size, price=buy_price, edge=net_edge))
+
+        log.info("snipe_cycle_complete", markets_scanned=len(raw_markets),
+                 candidates=snipe_candidates)
