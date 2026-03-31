@@ -19,13 +19,14 @@ def compute_limit_price(side: str, best_bid: float, best_ask: float,
 
 class OrderExecutor:
     def __init__(self, scanner, wallet, db, fill_timeout_seconds: int = 120,
-                 clob=None, dry_run: bool = False):
+                 clob=None, dry_run: bool = False, trade_learner=None):
         self._scanner = scanner
         self._wallet = wallet
         self._db = db
         self._fill_timeout_seconds = fill_timeout_seconds
         self._clob = clob
         self._dry_run = dry_run
+        self._trade_learner = trade_learner
 
     def should_cancel_order(self, elapsed_seconds: float) -> bool:
         return elapsed_seconds > self._fill_timeout_seconds
@@ -167,4 +168,9 @@ class OrderExecutor:
         log.info("position_exited", trade_id=trade_id, pnl=round(pnl, 4),
                  reason=exit_reason, side=side, entry=entry_price,
                  exit=exit_price, strategy=strategy)
+        if self._trade_learner:
+            try:
+                await self._trade_learner.on_trade_closed(trade_id)
+            except Exception as e:
+                log.error("trade_learning_error", trade_id=trade_id, error=str(e))
         return pnl
