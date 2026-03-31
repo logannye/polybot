@@ -219,3 +219,108 @@ async def test_check_positions_empty_returns_early():
 
     scanner.get_all_cached_prices.assert_not_called()
     executor.exit_position.assert_not_called()
+
+
+from datetime import datetime, timezone, timedelta
+
+
+@pytest.mark.asyncio
+async def test_check_positions_time_stop_forecast():
+    """Forecast trade held > 120 minutes should trigger time_stop exit."""
+    db = AsyncMock()
+    opened_3h_ago = datetime.now(timezone.utc) - timedelta(hours=3)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 10, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
+        "polymarket_id": "mkt-time", "question": "Time stop test?",
+        "ensemble_probability": 0.65, "opened_at": opened_3h_ago,
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=0.50)
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-time": {"yes_price": 0.52, "no_price": 0.48},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.30
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.forecast_time_stop_minutes = 120.0
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=10, exit_price=0.52, exit_reason="time_stop")
+
+
+@pytest.mark.asyncio
+async def test_check_positions_no_time_stop_within_window():
+    """Forecast trade held < 120 minutes should NOT trigger time_stop."""
+    db = AsyncMock()
+    opened_30m_ago = datetime.now(timezone.utc) - timedelta(minutes=30)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 11, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
+        "polymarket_id": "mkt-fresh", "question": "Fresh forecast?",
+        "ensemble_probability": 0.65, "opened_at": opened_30m_ago,
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-fresh": {"yes_price": 0.52, "no_price": 0.48},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.30
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.forecast_time_stop_minutes = 120.0
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_positions_no_time_stop_for_snipe():
+    """Snipe trade held > 120 minutes should NOT trigger time_stop (forecast only)."""
+    db = AsyncMock()
+    opened_3h_ago = datetime.now(timezone.utc) - timedelta(hours=3)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 12, "side": "YES", "entry_price": 0.95, "shares": 100.0,
+        "position_size_usd": 95.0, "strategy": "snipe", "status": "dry_run",
+        "polymarket_id": "mkt-snipe-old", "question": "Old snipe?",
+        "ensemble_probability": None, "opened_at": opened_3h_ago,
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-snipe-old": {"yes_price": 0.96, "no_price": 0.04},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.30
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.forecast_time_stop_minutes = 120.0
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    # Snipe at 0.95 → 0.96 is only 1% gain, below 30% TP. No exit should fire.
+    executor.exit_position.assert_not_called()

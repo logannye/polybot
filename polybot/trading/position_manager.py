@@ -1,4 +1,5 @@
 import structlog
+from datetime import datetime, timezone
 from polybot.markets.websocket import should_early_exit
 
 log = structlog.get_logger()
@@ -44,12 +45,14 @@ class ActivePositionManager:
         self._take_profit = settings.take_profit_threshold
         self._stop_loss = settings.stop_loss_threshold
         self._early_exit_edge = settings.early_exit_edge
+        self._forecast_time_stop_minutes = getattr(settings, 'forecast_time_stop_minutes', 120.0)
         self._portfolio_lock = portfolio_lock
 
     async def check_positions(self):
         positions = await self._db.fetch(
             """SELECT t.id, t.side, t.entry_price, t.shares,
                       t.position_size_usd, t.strategy, t.status,
+                      t.opened_at,
                       m.polymarket_id, m.question,
                       a.ensemble_probability
                FROM trades t
@@ -76,6 +79,33 @@ class ActivePositionManager:
             entry_price = float(pos["entry_price"])
             side = pos["side"]
             trade_id = pos["id"]
+
+            # Time-stop: auto-exit forecast trades exceeding hold limit
+            if pos["strategy"] == "forecast" and pos.get("opened_at") is not None:
+                hold_minutes = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 60
+                if hold_minutes > self._forecast_time_stop_minutes:
+                    exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                    unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
+                    if self._portfolio_lock:
+                        async with self._portfolio_lock:
+                            pnl = await self._executor.exit_position(
+                                trade_id=trade_id, exit_price=exit_price,
+                                exit_reason="time_stop")
+                    else:
+                        pnl = await self._executor.exit_position(
+                            trade_id=trade_id, exit_price=exit_price,
+                            exit_reason="time_stop")
+                    if pnl is not None:
+                        exits_triggered += 1
+                        log.info("position_time_stop",
+                                 trade_id=trade_id, hold_minutes=round(hold_minutes, 1),
+                                 pnl=round(pnl, 4), market=pos["question"][:60])
+                        await self._email.send(
+                            f"[POLYBOT] Position time-stopped",
+                            f"<p><b>Market:</b> {pos['question']}</p>"
+                            f"<p><b>Held:</b> {hold_minutes:.0f}min | "
+                            f"P&L: ${pnl:+.2f}</p>")
+                    continue
 
             exit_reason = None
 
