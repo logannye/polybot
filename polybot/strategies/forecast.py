@@ -22,6 +22,16 @@ from polybot.notifications.email import format_trade_email
 
 log = structlog.get_logger()
 
+
+def check_forecast_blacklist(
+    polymarket_id: str,
+    blacklist: dict[str, list],
+) -> bool:
+    """Return True if market is blacklisted (2+ stop-losses in recent history)."""
+    losses = blacklist.get(polymarket_id, [])
+    return len(losses) >= 2
+
+
 _STRATEGY_DISABLED_REASON = "strategy_disabled"
 
 
@@ -35,6 +45,7 @@ class EnsembleForecastStrategy(Strategy):
         self._settings = settings
         self._ensemble = ensemble
         self._researcher = researcher
+        self._loss_blacklist: dict[str, list] = {}
 
     async def run_once(self, ctx: TradingContext) -> None:
         # 1. Check if this strategy is enabled
@@ -57,6 +68,18 @@ class EnsembleForecastStrategy(Strategy):
         edge_threshold = float(state_row["edge_threshold"])
         raw_cal = state_row["calibration_corrections"] or {}
         calibration_corrections: dict[str, float] = json.loads(raw_cal) if isinstance(raw_cal, str) else raw_cal
+
+        # Refresh forecast loss blacklist
+        recent_losses = await ctx.db.fetch(
+            """SELECT m.polymarket_id, t.closed_at
+               FROM trades t JOIN markets m ON t.market_id = m.id
+               WHERE t.strategy = 'forecast'
+                 AND t.exit_reason IN ('stop_loss', 'time_stop')
+                 AND t.closed_at > NOW() - INTERVAL '12 hours'""")
+        self._loss_blacklist = {}
+        for row in recent_losses:
+            pid = row["polymarket_id"]
+            self._loss_blacklist.setdefault(pid, []).append(row["closed_at"])
 
         # 3. Scan + filter markets
         raw_markets = await ctx.scanner.fetch_markets()
@@ -205,6 +228,12 @@ class EnsembleForecastStrategy(Strategy):
         calibration_corrections: dict[str, float],
         ctx: TradingContext,
     ) -> None:
+        # Market loss blacklist: skip markets with 2+ recent stop-losses
+        if check_forecast_blacklist(candidate.polymarket_id, self._loss_blacklist):
+            log.info("forecast_blacklisted", market=candidate.polymarket_id,
+                     losses=len(self._loss_blacklist.get(candidate.polymarket_id, [])))
+            return
+
         # 6a. Web research first, then ensemble with full context
         research = await self._researcher.search(candidate.question)
         ensemble_result = await self._ensemble.analyze(

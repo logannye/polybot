@@ -108,3 +108,30 @@ async def test_forecast_dedup_blocks_existing_trade():
 
     # place_order should NOT have been called because dedup blocked it
     ctx.executor.place_order.assert_not_called()
+
+
+from polybot.strategies.forecast import check_forecast_blacklist
+from datetime import datetime, timezone, timedelta
+
+
+def test_blacklist_blocks_after_two_losses():
+    """Market with 2 stop-losses in 12h should be blacklisted."""
+    now = datetime.now(timezone.utc)
+    blacklist = {
+        "mkt-bad": [now - timedelta(hours=2), now - timedelta(hours=1)],
+    }
+    assert check_forecast_blacklist("mkt-bad", blacklist) is True
+
+
+def test_blacklist_allows_one_loss():
+    """Market with only 1 stop-loss should not be blacklisted."""
+    now = datetime.now(timezone.utc)
+    blacklist = {
+        "mkt-ok": [now - timedelta(hours=1)],
+    }
+    assert check_forecast_blacklist("mkt-ok", blacklist) is False
+
+
+def test_blacklist_allows_unknown_market():
+    """Market not in blacklist should be allowed."""
+    assert check_forecast_blacklist("mkt-new", {}) is False
