@@ -88,6 +88,17 @@ class Settings(BaseSettings):
     stop_loss_threshold: float = 0.25
     position_check_interval: int = 60
 
+    # Snipe cooldown & re-entry
+    snipe_cooldown_hours: float = 4.0
+    snipe_reentry_threshold: float = 0.03
+    snipe_max_entries_per_market: int = 3
+
+    # Arb bankroll gate
+    arb_min_bankroll: float = 2000.0
+
+    # Forecast time-stop
+    forecast_time_stop_minutes: float = 120.0
+
     # Quant signal weights
     quant_weights: dict[str, float] = {
         "line_movement": 0.30,
