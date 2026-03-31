@@ -23,6 +23,22 @@ from polybot.notifications.email import format_trade_email
 log = structlog.get_logger()
 
 
+def _lookup_calibration_correction(prob: float, corrections: dict | None) -> float:
+    """Find the correction for the nearest calibration bin to this probability."""
+    if not corrections:
+        return 0.0
+    bin_mids = []
+    for k, v in corrections.items():
+        try:
+            bin_mids.append((float(k), float(v)))
+        except (ValueError, TypeError):
+            continue
+    if not bin_mids:
+        return 0.0
+    nearest = min(bin_mids, key=lambda x: abs(x[0] - prob))
+    return max(-0.10, min(0.10, nearest[1]))
+
+
 def check_forecast_blacklist(
     polymarket_id: str,
     blacklist: dict[str, list],
@@ -267,7 +283,7 @@ class EnsembleForecastStrategy(Strategy):
                          revised=revised, final=prob)
 
         if calibration_corrections:
-            correction = calibration_corrections.get(candidate.category, 0.0)
+            correction = _lookup_calibration_correction(prob, calibration_corrections)
             prob = max(0.01, min(0.99, prob + correction))
 
         prob = max(0.01, min(0.99, prob))

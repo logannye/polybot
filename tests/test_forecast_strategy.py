@@ -135,3 +135,35 @@ def test_blacklist_allows_one_loss():
 def test_blacklist_allows_unknown_market():
     """Market not in blacklist should be allowed."""
     assert check_forecast_blacklist("mkt-new", {}) is False
+
+
+from polybot.strategies.forecast import _lookup_calibration_correction
+
+
+def test_calibration_lookup_exact_bin():
+    """Should find correction for the nearest bin."""
+    corrections = {"0.1": -0.05, "0.3": 0.02, "0.5": -0.01, "0.7": 0.03, "0.9": -0.08}
+    assert _lookup_calibration_correction(0.12, corrections) == pytest.approx(-0.05)
+
+
+def test_calibration_lookup_midpoint():
+    """Probability 0.45 should match bin 0.5 (nearest)."""
+    corrections = {"0.1": -0.05, "0.3": 0.02, "0.5": -0.01, "0.7": 0.03, "0.9": -0.08}
+    assert _lookup_calibration_correction(0.45, corrections) == pytest.approx(-0.01)
+
+
+def test_calibration_lookup_clamps_large_correction():
+    """Corrections should be clamped to [-0.10, +0.10]."""
+    corrections = {"0.9": -0.95}  # Absurdly large correction
+    result = _lookup_calibration_correction(0.88, corrections)
+    assert result == pytest.approx(-0.10)
+
+
+def test_calibration_lookup_empty():
+    """Empty corrections should return 0.0."""
+    assert _lookup_calibration_correction(0.5, {}) == 0.0
+
+
+def test_calibration_lookup_none():
+    """None corrections should return 0.0."""
+    assert _lookup_calibration_correction(0.5, None) == 0.0
