@@ -1,3 +1,4 @@
+import json
 import structlog
 from datetime import datetime, timezone
 from polybot.markets.websocket import should_early_exit
@@ -49,6 +50,19 @@ class ActivePositionManager:
         self._portfolio_lock = portfolio_lock
 
     async def check_positions(self):
+        # Load per-strategy learned thresholds (adaptive TP/SL)
+        learned_thresholds = {}
+        for strat in ("snipe", "forecast"):
+            row = await self._db.fetchval(
+                "SELECT learned_params FROM strategy_performance WHERE strategy = $1", strat)
+            if row:
+                try:
+                    params = json.loads(row) if isinstance(row, str) else row
+                    if isinstance(params, dict) and params.get("threshold_sample_size", 0) >= 10:
+                        learned_thresholds[strat] = params
+                except (json.JSONDecodeError, TypeError, AttributeError, ValueError):
+                    pass
+
         positions = await self._db.fetch(
             """SELECT t.id, t.side, t.entry_price, t.shares,
                       t.position_size_usd, t.strategy, t.status,
@@ -109,11 +123,17 @@ class ActivePositionManager:
 
             exit_reason = None
 
+            strategy = pos["strategy"]
+            tp_threshold = learned_thresholds.get(strategy, {}).get(
+                "take_profit_threshold", self._take_profit)
+            sl_threshold = learned_thresholds.get(strategy, {}).get(
+                "stop_loss_threshold", self._stop_loss)
+
             if should_take_profit(side, entry_price, current_yes_price,
-                                   self._take_profit):
+                                   tp_threshold):
                 exit_reason = "take_profit"
             elif should_cut_loss(side, entry_price, current_yes_price,
-                                  self._stop_loss):
+                                  sl_threshold):
                 exit_reason = "stop_loss"
             elif pos["ensemble_probability"] is not None:
                 ensemble_prob = float(pos["ensemble_probability"])
