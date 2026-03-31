@@ -31,11 +31,13 @@ Targets markets approaching resolution where the outcome is effectively determin
 
 - **Tier 0** (no LLM): Price at $0.95+ or $0.05-, within 24h — near-certain, just collecting convergence
 - **Tier 1** (single Gemini Flash call): Price $0.85-$0.95, within 12h — cheap LLM verifies outcome is determined
-- **Tier 2** (single Gemini Flash call): Price $0.85-$0.95, within 72h — conservative sizing, LLM verified
+- **Tier 2** (single Gemini Flash call): Price $0.85-$0.95, within 120h — conservative sizing, LLM verified
 
-Sizing: Tier-dependent Kelly — T0: 0.50x (full snipe kelly), T1: 0.35x, T2: 0.20x.
+Sizing: Tier-dependent Kelly — T0: 0.50x (full snipe kelly), T1: 0.35x, T2: 0.20x. High-edge trades (3-5%) get 1.5x sizing; 5%+ edge gets 2x.
 
-### Strategy 3: Ensemble Forecast (every 5 min)
+**Per-market cooldown**: After exiting a market, re-entry is blocked for 4 hours unless price moves 3%+ (capturing second-leg convergence). Capped at 3 entries per market per 24h.
+
+### Strategy 3: Ensemble Forecast (every 3 min)
 
 The full analysis pipeline with a cost-efficient tiered funnel:
 
@@ -59,6 +61,10 @@ Three models estimate probability **blind** — the market price is intentionall
 
 Sizing: Quarter-Kelly (0.25x) with confidence modulation.
 
+**Market loss blacklist**: After 2 stop-losses on the same market within 12 hours, the market is blacklisted — preventing repeated losing entries on the same thesis.
+
+**Time-stop**: Forecast trades held longer than 2 hours are automatically exited at market price. Short holds (<1hr) are empirically more profitable; long holds lock capital in stale positions.
+
 ## Architecture
 
 Single Python async process (`asyncio`). Each strategy runs as an independent coroutine with its own scan interval, Kelly multiplier, and risk limits. Shared resources (DB, scanner, executor) are passed via a `TradingContext` dataclass. Bankroll contention between strategies is managed by an `asyncio.Lock` held only during the DB read-check-write window (~5ms).
@@ -70,7 +76,7 @@ polybot/
 ├── markets/        # Polymarket API client (Gamma + CLOB), filters, WebSocket tracker
 ├── analysis/       # LLM ensemble, quant signals, web research, pre-scoring
 ├── trading/        # Kelly sizing, risk management, order execution, CLOB gateway
-├── learning/       # Brier calibration, category tracking, self-assessment
+├── learning/       # Brier calibration, category tracking, self-assessment, per-trade learning
 ├── notifications/  # Email alerts (Resend) — trade events, daily reports
 ├── dashboard/      # FastAPI status dashboard
 └── db/             # PostgreSQL schema and connection pool
@@ -82,7 +88,8 @@ polybot/
 - **Exponential backoff** — Strategy errors trigger 30s→60s→...→10min backoff (30 consecutive failures to disable, not 5)
 - **Capital reconciliation** — Every 5 minutes, `total_deployed` is reconciled against actual open positions in the DB, auto-correcting any drift > $1
 - **Startup recovery** — On restart, reconciles positions that resolved during downtime
-- **systemd watchdog** — If the process crashes, systemd restarts it within 10 seconds
+- **LaunchAgent (macOS)** — `ai.polybot.trader` plist with KeepAlive, PostgreSQL readiness guard, kill switch support, caffeinate to prevent sleep, and 45s throttle between restarts
+- **systemd (Linux)** — If the process crashes, systemd restarts it within 10 seconds
 
 ## Risk management
 
@@ -90,15 +97,16 @@ Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
 | Rule | Arbitrage | Snipe | Forecast |
 |------|-----------|-------|----------|
-| Kelly multiplier | 0.80x | 0.50x | 0.25x |
-| Max single position | 40% | 25% | 15% |
+| Kelly multiplier | 0.80x | 0.50x (+ tiered edge scaling) | 0.25x |
+| Max single position | 40% | 30% | 15% |
+| Bankroll gate | $2K minimum | — | — |
 
 | Rule | Default |
 |------|---------|
-| Max total deployed | 70% of bankroll |
+| Max total deployed | 90% of bankroll |
 | Max per category | 25% of bankroll |
-| Max concurrent positions | 12 |
-| Daily loss limit | 15% of bankroll (triggers 6h circuit breaker) |
+| Max concurrent positions | 20 |
+| Daily loss limit | Configurable (default 15%, disabled during sprint mode) |
 | Post-breaker cooldown | 24h at 50% Kelly |
 | Min trade size | $1 |
 
@@ -126,18 +134,37 @@ Gemini Flash also serves as the cheap screening model for resolution sniping and
 
 ## Adaptive learning
 
-- **Model trust weights** — Rebalanced after every resolved trade via EMA on per-model Brier scores. Models with better calibration automatically receive higher weight in the ensemble. Cold start protection: equal weights for the first 30 trades.
-- **Strategy-level P&L** — Win rate, total P&L, and average edge tracked per strategy (including dry-run trades). Kill switch disables any strategy with negative P&L after 50+ trades.
-- **Category performance** — Tracks win rate and ROI per market category. Biases the forecast pre-scoring toward profitable categories.
-- **Calibration correction** — Computed from 30-day resolved trades during daily self-assessment. Per-bin probability corrections fix systematic over/underconfidence and are applied to ensemble estimates on every forecast cycle.
+Learning fires at two timescales — per-trade (instant) and hourly (periodic):
+
+### Per-trade learning (instant)
+
+Every trade close — whether take-profit, stop-loss, time-stop, early-exit, or resolution — triggers `TradeLearner.on_trade_closed()`:
+
+- **Proxy trust weights** — Model Brier EMA updated using early-exit outcomes as proxy signals. Take-profit (ensemble was right, alpha=0.05), stop-loss (ensemble was wrong, alpha=0.08), ambiguous exits (alpha=0.03). Lower learning rates than resolution (0.15) because proxy signals are noisier.
+- **Exit-reason analytics** — Per-strategy, per-exit-reason tracking of count, total P&L, and average hold time in `strategy_performance.learned_params` JSONB.
+- **Category performance** — Tracks win rate and ROI per market category in `system_state.category_scores`. Biases the forecast pre-scoring toward profitable categories.
+- **Strategy avg_edge** — Running average of edge quality per strategy.
+
+### Hourly learning cycle
+
+`_hourly_learning()` runs every hour to recompute adaptive parameters:
+
+- **Adaptive TP/SL thresholds** — Analyzes 14 days of trade outcomes to find optimal take-profit and stop-loss levels per strategy. Tests thresholds in 5% increments, picks the one maximizing frequency-weighted expected value (TP) or minimizing frequency-weighted loss (SL). The position manager reads learned thresholds, falling back to config defaults when data is insufficient.
+- **Snipe parameter learning** — Buckets snipe trades by edge level and price level, finds the minimum profitable edge bucket, and adjusts `snipe_min_net_edge` automatically.
+- **Kelly/edge adjustment** — 3-day lookback window (vs 7-day for daily). Adjusts Kelly multiplier based on max drawdown and edge threshold based on marginal-bucket profitability.
+- **Calibration correction refresh** — Recomputes per-bin probability corrections from 30-day data. Corrections fix systematic ensemble overconfidence and are applied via nearest-bin lookup on every forecast cycle.
+
+### Daily self-assessment (midnight UTC)
+
+- Strategy kill switch evaluation (negative P&L after 50+ trades)
+- Circuit breaker check with post-breaker cooldown activation
+- End-of-day report email with full P&L breakdown by strategy
+
+### Safety invariants
+
+Every learned parameter is **clamped** (Kelly [0.15, 0.35], TP [0.10, 0.50], SL [0.10, 0.40], edge [0.01, 0.10], calibration [-0.10, +0.10]), **defaulted** (insufficient data falls back to config), and **toggleable** (each mechanism has an `enable_*` boolean in config).
+
 - **Kelly inputs audit trail** — Every trade records the full sizing decision: ensemble probability, market price, edge, kelly fraction, confidence multiplier, skepticism discount, and effective kelly. Enables post-hoc analysis of sizing quality.
-- **Daily self-assessment** (midnight UTC):
-  - Kelly multiplier tuning based on 7-day drawdown
-  - Edge threshold tuning based on marginal trade profitability
-  - Calibration correction recomputation (5-bin probability calibration)
-  - Strategy kill switch evaluation
-  - Circuit breaker check with post-breaker cooldown activation
-  - End-of-day report email with full P&L breakdown by strategy
 
 ## Monitoring
 
@@ -328,7 +355,7 @@ Or manually: `ssh polybot@vps "cd /opt/polybot && git pull && uv sync && sudo sy
 ## Testing
 
 ```bash
-uv run pytest tests/ -v                                    # Run all 209 tests
+uv run pytest tests/ -v                                    # Run all 264 tests
 uv run pytest tests/ --cov=polybot --cov-report=term       # With coverage
 uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 ```
