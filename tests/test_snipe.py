@@ -101,3 +101,96 @@ def test_snipe_edge_yes():
 def test_snipe_edge_negative():
     edge = compute_snipe_edge(buy_price=0.99, fee_rate=0.02)
     assert edge < 0
+
+
+from polybot.strategies.snipe import compute_tiered_kelly_scale
+
+
+def test_tiered_kelly_base_edge():
+    """Edge 2-3% gets no boost (1.0x)."""
+    assert compute_tiered_kelly_scale(0.025) == 1.0
+
+
+def test_tiered_kelly_mid_edge():
+    """Edge 3-5% gets 1.5x boost."""
+    assert compute_tiered_kelly_scale(0.04) == 1.5
+
+
+def test_tiered_kelly_high_edge():
+    """Edge 5%+ gets 2.0x boost."""
+    assert compute_tiered_kelly_scale(0.06) == 2.0
+
+
+def test_tiered_kelly_boundary_3pct():
+    """Exactly 3% gets the 1.5x boost."""
+    assert compute_tiered_kelly_scale(0.03) == 1.5
+
+
+def test_tiered_kelly_boundary_5pct():
+    """Exactly 5% gets the 2.0x boost."""
+    assert compute_tiered_kelly_scale(0.05) == 2.0
+
+
+def test_tiered_kelly_below_min():
+    """Edge below 2% still gets 1.0x (no penalty)."""
+    assert compute_tiered_kelly_scale(0.01) == 1.0
+
+
+from datetime import datetime, timezone, timedelta
+from polybot.strategies.snipe import check_snipe_cooldown
+
+
+def test_cooldown_blocks_recent_exit():
+    """Market exited 1 hour ago with 4-hour cooldown should be blocked."""
+    now = datetime.now(timezone.utc)
+    cooldowns = {
+        "mkt-1": {"exit_time": now - timedelta(hours=1), "exit_price": 0.95},
+    }
+    result = check_snipe_cooldown(
+        "mkt-1", current_price=0.95, cooldowns=cooldowns,
+        cooldown_hours=4.0, reentry_threshold=0.03)
+    assert result is False
+
+
+def test_cooldown_allows_after_expiry():
+    """Market exited 5 hours ago with 4-hour cooldown should be allowed."""
+    now = datetime.now(timezone.utc)
+    cooldowns = {
+        "mkt-1": {"exit_time": now - timedelta(hours=5), "exit_price": 0.95},
+    }
+    result = check_snipe_cooldown(
+        "mkt-1", current_price=0.95, cooldowns=cooldowns,
+        cooldown_hours=4.0, reentry_threshold=0.03)
+    assert result is True
+
+
+def test_cooldown_allows_unknown_market():
+    """Market not in cooldowns should be allowed."""
+    result = check_snipe_cooldown(
+        "mkt-new", current_price=0.95, cooldowns={},
+        cooldown_hours=4.0, reentry_threshold=0.03)
+    assert result is True
+
+
+def test_cooldown_allows_reentry_on_price_move():
+    """Market in cooldown but price moved 4% should be allowed (re-entry)."""
+    now = datetime.now(timezone.utc)
+    cooldowns = {
+        "mkt-1": {"exit_time": now - timedelta(hours=1), "exit_price": 0.92},
+    }
+    result = check_snipe_cooldown(
+        "mkt-1", current_price=0.96, cooldowns=cooldowns,
+        cooldown_hours=4.0, reentry_threshold=0.03)
+    assert result is True
+
+
+def test_cooldown_blocks_small_price_move():
+    """Market in cooldown with only 1% price move should still be blocked."""
+    now = datetime.now(timezone.utc)
+    cooldowns = {
+        "mkt-1": {"exit_time": now - timedelta(hours=1), "exit_price": 0.95},
+    }
+    result = check_snipe_cooldown(
+        "mkt-1", current_price=0.96, cooldowns=cooldowns,
+        cooldown_hours=4.0, reentry_threshold=0.03)
+    assert result is False

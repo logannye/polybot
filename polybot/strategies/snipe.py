@@ -51,6 +51,34 @@ def compute_snipe_edge(buy_price: float, fee_rate: float = 0.02) -> float:
     return (1.0 - buy_price) - fee_rate
 
 
+def compute_tiered_kelly_scale(net_edge: float) -> float:
+    """Scale Kelly multiplier based on edge magnitude. Higher edge = larger position."""
+    if net_edge >= 0.05:
+        return 2.0
+    if net_edge >= 0.03:
+        return 1.5
+    return 1.0
+
+
+def check_snipe_cooldown(
+    polymarket_id: str,
+    current_price: float,
+    cooldowns: dict[str, dict],
+    cooldown_hours: float,
+    reentry_threshold: float,
+) -> bool:
+    """Return True if the market is clear to enter, False if blocked by cooldown."""
+    if polymarket_id not in cooldowns:
+        return True
+    entry = cooldowns[polymarket_id]
+    elapsed_hours = (datetime.now(timezone.utc) - entry["exit_time"]).total_seconds() / 3600
+    if elapsed_hours >= cooldown_hours:
+        return True
+    # Still in cooldown — check if price moved enough for re-entry
+    price_delta = abs(current_price - entry["exit_price"])
+    return price_delta >= reentry_threshold
+
+
 class ResolutionSnipeStrategy(Strategy):
     name = "snipe"
 
@@ -63,12 +91,32 @@ class ResolutionSnipeStrategy(Strategy):
         self._max_hours = settings.snipe_hours_max
         self._fee_rate = settings.polymarket_fee_rate
         self._ensemble = ensemble
+        self._cooldown_hours = settings.snipe_cooldown_hours
+        self._reentry_threshold = settings.snipe_reentry_threshold
+        self._max_entries_per_market = settings.snipe_max_entries_per_market
+        self._market_cooldowns: dict[str, dict] = {}
 
     async def run_once(self, ctx: TradingContext) -> None:
         enabled = await ctx.db.fetchval(
             "SELECT enabled FROM strategy_performance WHERE strategy = 'snipe'")
         if enabled is False:
             return
+
+        # Refresh per-market cooldowns from recently closed snipe trades
+        recent_exits = await ctx.db.fetch(
+            """SELECT m.polymarket_id, t.closed_at, t.exit_price
+               FROM trades t JOIN markets m ON t.market_id = m.id
+               WHERE t.strategy = 'snipe'
+                 AND t.status IN ('dry_run_resolved', 'closed')
+                 AND t.closed_at > NOW() - INTERVAL '24 hours'
+               ORDER BY t.closed_at DESC""")
+        for row in recent_exits:
+            pid = row["polymarket_id"]
+            if pid not in self._market_cooldowns or row["closed_at"] > self._market_cooldowns[pid]["exit_time"]:
+                self._market_cooldowns[pid] = {
+                    "exit_time": row["closed_at"],
+                    "exit_price": float(row["exit_price"]),
+                }
 
         raw_markets = await ctx.scanner.fetch_markets()
         now = datetime.now(timezone.utc)
@@ -97,6 +145,25 @@ class ResolutionSnipeStrategy(Strategy):
             if net_edge < self._min_net_edge:
                 log.debug("snipe_rejected_edge", market=m["polymarket_id"],
                           edge=round(net_edge, 4), min_edge=self._min_net_edge)
+                continue
+
+            # Per-market cooldown check
+            if not check_snipe_cooldown(
+                m["polymarket_id"], buy_price, self._market_cooldowns,
+                self._cooldown_hours, self._reentry_threshold,
+            ):
+                log.debug("snipe_cooldown_blocked", market=m["polymarket_id"])
+                continue
+
+            # 24h entry cap per market
+            entries_24h = await ctx.db.fetchval(
+                """SELECT COUNT(*) FROM trades t JOIN markets m ON t.market_id = m.id
+                   WHERE m.polymarket_id = $1 AND t.strategy = 'snipe'
+                     AND t.opened_at > NOW() - INTERVAL '24 hours'""",
+                m["polymarket_id"])
+            if entries_24h and entries_24h >= self._max_entries_per_market:
+                log.debug("snipe_entry_cap", market=m["polymarket_id"],
+                          entries=entries_24h, max=self._max_entries_per_market)
                 continue
 
             if tier in (1, 2) and self._ensemble:
@@ -136,6 +203,8 @@ class ResolutionSnipeStrategy(Strategy):
                 # Tier-dependent kelly scaling
                 tier_kelly_scale = {0: 1.0, 1: 0.70, 2: 0.40}
                 kelly_adj *= tier_kelly_scale.get(tier, 1.0)
+                # Tiered edge sizing: larger positions on higher edge
+                kelly_adj *= compute_tiered_kelly_scale(net_edge)
                 kelly_fraction = net_edge / (1 - buy_price) if buy_price < 1.0 else 0.0
                 size = compute_position_size(
                     bankroll=bankroll, kelly_fraction=kelly_fraction, kelly_mult=kelly_adj,
