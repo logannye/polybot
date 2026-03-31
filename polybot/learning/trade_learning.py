@@ -256,3 +256,71 @@ class TradeLearner:
             await self._db.execute(
                 "UPDATE model_performance SET trust_weight=$1 WHERE model_name=$2",
                 weight, m["model_name"])
+
+    async def compute_snipe_params(self) -> None:
+        """Analyze snipe trade performance to find optimal edge threshold."""
+        if not getattr(self._settings, 'enable_snipe_learning', True):
+            return
+
+        trades = await self._db.fetch(
+            """SELECT t.pnl, t.entry_price, t.exit_reason, t.side,
+                      t.opened_at, t.closed_at, a.edge
+               FROM trades t
+               JOIN analyses a ON t.analysis_id = a.id
+               WHERE t.strategy = 'snipe'
+                 AND t.status IN ('closed', 'dry_run_resolved')
+                 AND t.closed_at > NOW() - INTERVAL '14 days'""")
+
+        if len(trades) < 5:
+            return
+
+        # Bucket by edge level (0.05 increments)
+        edge_buckets = {}
+        for t in trades:
+            edge = float(t["edge"])
+            bucket = round(edge * 20) / 20
+            if bucket not in edge_buckets:
+                edge_buckets[bucket] = {"count": 0, "total_pnl": 0.0}
+            edge_buckets[bucket]["count"] += 1
+            edge_buckets[bucket]["total_pnl"] += float(t["pnl"] or 0)
+
+        # Find minimum profitable edge bucket
+        sorted_edges = sorted(edge_buckets.keys())
+        default_min_edge = getattr(self._settings, 'snipe_min_net_edge', 0.02)
+        optimal_min_edge = default_min_edge
+        for edge_key in sorted_edges:
+            bucket = edge_buckets[edge_key]
+            if bucket["count"] >= 3 and bucket["total_pnl"] > 0:
+                optimal_min_edge = edge_key
+                break
+
+        optimal_min_edge = max(0.01, min(0.10, optimal_min_edge))
+
+        # Bucket by price level (0.10 increments)
+        price_buckets = {}
+        for t in trades:
+            price = float(t["entry_price"])
+            bucket = round(price * 10) / 10
+            if bucket not in price_buckets:
+                price_buckets[bucket] = {"count": 0, "total_pnl": 0.0, "wins": 0}
+            price_buckets[bucket]["count"] += 1
+            price_buckets[bucket]["total_pnl"] += float(t["pnl"] or 0)
+            if float(t["pnl"] or 0) > 0:
+                price_buckets[bucket]["wins"] += 1
+
+        # Store learned params
+        current = await self._db.fetchval(
+            "SELECT learned_params FROM strategy_performance WHERE strategy = 'snipe'")
+        params = json.loads(current) if current and current != '{}' else {}
+        params["optimal_min_edge"] = round(optimal_min_edge, 3)
+        params["edge_buckets"] = {str(k): v for k, v in edge_buckets.items()}
+        params["price_buckets"] = {str(k): v for k, v in price_buckets.items()}
+        params["snipe_sample_size"] = len(trades)
+        params["snipe_params_updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        await self._db.execute(
+            "UPDATE strategy_performance SET learned_params = $1 WHERE strategy = 'snipe'",
+            json.dumps(params))
+
+        log.info("snipe_params_learned", optimal_min_edge=optimal_min_edge,
+                 sample_size=len(trades))

@@ -118,6 +118,21 @@ class ResolutionSnipeStrategy(Strategy):
                     "exit_price": float(row["exit_price"]),
                 }
 
+        # Load learned snipe parameters
+        snipe_learned = await ctx.db.fetchval(
+            "SELECT learned_params FROM strategy_performance WHERE strategy = 'snipe'")
+        if snipe_learned:
+            try:
+                import json
+                sp = json.loads(snipe_learned) if isinstance(snipe_learned, str) else snipe_learned
+                if sp.get("snipe_sample_size", 0) >= 5:
+                    learned_edge = sp.get("optimal_min_edge")
+                    if learned_edge is not None:
+                        self._min_net_edge = max(0.01, min(0.10, learned_edge))
+                        log.debug("snipe_learned_edge", min_edge=self._min_net_edge)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         raw_markets = await ctx.scanner.fetch_markets()
         now = datetime.now(timezone.utc)
 

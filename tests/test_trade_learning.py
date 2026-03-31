@@ -244,3 +244,108 @@ async def test_proxy_trust_skips_snipe_no_estimates(db, settings):
     # Should NOT see brier_score_ema updates (no model estimates)
     brier_updates = [c for c in db.execute.call_args_list if "brier_score_ema" in str(c)]
     assert len(brier_updates) == 0
+
+
+@pytest.mark.asyncio
+async def test_compute_optimal_thresholds_stores_results(db, settings):
+    """compute_optimal_thresholds should store learned TP/SL in learned_params."""
+    # Create enough mock trades to trigger learning
+    trades = []
+    now = datetime.now(timezone.utc)
+    for i in range(15):
+        pnl = 2.0 if i % 3 == 0 else -1.0
+        trades.append({
+            "exit_reason": "take_profit" if pnl > 0 else "stop_loss",
+            "pnl": pnl,
+            "entry_price": 0.50,
+            "exit_price": 0.65 if pnl > 0 else 0.38,
+            "side": "YES",
+            "opened_at": now - timedelta(hours=i),
+            "closed_at": now - timedelta(hours=i) + timedelta(minutes=30),
+        })
+
+    db.fetch = AsyncMock(return_value=trades)
+    db.fetchval = AsyncMock(return_value="{}")
+    db.execute = AsyncMock()
+
+    learner = TradeLearner(db=db, settings=settings)
+    await learner.compute_optimal_thresholds()
+
+    # Check that learned_params was updated for at least one strategy
+    params_updates = [c for c in db.execute.call_args_list if "learned_params" in str(c)]
+    assert len(params_updates) >= 1
+    for call in params_updates:
+        params = json.loads(call.args[1])
+        assert "take_profit_threshold" in params
+        assert "stop_loss_threshold" in params
+        assert 0.10 <= params["take_profit_threshold"] <= 0.50
+        assert 0.10 <= params["stop_loss_threshold"] <= 0.40
+        assert params["threshold_sample_size"] == 15
+
+
+@pytest.mark.asyncio
+async def test_compute_optimal_thresholds_skips_insufficient_data(db, settings):
+    """Should skip strategies with fewer than min_trades."""
+    db.fetch = AsyncMock(return_value=[
+        {"exit_reason": "take_profit", "pnl": 1.0, "entry_price": 0.50,
+         "exit_price": 0.65, "side": "YES",
+         "opened_at": datetime.now(timezone.utc), "closed_at": datetime.now(timezone.utc)},
+    ])  # Only 1 trade, below threshold of 10
+    db.execute = AsyncMock()
+
+    learner = TradeLearner(db=db, settings=settings)
+    await learner.compute_optimal_thresholds()
+
+    # No learned_params updates should occur
+    params_updates = [c for c in db.execute.call_args_list if "learned_params" in str(c)]
+    assert len(params_updates) == 0
+
+
+@pytest.mark.asyncio
+async def test_compute_snipe_params_stores_results(db, settings):
+    """compute_snipe_params should store optimal_min_edge in learned_params."""
+    now = datetime.now(timezone.utc)
+    trades = []
+    for i in range(10):
+        edge = 0.03 + (i * 0.005)
+        pnl = 0.50 if edge >= 0.04 else -0.20
+        trades.append({
+            "pnl": pnl, "entry_price": 0.95, "exit_reason": "early_exit",
+            "side": "YES", "edge": edge,
+            "opened_at": now - timedelta(hours=i),
+            "closed_at": now - timedelta(hours=i) + timedelta(minutes=5),
+        })
+
+    db.fetch = AsyncMock(return_value=trades)
+    db.fetchval = AsyncMock(return_value="{}")
+    db.execute = AsyncMock()
+
+    learner = TradeLearner(db=db, settings=settings)
+    await learner.compute_snipe_params()
+
+    # Check that learned_params was updated
+    params_updates = [c for c in db.execute.call_args_list
+                      if "learned_params" in str(c) and "snipe" in str(c)]
+    assert len(params_updates) >= 1
+    params = json.loads(params_updates[0].args[1])
+    assert "optimal_min_edge" in params
+    assert 0.01 <= params["optimal_min_edge"] <= 0.10
+    assert params["snipe_sample_size"] == 10
+
+
+@pytest.mark.asyncio
+async def test_compute_snipe_params_skips_insufficient_data(db, settings):
+    """Should skip if fewer than 5 trades."""
+    db.fetch = AsyncMock(return_value=[
+        {"pnl": 0.5, "entry_price": 0.95, "exit_reason": "early_exit",
+         "side": "YES", "edge": 0.03,
+         "opened_at": datetime.now(timezone.utc),
+         "closed_at": datetime.now(timezone.utc)},
+    ])
+    db.execute = AsyncMock()
+
+    learner = TradeLearner(db=db, settings=settings)
+    await learner.compute_snipe_params()
+
+    params_updates = [c for c in db.execute.call_args_list if "learned_params" in str(c)]
+    assert len(params_updates) == 0
