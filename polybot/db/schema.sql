@@ -117,6 +117,9 @@ ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_exit_reason_check;
 ALTER TABLE trades ADD CONSTRAINT trades_exit_reason_check
     CHECK (exit_reason IN ('resolution', 'early_exit', 'stop_loss', 'take_profit', 'time_stop'));
 
+-- v2.4: Learning system — per-strategy learned parameters
+ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS learned_params JSONB NOT NULL DEFAULT '{}';
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_markets_resolution ON markets(resolution_time);
 CREATE INDEX IF NOT EXISTS idx_markets_polymarket_id ON markets(polymarket_id);

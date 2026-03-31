@@ -99,6 +99,16 @@ class Settings(BaseSettings):
     # Forecast time-stop
     forecast_time_stop_minutes: float = 120.0
 
+    # Learning system
+    enable_proxy_trust_learning: bool = True
+    proxy_brier_alpha_tp: float = 0.05
+    proxy_brier_alpha_sl: float = 0.08
+    proxy_brier_alpha_weak: float = 0.03
+    enable_adaptive_thresholds: bool = True
+    adaptive_threshold_min_trades: int = 10
+    enable_snipe_learning: bool = True
+    enable_hourly_learning: bool = True
+
     # Quant signal weights
     quant_weights: dict[str, float] = {
         "line_movement": 0.30,
