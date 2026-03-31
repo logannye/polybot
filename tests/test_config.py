@@ -93,17 +93,17 @@ def test_v2_strategy_settings_defaults():
     s = Settings()
     assert s.arb_interval_seconds == 45
     assert s.snipe_interval_seconds == 120
-    assert s.forecast_interval_seconds == 300
+    assert s.forecast_interval_seconds == 180  # Snipe Factory: 300 → 180
     assert s.arb_kelly_mult == 0.80
     assert s.snipe_kelly_mult == 0.50
     assert s.forecast_kelly_mult == 0.25
     assert s.arb_max_single_pct == 0.40
-    assert s.snipe_max_single_pct == 0.25
+    assert s.snipe_max_single_pct == 0.30  # Snipe Factory: 0.25 → 0.30
     assert s.forecast_max_single_pct == 0.15
     assert s.polymarket_fee_rate == 0.02
-    assert s.max_total_deployed_pct == 0.70
-    assert s.max_concurrent_positions == 12
-    assert s.daily_loss_limit_pct == 0.15
+    assert s.max_total_deployed_pct == 0.90  # Snipe Factory: 0.70 → 0.90
+    assert s.max_concurrent_positions == 20  # Snipe Factory: 12 → 20
+    assert s.daily_loss_limit_pct == 1.0  # Snipe Factory: 0.15 → 1.0 (disabled)
     assert s.circuit_breaker_hours == 6
     assert s.min_trade_size == 1.0
     assert not hasattr(s, "twilio_account_sid")
