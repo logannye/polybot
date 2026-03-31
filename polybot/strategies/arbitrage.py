@@ -135,8 +135,16 @@ class ArbitrageStrategy(Strategy):
         self._seen_arbs: set[str] = set()
         self._dedup_loaded: bool = False
         self._settings = settings
+        self._min_bankroll = float(getattr(settings, "arb_min_bankroll", 2000.0))
 
     async def run_once(self, ctx: TradingContext) -> None:
+        # Bankroll gate: don't lock capital in arb at small bankrolls
+        state = await ctx.db.fetchrow("SELECT bankroll FROM system_state WHERE id = 1")
+        if state and float(state["bankroll"]) < self._min_bankroll:
+            log.debug("arb_bankroll_gate", bankroll=float(state["bankroll"]),
+                      min_required=self._min_bankroll)
+            return
+
         # Warm dedup cache from recent DB trades (once per process lifetime)
         if not self._dedup_loaded:
             recent = await ctx.db.fetch(
