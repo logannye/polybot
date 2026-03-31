@@ -93,7 +93,7 @@ async def main():
         executor=executor, recorder=recorder, risk_manager=risk_manager,
         settings=settings, email_notifier=email_notifier,
         position_manager=position_manager, clob=clob,
-        portfolio_lock=portfolio_lock)
+        portfolio_lock=portfolio_lock, trade_learner=trade_learner)
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 

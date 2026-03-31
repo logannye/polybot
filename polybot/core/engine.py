@@ -12,7 +12,7 @@ log = structlog.get_logger()
 class Engine:
     def __init__(self, db, scanner, researcher, ensemble, executor, recorder,
                  risk_manager, settings, email_notifier, position_manager, clob=None,
-                 portfolio_lock=None):
+                 portfolio_lock=None, trade_learner=None):
         self._db = db
         self._scanner = scanner
         self._researcher = researcher
@@ -29,6 +29,7 @@ class Engine:
             portfolio_lock=portfolio_lock or asyncio.Lock(), executor=executor,
             email_notifier=email_notifier, settings=settings)
         self._strategies: list[Strategy] = []
+        self._trade_learner = trade_learner
         self._last_heartbeats: dict[str, datetime] = {}
         self._last_self_assess: datetime | None = None
 
@@ -47,6 +48,8 @@ class Engine:
         tasks.append(self._run_periodic(self._reconcile_capital, 300))
         tasks.append(self._run_periodic(self._check_positions,
                                          self._settings.position_check_interval))
+        if getattr(self._settings, 'enable_hourly_learning', True):
+            tasks.append(self._run_periodic(self._hourly_learning, 3600))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):
@@ -261,6 +264,90 @@ class Engine:
     async def _check_positions(self):
         """Periodic task: check all non-arb positions for take-profit/stop-loss/edge-erosion."""
         await self._position_manager.check_positions()
+
+    async def _hourly_learning(self):
+        """Hourly learning cycle: recompute adaptive parameters."""
+        if not self._trade_learner:
+            return
+
+        try:
+            await self._trade_learner.compute_optimal_thresholds()
+        except Exception as e:
+            log.error("hourly_learning_thresholds_error", error=str(e))
+
+        try:
+            await self._trade_learner.compute_snipe_params()
+        except Exception as e:
+            log.error("hourly_learning_snipe_error", error=str(e))
+
+        try:
+            await self._hourly_kelly_edge_adjust()
+        except Exception as e:
+            log.error("hourly_kelly_edge_error", error=str(e))
+
+        log.info("hourly_learning_complete")
+
+    async def _hourly_kelly_edge_adjust(self):
+        """Adjust Kelly multiplier and edge threshold based on recent performance (3-day window)."""
+        from polybot.learning.self_assess import suggest_kelly_adjustment, suggest_edge_threshold
+
+        state = await self._db.fetchrow("SELECT * FROM system_state WHERE id = 1")
+        if not state:
+            return
+
+        # Kelly: 3-day window for hourly (vs 7-day for daily)
+        trades = await self._db.fetch(
+            """SELECT pnl FROM trades
+               WHERE status IN ('closed', 'dry_run_resolved')
+                 AND closed_at > NOW() - INTERVAL '3 days'""")
+        if not trades:
+            return
+
+        cumulative, peak, max_dd = 0.0, 0.0, 0.0
+        for t in trades:
+            cumulative += float(t["pnl"] or 0)
+            peak = max(peak, cumulative)
+            dd = (peak - cumulative) / max(float(state["bankroll"]), 1)
+            max_dd = max(max_dd, dd)
+
+        new_kelly = suggest_kelly_adjustment(float(state["kelly_mult"]), max_dd)
+
+        # Edge threshold: 3-day window
+        edge_trades = await self._db.fetch(
+            """SELECT a.edge, t.pnl FROM trades t JOIN analyses a ON t.analysis_id = a.id
+               WHERE t.status IN ('closed', 'dry_run_resolved')
+                 AND t.closed_at > NOW() - INTERVAL '3 days'""")
+        buckets = {}
+        for t in edge_trades:
+            bucket_key = round(float(t["edge"]) * 20) / 20
+            if bucket_key not in buckets:
+                buckets[bucket_key] = {"count": 0, "total_pnl": 0.0}
+            buckets[bucket_key]["count"] += 1
+            buckets[bucket_key]["total_pnl"] += float(t["pnl"] or 0)
+        new_edge = suggest_edge_threshold(float(state["edge_threshold"]), buckets)
+
+        # Also refresh calibration corrections hourly
+        resolved = await self._db.fetch(
+            """SELECT a.ensemble_probability, t.exit_price as outcome
+               FROM trades t JOIN analyses a ON t.analysis_id = a.id
+               WHERE t.status IN ('closed', 'dry_run_resolved')
+                 AND t.closed_at > NOW() - INTERVAL '30 days'""")
+        if len(resolved) >= 20:
+            import json
+            from polybot.learning.calibration import compute_calibration_correction
+            predictions = [float(r["ensemble_probability"]) for r in resolved]
+            outcomes = [int(float(r["outcome"]) > 0.5) for r in resolved]
+            corrections = compute_calibration_correction(predictions, outcomes)
+            if corrections:
+                await self._db.execute(
+                    "UPDATE system_state SET calibration_corrections = $1 WHERE id = 1",
+                    json.dumps(corrections))
+
+        await self._db.execute(
+            "UPDATE system_state SET kelly_mult=$1, edge_threshold=$2 WHERE id=1",
+            new_kelly, new_edge)
+
+        log.info("hourly_kelly_edge_adjusted", kelly=new_kelly, edge=new_edge, max_dd=round(max_dd, 4))
 
     async def _reconcile_capital(self):
         """Periodic check: ensure total_deployed matches actual open positions."""
