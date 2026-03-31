@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     arb_min_bankroll: float = 2000.0
 
     # Forecast time-stop
-    forecast_time_stop_minutes: float = 120.0
+    forecast_time_stop_minutes: float = 20.0
 
     # Learning system
     enable_proxy_trust_learning: bool = True

@@ -95,31 +95,41 @@ class ActivePositionManager:
             trade_id = pos["id"]
 
             # Time-stop: auto-exit forecast trades exceeding hold limit
+            # Only fires on flat or losing positions — profitable trades fall
+            # through to TP/SL/early-exit checks so winners aren't cut early.
             if pos["strategy"] == "forecast" and pos.get("opened_at") is not None:
                 hold_minutes = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 60
                 if hold_minutes > self._forecast_time_stop_minutes:
-                    exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
                     unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
-                    if self._portfolio_lock:
-                        async with self._portfolio_lock:
+                    if unrealized > 0:
+                        log.debug("time_stop_skipped_profitable",
+                                  trade_id=trade_id,
+                                  hold_minutes=round(hold_minutes, 1),
+                                  unrealized=round(unrealized, 4))
+                    else:
+                        exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                        if self._portfolio_lock:
+                            async with self._portfolio_lock:
+                                pnl = await self._executor.exit_position(
+                                    trade_id=trade_id, exit_price=exit_price,
+                                    exit_reason="time_stop")
+                        else:
                             pnl = await self._executor.exit_position(
                                 trade_id=trade_id, exit_price=exit_price,
                                 exit_reason="time_stop")
-                    else:
-                        pnl = await self._executor.exit_position(
-                            trade_id=trade_id, exit_price=exit_price,
-                            exit_reason="time_stop")
-                    if pnl is not None:
-                        exits_triggered += 1
-                        log.info("position_time_stop",
-                                 trade_id=trade_id, hold_minutes=round(hold_minutes, 1),
-                                 pnl=round(pnl, 4), market=pos["question"][:60])
-                        await self._email.send(
-                            f"[POLYBOT] Position time-stopped",
-                            f"<p><b>Market:</b> {pos['question']}</p>"
-                            f"<p><b>Held:</b> {hold_minutes:.0f}min | "
-                            f"P&L: ${pnl:+.2f}</p>")
-                    continue
+                        if pnl is not None:
+                            exits_triggered += 1
+                            log.info("position_time_stop",
+                                     trade_id=trade_id,
+                                     hold_minutes=round(hold_minutes, 1),
+                                     pnl=round(pnl, 4),
+                                     market=pos["question"][:60])
+                            await self._email.send(
+                                f"[POLYBOT] Position time-stopped",
+                                f"<p><b>Market:</b> {pos['question']}</p>"
+                                f"<p><b>Held:</b> {hold_minutes:.0f}min | "
+                                f"P&L: ${pnl:+.2f}</p>")
+                        continue
 
             exit_reason = None
 
