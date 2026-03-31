@@ -2,6 +2,8 @@ import json
 import structlog
 from datetime import datetime, timezone
 
+from polybot.learning.calibration import compute_brier_score, update_trust_weight
+
 log = structlog.get_logger()
 
 
@@ -23,6 +25,7 @@ class TradeLearner:
         await self._update_exit_reason_stats(trade)
         await self._update_category_scores(trade)
         await self._update_strategy_avg_edge(trade, analysis)
+        await self._update_proxy_trust_weights(trade, analysis)
 
         log.debug("trade_learned", trade_id=trade_id, strategy=trade.get("strategy"),
                   exit_reason=trade.get("exit_reason"))
@@ -100,3 +103,156 @@ class TradeLearner:
         await self._db.execute(
             "UPDATE strategy_performance SET avg_edge = $1 WHERE strategy = $2",
             round(new_avg, 4), strategy)
+
+    async def _update_proxy_trust_weights(self, trade, analysis) -> None:
+        """Use trade outcome (TP/SL/early-exit) as proxy for model accuracy."""
+        if not getattr(self._settings, 'enable_proxy_trust_learning', True):
+            return
+        if trade.get("exit_reason") == "resolution":
+            return  # Already handled by TradeRecorder with hard outcomes
+
+        model_estimates = []
+        if analysis and analysis.get("model_estimates"):
+            raw = analysis["model_estimates"]
+            model_estimates = json.loads(raw) if isinstance(raw, str) else raw
+        if not model_estimates:
+            return  # Snipe trades have no model estimates
+
+        exit_reason = trade.get("exit_reason", "")
+        pnl = float(trade["pnl"] or 0)
+
+        if exit_reason == "take_profit":
+            proxy_outcome = 1.0 if trade["side"] == "YES" else 0.0
+            proxy_alpha = self._settings.proxy_brier_alpha_tp
+        elif exit_reason == "stop_loss":
+            proxy_outcome = 0.0 if trade["side"] == "YES" else 1.0
+            proxy_alpha = self._settings.proxy_brier_alpha_sl
+        elif exit_reason in ("early_exit", "time_stop"):
+            if pnl > 0:
+                proxy_outcome = 1.0 if trade["side"] == "YES" else 0.0
+            else:
+                proxy_outcome = 0.0 if trade["side"] == "YES" else 1.0
+            proxy_alpha = self._settings.proxy_brier_alpha_weak
+        else:
+            return
+
+        for est in model_estimates:
+            prob = est.get("probability")
+            model_name = est.get("model")
+            if prob is None or model_name is None:
+                continue
+            brier = compute_brier_score(float(prob), int(proxy_outcome))
+            model_perf = await self._db.fetchrow(
+                "SELECT * FROM model_performance WHERE model_name = $1", model_name)
+            if model_perf:
+                new_ema = update_trust_weight(
+                    float(model_perf["brier_score_ema"]), brier, alpha=proxy_alpha)
+                await self._db.execute(
+                    """UPDATE model_performance SET brier_score_ema=$1,
+                       resolved_count=resolved_count+1, last_updated=$2
+                       WHERE model_name=$3""",
+                    new_ema, datetime.now(timezone.utc), model_name)
+
+        await self._rebalance_trust_weights()
+
+    async def compute_optimal_thresholds(self) -> None:
+        """Analyze recent trades to find optimal TP/SL thresholds per strategy."""
+        if not getattr(self._settings, 'enable_adaptive_thresholds', True):
+            return
+        min_trades = getattr(self._settings, 'adaptive_threshold_min_trades', 10)
+
+        for strategy in ("snipe", "forecast"):
+            trades = await self._db.fetch(
+                """SELECT t.exit_reason, t.pnl, t.entry_price, t.exit_price, t.side,
+                          t.opened_at, t.closed_at
+                   FROM trades t
+                   WHERE t.strategy = $1
+                     AND t.status IN ('closed', 'dry_run_resolved')
+                     AND t.closed_at > NOW() - INTERVAL '14 days'""",
+                strategy)
+
+            if len(trades) < min_trades:
+                continue
+
+            returns_at_exit = []
+            for t in trades:
+                entry = float(t["entry_price"])
+                exit_p = float(t["exit_price"] or 0)
+                if entry <= 0:
+                    continue
+                if t["side"] == "YES":
+                    ret = (exit_p - entry) / entry
+                else:
+                    no_entry = 1 - entry
+                    no_exit = 1 - exit_p
+                    ret = (no_exit - no_entry) / no_entry if no_entry > 0 else 0
+                returns_at_exit.append({
+                    "return": ret,
+                    "pnl": float(t["pnl"] or 0),
+                })
+
+            if not returns_at_exit:
+                continue
+
+            # Find optimal TP: threshold that maximizes frequency-weighted expected value
+            default_tp = getattr(self._settings, 'take_profit_threshold', 0.30)
+            best_tp, best_tp_ev = default_tp, 0.0
+            for tp_pct in range(10, 55, 5):
+                tp_test = tp_pct / 100.0
+                wins = [r for r in returns_at_exit if r["return"] >= tp_test]
+                if len(wins) < 3:
+                    continue
+                avg_win_pnl = sum(r["pnl"] for r in wins) / len(wins)
+                freq = len(wins) / len(returns_at_exit)
+                ev = avg_win_pnl * freq
+                if ev > best_tp_ev:
+                    best_tp_ev = ev
+                    best_tp = tp_test
+
+            # Find optimal SL: threshold that minimizes frequency-weighted loss
+            default_sl = getattr(self._settings, 'stop_loss_threshold', 0.25)
+            best_sl, best_sl_cost = default_sl, float('inf')
+            for sl_pct in range(10, 45, 5):
+                sl_test = sl_pct / 100.0
+                losses = [r for r in returns_at_exit if r["return"] <= -sl_test]
+                if len(losses) < 3:
+                    continue
+                avg_loss = abs(sum(r["pnl"] for r in losses)) / len(losses)
+                freq = len(losses) / len(returns_at_exit)
+                cost = avg_loss * freq
+                if cost < best_sl_cost:
+                    best_sl_cost = cost
+                    best_sl = sl_test
+
+            # Clamp to safe ranges
+            best_tp = max(0.10, min(0.50, best_tp))
+            best_sl = max(0.10, min(0.40, best_sl))
+
+            # Store in strategy_performance.learned_params
+            current = await self._db.fetchval(
+                "SELECT learned_params FROM strategy_performance WHERE strategy = $1",
+                strategy)
+            params = json.loads(current) if current and current != '{}' else {}
+            params["take_profit_threshold"] = round(best_tp, 2)
+            params["stop_loss_threshold"] = round(best_sl, 2)
+            params["threshold_sample_size"] = len(returns_at_exit)
+            params["threshold_updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            await self._db.execute(
+                "UPDATE strategy_performance SET learned_params = $1 WHERE strategy = $2",
+                json.dumps(params), strategy)
+
+            log.info("adaptive_thresholds", strategy=strategy,
+                     tp=best_tp, sl=best_sl, sample_size=len(returns_at_exit))
+
+    async def _rebalance_trust_weights(self) -> None:
+        """Rebalance trust weights across all models (inverse Brier EMA)."""
+        models = await self._db.fetch("SELECT * FROM model_performance")
+        if not models:
+            return
+        total_inv = sum(1.0 / max(float(m["brier_score_ema"]), 0.01) for m in models)
+        for m in models:
+            weight = (1.0 / max(float(m["brier_score_ema"]), 0.01)) / total_inv
+            await self._db.execute(
+                "UPDATE model_performance SET trust_weight=$1 WHERE model_name=$2",
+                weight, m["model_name"])

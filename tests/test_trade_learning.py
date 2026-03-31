@@ -142,3 +142,105 @@ async def test_on_trade_closed_handles_missing_trade(db, settings):
     learner = TradeLearner(db=db, settings=settings)
     await learner.on_trade_closed(999)
     db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_proxy_trust_updates_on_take_profit(db, settings):
+    """Take-profit should update model Brier scores with proxy outcome aligned to bet side."""
+    now = datetime.now(timezone.utc)
+    db.fetchrow = AsyncMock(side_effect=[
+        # Trade lookup
+        {"id": 5, "analysis_id": 15, "pnl": 3.00, "strategy": "forecast",
+         "exit_reason": "take_profit", "market_id": 8, "side": "YES",
+         "opened_at": now - timedelta(minutes=20), "closed_at": now},
+        # Analysis lookup
+        {"edge": 0.06, "model_estimates": json.dumps([
+            {"model": "claude-sonnet-4.6", "probability": 0.70, "confidence": "high", "reasoning": "test"},
+            {"model": "gpt-4o", "probability": 0.60, "confidence": "medium", "reasoning": "test"},
+        ])},
+        # Market lookup
+        {"category": "crypto"},
+        # system_state
+        {"category_scores": "{}"},
+        # strategy_performance for avg_edge
+        {"avg_edge": 0.04, "total_trades": 10},
+        # model_performance for claude (proxy trust)
+        {"model_name": "claude-sonnet-4.6", "brier_score_ema": 0.25, "resolved_count": 0},
+        # model_performance for gpt (proxy trust)
+        {"model_name": "gpt-4o", "brier_score_ema": 0.25, "resolved_count": 0},
+        # model_performance for rebalance (fetch all)
+    ])
+    db.fetchval = AsyncMock(return_value="{}")
+    db.fetch = AsyncMock(return_value=[
+        {"model_name": "claude-sonnet-4.6", "brier_score_ema": 0.24, "trust_weight": 0.333},
+        {"model_name": "gpt-4o", "brier_score_ema": 0.26, "trust_weight": 0.333},
+        {"model_name": "gemini-2.5-flash", "brier_score_ema": 0.25, "trust_weight": 0.333},
+    ])
+    db.execute = AsyncMock()
+
+    learner = TradeLearner(db=db, settings=settings)
+    await learner.on_trade_closed(5)
+
+    # Verify model_performance was updated (brier_score_ema + resolved_count)
+    brier_updates = [c for c in db.execute.call_args_list if "brier_score_ema" in str(c)]
+    assert len(brier_updates) >= 2  # One per model
+
+
+@pytest.mark.asyncio
+async def test_proxy_trust_skips_resolution(db, settings):
+    """Resolution trades should not trigger proxy trust updates (handled by TradeRecorder)."""
+    now = datetime.now(timezone.utc)
+    db.fetchrow = AsyncMock(side_effect=[
+        # Trade lookup
+        {"id": 6, "analysis_id": 16, "pnl": 5.00, "strategy": "forecast",
+         "exit_reason": "resolution", "market_id": 9, "side": "YES",
+         "opened_at": now - timedelta(hours=24), "closed_at": now},
+        # Analysis lookup
+        {"edge": 0.05, "model_estimates": json.dumps([
+            {"model": "claude-sonnet-4.6", "probability": 0.80, "confidence": "high", "reasoning": "test"},
+        ])},
+        # Market lookup
+        {"category": "politics"},
+        # system_state
+        {"category_scores": "{}"},
+        # strategy_performance for avg_edge
+        {"avg_edge": 0.05, "total_trades": 5},
+    ])
+    db.fetchval = AsyncMock(return_value="{}")
+    db.execute = AsyncMock()
+
+    learner = TradeLearner(db=db, settings=settings)
+    await learner.on_trade_closed(6)
+
+    # Should NOT see brier_score_ema updates (resolution is skipped for proxy)
+    brier_updates = [c for c in db.execute.call_args_list if "brier_score_ema" in str(c)]
+    assert len(brier_updates) == 0
+
+
+@pytest.mark.asyncio
+async def test_proxy_trust_skips_snipe_no_estimates(db, settings):
+    """Snipe trades with no model estimates should skip proxy trust entirely."""
+    now = datetime.now(timezone.utc)
+    db.fetchrow = AsyncMock(side_effect=[
+        # Trade lookup
+        {"id": 7, "analysis_id": 17, "pnl": 0.50, "strategy": "snipe",
+         "exit_reason": "early_exit", "market_id": 10, "side": "YES",
+         "opened_at": now - timedelta(minutes=5), "closed_at": now},
+        # Analysis lookup — empty model_estimates (snipe trades)
+        {"edge": 0.03, "model_estimates": "[]"},
+        # Market lookup
+        {"category": "sports"},
+        # system_state
+        {"category_scores": "{}"},
+        # strategy_performance for avg_edge
+        {"avg_edge": 0.02, "total_trades": 50},
+    ])
+    db.fetchval = AsyncMock(return_value="{}")
+    db.execute = AsyncMock()
+
+    learner = TradeLearner(db=db, settings=settings)
+    await learner.on_trade_closed(7)
+
+    # Should NOT see brier_score_ema updates (no model estimates)
+    brier_updates = [c for c in db.execute.call_args_list if "brier_score_ema" in str(c)]
+    assert len(brier_updates) == 0
