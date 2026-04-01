@@ -116,7 +116,7 @@ class EnsembleAnalyzer:
     async def _call_openai(self, prompt: str) -> ModelEstimate:
         response = await self._openai.chat.completions.create(
             model="gpt-5.4-mini",
-            max_tokens=300,
+            max_completion_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
         parsed = parse_llm_response(response.choices[0].message.content)
@@ -131,14 +131,14 @@ class EnsembleAnalyzer:
 
     async def _call_gemini(self, prompt: str) -> ModelEstimate:
         response = await self._google.aio.models.generate_content(
-            model="gemini-3-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
         parsed = parse_llm_response(response.text)
         if not parsed:
             raise ValueError("Gemini returned unparseable response")
         return ModelEstimate(
-            model="gemini-3-flash",
+            model="gemini-2.5-flash",
             probability=parsed["probability"],
             confidence=parsed["confidence"],
             reasoning=parsed["reasoning"],
@@ -157,7 +157,7 @@ class EnsembleAnalyzer:
         prompt = build_challenge_prompt(question, initial_prob, market_price, reasoning)
         try:
             response = await self._google.aio.models.generate_content(
-                model="gemini-3-flash", contents=prompt)
+                model="gemini-2.5-flash", contents=prompt)
             parsed = parse_llm_response(response.text)
             if parsed:
                 log.info("challenge_revised", initial=initial_prob,
@@ -177,7 +177,7 @@ class EnsembleAnalyzer:
         prompt = build_quick_screen_prompt(question, price, resolution_time)
         try:
             response = await self._google.aio.models.generate_content(
-                model="gemini-3-flash", contents=prompt)
+                model="gemini-2.5-flash", contents=prompt)
             parsed = parse_llm_response(response.text)
             if parsed:
                 return parsed["probability"]

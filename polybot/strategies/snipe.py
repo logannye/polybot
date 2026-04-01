@@ -190,7 +190,7 @@ class ResolutionSnipeStrategy(Strategy):
                 prompt = build_snipe_prompt(m["question"], str(m["resolution_time"]), hours_remaining, m["yes_price"])
                 try:
                     response = await self._ensemble._google.aio.models.generate_content(
-                        model="gemini-3-flash", contents=prompt)
+                        model="gemini-2.5-flash", contents=prompt)
                     parsed = parse_snipe_response(response.text)
                     if not parsed or not parsed["determined"] or parsed["confidence"] < self._min_confidence:
                         log.info("snipe_rejected_llm", market=m["polymarket_id"],
