@@ -98,8 +98,10 @@ class Settings(BaseSettings):
     arb_min_bankroll: float = 2000.0
     arb_max_hold_days: float = 7.0
 
-    # Forecast time-stop
-    forecast_time_stop_minutes: float = 60.0
+    # Forecast time-stop (dynamic: scales with time-to-resolution)
+    forecast_time_stop_minutes: float = 20.0          # floor — minimum hold time
+    forecast_time_stop_fraction: float = 0.10          # hold up to 10% of time-to-resolution
+    forecast_time_stop_max_minutes: float = 480.0      # cap — never hold longer than 8h
 
     # Learning system
     enable_proxy_trust_learning: bool = True

@@ -46,7 +46,9 @@ class ActivePositionManager:
         self._take_profit = settings.take_profit_threshold
         self._stop_loss = settings.stop_loss_threshold
         self._early_exit_edge = settings.early_exit_edge
-        self._forecast_time_stop_minutes = getattr(settings, 'forecast_time_stop_minutes', 120.0)
+        self._forecast_time_stop_floor = getattr(settings, 'forecast_time_stop_minutes', 20.0)
+        self._forecast_time_stop_fraction = getattr(settings, 'forecast_time_stop_fraction', 0.10)
+        self._forecast_time_stop_max = getattr(settings, 'forecast_time_stop_max_minutes', 480.0)
         self._portfolio_lock = portfolio_lock
 
     async def check_positions(self):
@@ -67,7 +69,7 @@ class ActivePositionManager:
             """SELECT t.id, t.side, t.entry_price, t.shares,
                       t.position_size_usd, t.strategy, t.status,
                       t.opened_at,
-                      m.polymarket_id, m.question,
+                      m.polymarket_id, m.question, m.resolution_time,
                       a.ensemble_probability
                FROM trades t
                JOIN markets m ON t.market_id = m.id
@@ -94,12 +96,23 @@ class ActivePositionManager:
             side = pos["side"]
             trade_id = pos["id"]
 
-            # Time-stop: auto-exit forecast trades exceeding hold limit
+            # Time-stop: auto-exit forecast trades exceeding hold limit.
+            # Dynamic: scales with time-to-resolution so long-dated markets
+            # get room to breathe while short-dated ones exit fast.
             # Only fires on flat or losing positions — profitable trades fall
             # through to TP/SL/early-exit checks so winners aren't cut early.
             if pos["strategy"] == "forecast" and pos.get("opened_at") is not None:
                 hold_minutes = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 60
-                if hold_minutes > self._forecast_time_stop_minutes:
+                hours_to_resolution = max(
+                    0.0,
+                    (pos["resolution_time"] - datetime.now(timezone.utc)).total_seconds() / 3600
+                ) if pos.get("resolution_time") else 0.0
+                effective_stop = min(
+                    self._forecast_time_stop_max,
+                    max(self._forecast_time_stop_floor,
+                        self._forecast_time_stop_fraction * hours_to_resolution * 60),
+                )
+                if hold_minutes > effective_stop:
                     unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
                     if unrealized > 0:
                         log.debug("time_stop_skipped_profitable",
@@ -122,12 +135,15 @@ class ActivePositionManager:
                             log.info("position_time_stop",
                                      trade_id=trade_id,
                                      hold_minutes=round(hold_minutes, 1),
+                                     effective_stop=round(effective_stop, 1),
+                                     hours_to_resolution=round(hours_to_resolution, 1),
                                      pnl=round(pnl, 4),
                                      market=pos["question"][:60])
                             await self._email.send(
                                 f"[POLYBOT] Position time-stopped",
                                 f"<p><b>Market:</b> {pos['question']}</p>"
-                                f"<p><b>Held:</b> {hold_minutes:.0f}min | "
+                                f"<p><b>Held:</b> {hold_minutes:.0f}min "
+                                f"(limit: {effective_stop:.0f}min) | "
                                 f"P&L: ${pnl:+.2f}</p>")
                         continue
 

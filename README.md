@@ -53,7 +53,7 @@ The full analysis pipeline with a cost-efficient tiered funnel:
     v  Quick screen (single Gemini Flash) — discard if <3% edge
 ~2-3 markets
     |
-    v  Full ensemble (Claude + GPT-4o + Gemini) — 3-model blind analysis + web research
+    v  Full ensemble (Claude Haiku + GPT-5.4-mini + Gemini 3 Flash) — 3-model blind analysis + web research
 ~0-2 trades
 ```
 
@@ -63,7 +63,7 @@ Sizing: Quarter-Kelly (0.25x) with confidence modulation.
 
 **Market loss blacklist**: After 2 stop-losses on the same market within 12 hours, the market is blacklisted — preventing repeated losing entries on the same thesis.
 
-**Time-stop**: Forecast trades held longer than 60 minutes are automatically exited at market price if flat or losing. Profitable positions are exempt — they fall through to the normal take-profit/stop-loss checks. This frees capital from stale positions without cutting winners.
+**Time-stop**: Forecast trades are automatically exited if held past a dynamic time limit that scales with time-to-resolution — `max(20min floor, 10% of hours-to-resolution)`, capped at 8 hours. Short-dated markets exit fast; long-dated markets (e.g., 48h) get ~5h to develop. Only fires on flat or losing positions — profitable trades fall through to the normal take-profit/stop-loss checks.
 
 ## Architecture
 
@@ -124,13 +124,13 @@ Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
 Three models run concurrently for full forecast analysis:
 
-| Model | Role |
-|-------|------|
-| Claude Sonnet 4.6 | Strong reasoning, calibrated probability estimates |
-| GPT-4o | Broad knowledge base |
-| Gemini 2.5 Flash | Fast screening + diverse training data |
+| Model | Role | Cost (in/out per MTok) |
+|-------|------|-----------------------|
+| Claude Haiku 4.5 | Calibrated probability estimates | $0.80 / $4.00 |
+| GPT-5.4-mini | Broad knowledge, strong reasoning | $0.75 / $4.50 |
+| Gemini 3 Flash | Fast screening + diverse training data | $0.50 / $3.00 |
 
-Gemini Flash also serves as the cheap screening model for resolution sniping and the pre-ensemble quick screen gate, keeping LLM costs under $2/day.
+Gemini 3 Flash also serves as the screening model for resolution sniping and the pre-ensemble quick screen gate. Snipe candidates >12h from resolution are rejected heuristically without an LLM call. Total LLM costs ~$2-3/day.
 
 ## Adaptive learning
 

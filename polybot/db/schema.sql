@@ -64,9 +64,9 @@ CREATE TABLE IF NOT EXISTS system_state (
 
 -- Initialize model performance rows
 INSERT INTO model_performance (model_name, trust_weight) VALUES
-    ('claude-sonnet-4.6', 0.333),
-    ('gpt-4o', 0.333),
-    ('gemini-2.5-flash', 0.333)
+    ('claude-haiku-4.5', 0.333),
+    ('gpt-5.4-mini', 0.333),
+    ('gemini-3-flash', 0.333)
 ON CONFLICT (model_name) DO NOTHING;
 
 -- v2: Strategy column on trades

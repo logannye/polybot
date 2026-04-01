@@ -257,14 +257,16 @@ async def test_snipe_skips_early_exit_even_with_ensemble_prob():
 
 @pytest.mark.asyncio
 async def test_check_positions_time_stop_forecast():
-    """Losing forecast trade held > 60 minutes should trigger time_stop exit."""
+    """Losing forecast trade held > effective stop should trigger time_stop exit."""
     db = AsyncMock()
     opened_65m_ago = datetime.now(timezone.utc) - timedelta(minutes=65)
+    resolves_2h = datetime.now(timezone.utc) + timedelta(hours=2)
     db.fetch = AsyncMock(return_value=[{
         "id": 10, "side": "YES", "entry_price": 0.50, "shares": 20.0,
         "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
         "polymarket_id": "mkt-time", "question": "Time stop test?",
         "ensemble_probability": 0.65, "opened_at": opened_65m_ago,
+        "resolution_time": resolves_2h,
     }])
 
     executor = AsyncMock()
@@ -280,6 +282,8 @@ async def test_check_positions_time_stop_forecast():
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
     settings.forecast_time_stop_minutes = 60.0
+    settings.forecast_time_stop_fraction = 0.10
+    settings.forecast_time_stop_max_minutes = 480.0
 
     email = AsyncMock()
 
@@ -288,20 +292,23 @@ async def test_check_positions_time_stop_forecast():
         email_notifier=email, settings=settings)
     await mgr.check_positions()
 
+    # effective_stop = max(60, 0.10 * 2h * 60) = max(60, 12) = 60 min; held 65 > 60 → fires
     executor.exit_position.assert_called_once_with(
         trade_id=10, exit_price=0.48, exit_reason="time_stop")
 
 
 @pytest.mark.asyncio
 async def test_check_positions_no_time_stop_within_window():
-    """Forecast trade held < 60 minutes should NOT trigger time_stop."""
+    """Forecast trade held < effective stop should NOT trigger time_stop."""
     db = AsyncMock()
     opened_55m_ago = datetime.now(timezone.utc) - timedelta(minutes=55)
+    resolves_2h = datetime.now(timezone.utc) + timedelta(hours=2)
     db.fetch = AsyncMock(return_value=[{
         "id": 11, "side": "YES", "entry_price": 0.50, "shares": 20.0,
         "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
         "polymarket_id": "mkt-fresh", "question": "Fresh forecast?",
         "ensemble_probability": 0.65, "opened_at": opened_55m_ago,
+        "resolution_time": resolves_2h,
     }])
 
     executor = AsyncMock()
@@ -315,6 +322,8 @@ async def test_check_positions_no_time_stop_within_window():
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
     settings.forecast_time_stop_minutes = 60.0
+    settings.forecast_time_stop_fraction = 0.10
+    settings.forecast_time_stop_max_minutes = 480.0
 
     mgr = ActivePositionManager(
         db=db, executor=executor, scanner=scanner,
@@ -329,11 +338,13 @@ async def test_check_positions_no_time_stop_for_snipe():
     """Snipe trade held > 120 minutes should NOT trigger time_stop (forecast only)."""
     db = AsyncMock()
     opened_3h_ago = datetime.now(timezone.utc) - timedelta(hours=3)
+    resolves_1h = datetime.now(timezone.utc) + timedelta(hours=1)
     db.fetch = AsyncMock(return_value=[{
         "id": 12, "side": "YES", "entry_price": 0.95, "shares": 100.0,
         "position_size_usd": 95.0, "strategy": "snipe", "status": "dry_run",
         "polymarket_id": "mkt-snipe-old", "question": "Old snipe?",
         "ensemble_probability": None, "opened_at": opened_3h_ago,
+        "resolution_time": resolves_1h,
     }])
 
     executor = AsyncMock()
@@ -347,6 +358,8 @@ async def test_check_positions_no_time_stop_for_snipe():
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
     settings.forecast_time_stop_minutes = 20.0
+    settings.forecast_time_stop_fraction = 0.10
+    settings.forecast_time_stop_max_minutes = 480.0
 
     mgr = ActivePositionManager(
         db=db, executor=executor, scanner=scanner,
@@ -362,11 +375,13 @@ async def test_time_stop_skips_profitable_trade():
     """Forecast trade past time-stop but profitable should NOT be time-stopped."""
     db = AsyncMock()
     opened_65m_ago = datetime.now(timezone.utc) - timedelta(minutes=65)
+    resolves_2h = datetime.now(timezone.utc) + timedelta(hours=2)
     db.fetch = AsyncMock(return_value=[{
         "id": 20, "side": "YES", "entry_price": 0.50, "shares": 20.0,
         "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
         "polymarket_id": "mkt-profit", "question": "Profitable but old?",
         "ensemble_probability": 0.65, "opened_at": opened_65m_ago,
+        "resolution_time": resolves_2h,
     }])
 
     executor = AsyncMock()
@@ -381,6 +396,8 @@ async def test_time_stop_skips_profitable_trade():
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
     settings.forecast_time_stop_minutes = 60.0
+    settings.forecast_time_stop_fraction = 0.10
+    settings.forecast_time_stop_max_minutes = 480.0
 
     mgr = ActivePositionManager(
         db=db, executor=executor, scanner=scanner,
@@ -396,11 +413,13 @@ async def test_time_stop_exits_flat_trade():
     """Forecast trade past time-stop at breakeven (unrealized=0) should be time-stopped."""
     db = AsyncMock()
     opened_65m_ago = datetime.now(timezone.utc) - timedelta(minutes=65)
+    resolves_2h = datetime.now(timezone.utc) + timedelta(hours=2)
     db.fetch = AsyncMock(return_value=[{
         "id": 21, "side": "YES", "entry_price": 0.50, "shares": 20.0,
         "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
         "polymarket_id": "mkt-flat", "question": "Flat trade?",
         "ensemble_probability": 0.65, "opened_at": opened_65m_ago,
+        "resolution_time": resolves_2h,
     }])
 
     executor = AsyncMock()
@@ -417,6 +436,8 @@ async def test_time_stop_exits_flat_trade():
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
     settings.forecast_time_stop_minutes = 60.0
+    settings.forecast_time_stop_fraction = 0.10
+    settings.forecast_time_stop_max_minutes = 480.0
 
     email = AsyncMock()
 
@@ -434,11 +455,13 @@ async def test_profitable_trade_still_hits_tp_after_time_stop_skip():
     """Profitable trade past time-stop should fall through and hit take_profit."""
     db = AsyncMock()
     opened_65m_ago = datetime.now(timezone.utc) - timedelta(minutes=65)
+    resolves_2h = datetime.now(timezone.utc) + timedelta(hours=2)
     db.fetch = AsyncMock(return_value=[{
         "id": 22, "side": "YES", "entry_price": 0.50, "shares": 20.0,
         "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
         "polymarket_id": "mkt-tp", "question": "TP after time-stop skip?",
         "ensemble_probability": 0.65, "opened_at": opened_65m_ago,
+        "resolution_time": resolves_2h,
     }])
 
     executor = AsyncMock()
@@ -455,6 +478,8 @@ async def test_profitable_trade_still_hits_tp_after_time_stop_skip():
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
     settings.forecast_time_stop_minutes = 60.0
+    settings.forecast_time_stop_fraction = 0.10
+    settings.forecast_time_stop_max_minutes = 480.0
 
     email = AsyncMock()
 
@@ -466,3 +491,86 @@ async def test_profitable_trade_still_hits_tp_after_time_stop_skip():
     # Time-stop skipped (profitable), then TP fires
     executor.exit_position.assert_called_once_with(
         trade_id=22, exit_price=0.68, exit_reason="take_profit")
+
+
+@pytest.mark.asyncio
+async def test_dynamic_time_stop_long_dated_market():
+    """Long-dated market (48h) should get ~288min effective stop, not exit at 65min."""
+    db = AsyncMock()
+    opened_65m_ago = datetime.now(timezone.utc) - timedelta(minutes=65)
+    resolves_48h = datetime.now(timezone.utc) + timedelta(hours=48)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 30, "side": "NO", "entry_price": 0.65, "shares": 30.0,
+        "position_size_usd": 19.5, "strategy": "forecast", "status": "dry_run",
+        "polymarket_id": "mkt-long", "question": "Long-dated NCAA market?",
+        "ensemble_probability": 0.30, "opened_at": opened_65m_ago,
+        "resolution_time": resolves_48h,
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    # Slightly losing (NO side: entry 0.65, current NO = 1-0.36 = 0.64)
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-long": {"yes_price": 0.36, "no_price": 0.64},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.30
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.forecast_time_stop_minutes = 20.0       # floor
+    settings.forecast_time_stop_fraction = 0.10       # 10% of 48h = 288 min
+    settings.forecast_time_stop_max_minutes = 480.0   # cap
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    # effective_stop = max(20, 0.10 * 48 * 60) = max(20, 288) = 288 min
+    # Held only 65 min < 288 → should NOT time-stop
+    executor.exit_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dynamic_time_stop_respects_cap():
+    """Very long-dated market should cap at max_minutes, not hold forever."""
+    db = AsyncMock()
+    opened_10h_ago = datetime.now(timezone.utc) - timedelta(hours=10)
+    resolves_200h = datetime.now(timezone.utc) + timedelta(hours=200)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 31, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
+        "polymarket_id": "mkt-cap", "question": "Very long market?",
+        "ensemble_probability": 0.55, "opened_at": opened_10h_ago,
+        "resolution_time": resolves_200h,
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=-0.50)
+
+    scanner = MagicMock()
+    # Slightly losing
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-cap": {"yes_price": 0.48, "no_price": 0.52},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.30
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.forecast_time_stop_minutes = 20.0
+    settings.forecast_time_stop_fraction = 0.10       # 10% of 200h = 1200 min
+    settings.forecast_time_stop_max_minutes = 480.0   # capped to 480
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    # effective_stop = min(480, max(20, 0.10 * 200 * 60)) = min(480, 1200) = 480 min
+    # Held 600 min > 480 → should time-stop
+    executor.exit_position.assert_called_once_with(
+        trade_id=31, exit_price=0.48, exit_reason="time_stop")

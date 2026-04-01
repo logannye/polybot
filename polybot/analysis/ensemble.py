@@ -99,15 +99,15 @@ class EnsembleAnalyzer:
 
     async def _call_claude(self, prompt: str) -> ModelEstimate:
         response = await self._anthropic.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
         parsed = parse_llm_response(response.content[0].text)
         if not parsed:
-            raise ValueError("Claude returned unparseable response")
+            raise ValueError("Claude Haiku returned unparseable response")
         return ModelEstimate(
-            model="claude-sonnet-4.6",
+            model="claude-haiku-4.5",
             probability=parsed["probability"],
             confidence=parsed["confidence"],
             reasoning=parsed["reasoning"],
@@ -115,15 +115,15 @@ class EnsembleAnalyzer:
 
     async def _call_openai(self, prompt: str) -> ModelEstimate:
         response = await self._openai.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.4-mini",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
         parsed = parse_llm_response(response.choices[0].message.content)
         if not parsed:
-            raise ValueError("GPT-4o returned unparseable response")
+            raise ValueError("GPT-5.4-mini returned unparseable response")
         return ModelEstimate(
-            model="gpt-4o",
+            model="gpt-5.4-mini",
             probability=parsed["probability"],
             confidence=parsed["confidence"],
             reasoning=parsed["reasoning"],
@@ -131,14 +131,14 @@ class EnsembleAnalyzer:
 
     async def _call_gemini(self, prompt: str) -> ModelEstimate:
         response = await self._google.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3-flash",
             contents=prompt,
         )
         parsed = parse_llm_response(response.text)
         if not parsed:
             raise ValueError("Gemini returned unparseable response")
         return ModelEstimate(
-            model="gemini-2.5-flash",
+            model="gemini-3-flash",
             probability=parsed["probability"],
             confidence=parsed["confidence"],
             reasoning=parsed["reasoning"],
@@ -157,7 +157,7 @@ class EnsembleAnalyzer:
         prompt = build_challenge_prompt(question, initial_prob, market_price, reasoning)
         try:
             response = await self._google.aio.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt)
+                model="gemini-3-flash", contents=prompt)
             parsed = parse_llm_response(response.text)
             if parsed:
                 log.info("challenge_revised", initial=initial_prob,
@@ -177,7 +177,7 @@ class EnsembleAnalyzer:
         prompt = build_quick_screen_prompt(question, price, resolution_time)
         try:
             response = await self._google.aio.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt)
+                model="gemini-3-flash", contents=prompt)
             parsed = parse_llm_response(response.text)
             if parsed:
                 return parsed["probability"]
