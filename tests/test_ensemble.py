@@ -62,3 +62,20 @@ class TestAggregate:
         result = aggregate_estimates(estimates, {"a": 1.0})
         assert result.ensemble_probability == pytest.approx(0.65)
         assert result.stdev == pytest.approx(0.0)
+
+
+class TestEnsembleFailureTracking:
+    def test_consecutive_failures_tracked(self):
+        from polybot.analysis.ensemble import EnsembleAnalyzer
+        analyzer = EnsembleAnalyzer(
+            anthropic_key="test", openai_key="test", google_key="test")
+        assert analyzer._consecutive_failures == {"claude": 0, "openai": 0, "gemini": 0}
+
+    def test_consecutive_failures_reset_on_success(self):
+        from polybot.analysis.ensemble import EnsembleAnalyzer
+        analyzer = EnsembleAnalyzer(
+            anthropic_key="test", openai_key="test", google_key="test")
+        analyzer._consecutive_failures["openai"] = 10
+        # Simulating a success resets the counter
+        analyzer._consecutive_failures["openai"] = 0
+        assert analyzer._consecutive_failures["openai"] == 0

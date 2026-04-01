@@ -20,7 +20,7 @@ Three concurrent strategies run at independent frequencies within a single async
 Detects mathematically provable mispricings between related markets. No LLMs, pure math.
 
 - **Complement arbitrage** — YES + NO prices on a single market sum to less than $1.00 (buy both for guaranteed profit)
-- **Exhaustive outcome arbitrage** — Multi-outcome groups (e.g., "Who wins?" with candidates A, B, C) where YES prices don't sum to $1.00
+- **Exhaustive outcome arbitrage** — Multi-outcome groups (e.g., "Who wins?" with candidates A, B, C) where YES prices don't sum to $1.00. Groups are validated: probability sums must be between 0.5-1.8, and net edge is capped at 20% to reject false positives from cosmetic API groupings
 - **Temporal subset arbitrage** — "Will X happen by June?" priced higher than "Will X happen by July?" (logically impossible)
 
 Sizing: Near-full Kelly (0.80x). Edge is mathematically certain — the only risk is execution.
@@ -63,7 +63,7 @@ Sizing: Quarter-Kelly (0.25x) with confidence modulation.
 
 **Market loss blacklist**: After 2 stop-losses on the same market within 12 hours, the market is blacklisted — preventing repeated losing entries on the same thesis.
 
-**Time-stop**: Forecast trades held longer than 2 hours are automatically exited at market price. Short holds (<1hr) are empirically more profitable; long holds lock capital in stale positions.
+**Time-stop**: Forecast trades held longer than 60 minutes are automatically exited at market price if flat or losing. Profitable positions are exempt — they fall through to the normal take-profit/stop-loss checks. This frees capital from stale positions without cutting winners.
 
 ## Architecture
 

@@ -16,7 +16,7 @@ def make_engine(**kwargs):
             fill_timeout_seconds=120, arb_fill_timeout_seconds=30,
             dry_run=False, post_breaker_cooldown_hours=24),
         email_notifier=AsyncMock(), position_manager=MagicMock(),
-        clob=AsyncMock())
+        clob=AsyncMock(), trade_learner=AsyncMock())
     defaults.update(kwargs)
     return Engine(**defaults)
 
@@ -40,6 +40,7 @@ async def test_resolution_filled_trade():
     ])
     await engine._resolution_monitor()
     engine._recorder.record_resolution.assert_called_once_with(1, 1)
+    engine._trade_learner.on_trade_closed.assert_called_once_with(1)
 
 
 @pytest.mark.asyncio
@@ -57,6 +58,7 @@ async def test_resolution_dry_run():
     await engine._resolution_monitor()
     calls = [str(c) for c in engine._db.execute.call_args_list]
     assert any("dry_run_resolved" in c for c in calls)
+    engine._trade_learner.on_trade_closed.assert_called_once_with(2)
 
 
 @pytest.mark.asyncio

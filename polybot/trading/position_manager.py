@@ -145,7 +145,7 @@ class ActivePositionManager:
             elif should_cut_loss(side, entry_price, current_yes_price,
                                   sl_threshold):
                 exit_reason = "stop_loss"
-            elif pos["ensemble_probability"] is not None:
+            elif pos["strategy"] != "snipe" and pos["ensemble_probability"] is not None:
                 ensemble_prob = float(pos["ensemble_probability"])
                 if should_early_exit(
                     entry_price=entry_price,

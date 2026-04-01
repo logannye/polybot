@@ -50,6 +50,7 @@ class Engine:
                                          self._settings.position_check_interval))
         if getattr(self._settings, 'enable_hourly_learning', True):
             tasks.append(self._run_periodic(self._hourly_learning, 3600))
+        tasks.append(self._run_periodic(self._cleanup_stale_arbs, 3600))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):
@@ -98,18 +99,38 @@ class Engine:
 
     async def _reconcile_on_startup(self):
         try:
-            open_trades = await self._db.fetch("SELECT * FROM trades WHERE status = 'open'")
+            open_trades = await self._db.fetch(
+                "SELECT * FROM trades WHERE status IN ('open', 'dry_run')")
+            now = datetime.now(timezone.utc)
             for trade in open_trades:
                 market = await self._db.fetchrow(
                     "SELECT * FROM markets WHERE id = $1", trade["market_id"])
-                if market and market["resolution_time"] < datetime.now(timezone.utc):
+                if market and market["resolution_time"] < now:
                     resolved = await self._scanner.fetch_market_resolution(
                         market["polymarket_id"])
                     if resolved is not None:
-                        await self._recorder.record_resolution(trade["id"], resolved)
-                        await self._db.execute(
-                            "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
-                            float(trade["position_size_usd"]))
+                        if trade["status"] == "open":
+                            await self._recorder.record_resolution(trade["id"], resolved)
+                            await self._db.execute(
+                                "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
+                                float(trade["position_size_usd"]))
+                        elif trade["status"] == "dry_run":
+                            entry = float(trade["entry_price"])
+                            shares = float(trade["shares"])
+                            if trade["side"] == "YES":
+                                pnl = shares * (resolved - entry)
+                            else:
+                                pnl = shares * ((1 - resolved) - (1 - entry))
+                            await self._db.execute(
+                                """UPDATE trades SET status='dry_run_resolved', pnl=$1,
+                                   exit_price=$2, exit_reason='resolution', closed_at=$3
+                                   WHERE id=$4""",
+                                pnl, float(resolved), now, trade["id"])
+                            await self._db.execute(
+                                """UPDATE system_state SET bankroll = bankroll + $1,
+                                   total_deployed = total_deployed - $2, daily_pnl = daily_pnl + $1
+                                   WHERE id = 1""",
+                                pnl, float(trade["position_size_usd"]))
                         log.info("reconciled_stale_trade", trade_id=trade["id"], outcome=resolved)
             # Sync bankroll from CLOB on startup (live mode only)
             if not self._settings.dry_run and self._clob:
@@ -233,6 +254,11 @@ class Engine:
                     except Exception as e:
                         log.error("bankroll_sync_failed", error=str(e))
                 log.info("trade_resolved", trade_id=trade["id"], outcome=outcome)
+                if self._trade_learner:
+                    try:
+                        await self._trade_learner.on_trade_closed(trade["id"])
+                    except Exception as e:
+                        log.error("trade_learning_error", trade_id=trade["id"], error=str(e))
             elif trade["status"] == "dry_run":
                 entry = float(trade["entry_price"])
                 shares = float(trade["shares"])
@@ -260,10 +286,33 @@ class Engine:
                 log.info("dry_run_resolved", trade_id=trade["id"], outcome=outcome,
                          simulated_pnl=pnl, side=trade["side"],
                          entry_price=entry, shares=shares)
+                if self._trade_learner:
+                    try:
+                        await self._trade_learner.on_trade_closed(trade["id"])
+                    except Exception as e:
+                        log.error("trade_learning_error", trade_id=trade["id"], error=str(e))
 
     async def _check_positions(self):
         """Periodic task: check all non-arb positions for take-profit/stop-loss/edge-erosion."""
         await self._position_manager.check_positions()
+
+    async def _cleanup_stale_arbs(self):
+        """Close arb positions that have exceeded max hold time."""
+        max_hold_days = getattr(self._settings, 'arb_max_hold_days', 7.0)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_hold_days)
+        stale = await self._db.fetch(
+            """SELECT t.id, t.position_size_usd, t.status
+               FROM trades t
+               WHERE t.strategy = 'arbitrage'
+                 AND t.status IN ('open', 'filled', 'dry_run')
+                 AND t.opened_at < $1""", cutoff)
+        for trade in stale:
+            await self._executor.exit_position(
+                trade_id=trade["id"], exit_price=0.0,
+                exit_reason="arb_ttl_expired")
+            log.info("arb_ttl_cleanup", trade_id=trade["id"])
+        if stale:
+            log.info("arb_cleanup_complete", closed=len(stale))
 
     async def _hourly_learning(self):
         """Hourly learning cycle: recompute adaptive parameters."""

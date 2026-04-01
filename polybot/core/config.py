@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # Arb thresholds
     arb_min_net_edge: float = 0.01
     arb_fill_timeout_seconds: int = 30
+    arb_max_net_edge: float = 0.20
 
     # Pre-scoring
     prescore_top_n: int = 5
@@ -95,9 +96,10 @@ class Settings(BaseSettings):
 
     # Arb bankroll gate
     arb_min_bankroll: float = 2000.0
+    arb_max_hold_days: float = 7.0
 
     # Forecast time-stop
-    forecast_time_stop_minutes: float = 20.0
+    forecast_time_stop_minutes: float = 60.0
 
     # Learning system
     enable_proxy_trust_learning: bool = True

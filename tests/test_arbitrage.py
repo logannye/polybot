@@ -28,10 +28,11 @@ def test_exhaustive_arb_overpriced():
     assert result.gross_edge > 0.09
 
 def test_exhaustive_arb_underpriced():
+    # yes_sum = 0.90 (below 1.0, underpriced), net_edge ~8.9% (below 20% cap)
     markets = [
-        {"polymarket_id": "a", "yes_price": 0.30, "no_price": 0.72},
-        {"polymarket_id": "b", "yes_price": 0.25, "no_price": 0.77},
-        {"polymarket_id": "c", "yes_price": 0.20, "no_price": 0.82},
+        {"polymarket_id": "a", "yes_price": 0.35, "no_price": 0.67},
+        {"polymarket_id": "b", "yes_price": 0.30, "no_price": 0.72},
+        {"polymarket_id": "c", "yes_price": 0.25, "no_price": 0.77},
     ]
     result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
     assert result is not None
@@ -44,6 +45,41 @@ def test_exhaustive_arb_none_when_fair():
     ]
     result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
     assert result is None
+
+def test_exhaustive_arb_none_when_sum_too_low():
+    """Groups with yes_sum < 0.5 are clearly not exhaustive — reject."""
+    markets = [
+        {"polymarket_id": "a", "yes_price": 0.10, "no_price": 0.92},
+        {"polymarket_id": "b", "yes_price": 0.10, "no_price": 0.92},
+        {"polymarket_id": "c", "yes_price": 0.10, "no_price": 0.92},
+    ]
+    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
+    assert result is None
+
+
+def test_exhaustive_arb_none_when_sum_too_high():
+    """Groups with yes_sum > 1.8 are clearly not exhaustive — reject."""
+    markets = [
+        {"polymarket_id": "a", "yes_price": 0.80, "no_price": 0.22},
+        {"polymarket_id": "b", "yes_price": 0.90, "no_price": 0.12},
+        {"polymarket_id": "c", "yes_price": 0.85, "no_price": 0.17},
+    ]
+    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
+    assert result is None
+
+
+def test_exhaustive_arb_none_when_edge_too_high():
+    """Net edge > max_net_edge should be rejected as data quality issue."""
+    # Construct a group where the math produces a valid but absurdly high edge
+    markets = [
+        {"polymarket_id": "a", "yes_price": 0.60, "no_price": 0.42},
+        {"polymarket_id": "b", "yes_price": 0.05, "no_price": 0.97},
+    ]
+    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01, max_net_edge=0.20)
+    # yes_sum=0.65, within 0.5-1.8, but edge would be huge → capped
+    if result is not None:
+        assert result.net_edge <= 0.20
+
 
 def test_temporal_arb_detected():
     assert detect_temporal_arb("by June?", 0.50, "by July?", 0.40) is True

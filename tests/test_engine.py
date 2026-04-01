@@ -46,6 +46,39 @@ async def test_run_strategy_calls_run_once():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_stale_arbs():
+    """Arb positions older than max_hold_days should be closed."""
+    engine = make_engine()
+    engine._settings.arb_max_hold_days = 7.0
+    engine._db.fetch = AsyncMock(return_value=[
+        {"id": 100, "position_size_usd": 10.0, "status": "dry_run"},
+        {"id": 101, "position_size_usd": 10.0, "status": "dry_run"},
+    ])
+    engine._executor = AsyncMock()
+    engine._executor.exit_position = AsyncMock(return_value=0.0)
+
+    await engine._cleanup_stale_arbs()
+
+    assert engine._executor.exit_position.call_count == 2
+    engine._executor.exit_position.assert_any_call(
+        trade_id=100, exit_price=0.0, exit_reason="arb_ttl_expired")
+    engine._executor.exit_position.assert_any_call(
+        trade_id=101, exit_price=0.0, exit_reason="arb_ttl_expired")
+
+
+@pytest.mark.asyncio
+async def test_cleanup_stale_arbs_no_stale():
+    """No stale arbs means no exits triggered."""
+    engine = make_engine()
+    engine._settings.arb_max_hold_days = 7.0
+    engine._db.fetch = AsyncMock(return_value=[])
+    engine._executor = AsyncMock()
+
+    await engine._cleanup_stale_arbs()
+    engine._executor.exit_position.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_strategy_disables_after_consecutive_errors(monkeypatch):
     # Patch asyncio.sleep to be instant during backoff
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())

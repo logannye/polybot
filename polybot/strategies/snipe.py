@@ -257,11 +257,14 @@ class ResolutionSnipeStrategy(Strategy):
                 )
 
                 # Create analysis record for the snipe
+                # Store target probability (1.0 for YES, 0.0 for NO) — snipes
+                # assume the outcome will resolve as expected.
+                snipe_target_prob = 1.0 if side == "YES" else 0.0
                 analysis_id = await ctx.db.fetchval(
                     """INSERT INTO analyses (market_id, model_estimates, ensemble_probability,
                        ensemble_stdev, quant_signals, edge)
                        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-                    market_id, json.dumps([]), buy_price, 0.0, json.dumps({}), net_edge,
+                    market_id, json.dumps([]), snipe_target_prob, 0.0, json.dumps({}), net_edge,
                 )
 
                 token_id = m.get("yes_token_id", "") if side == "YES" else m.get("no_token_id", "")

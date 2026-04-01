@@ -64,10 +64,13 @@ def aggregate_estimates(estimates: list[ModelEstimate], trust_weights: dict[str,
 
 
 class EnsembleAnalyzer:
+    _MODEL_NAMES = ["claude", "openai", "gemini"]
+
     def __init__(self, anthropic_key: str, openai_key: str, google_key: str):
         self._anthropic = anthropic.AsyncAnthropic(api_key=anthropic_key)
         self._openai = openai.AsyncOpenAI(api_key=openai_key)
         self._google = genai.Client(api_key=google_key)
+        self._consecutive_failures: dict[str, int] = {n: 0 for n in self._MODEL_NAMES}
 
     async def analyze(self, question: str, research_context: str, trust_weights: dict[str, float]) -> EnsembleResult:
         prompt = build_analysis_prompt(question, research_context)
@@ -78,9 +81,20 @@ class EnsembleAnalyzer:
             return_exceptions=True,
         )
         estimates = [r for r in results if isinstance(r, ModelEstimate)]
-        for r in results:
-            if isinstance(r, Exception):
-                log.error("llm_call_failed", error=str(r))
+
+        for name, result in zip(self._MODEL_NAMES, results):
+            if isinstance(result, Exception):
+                log.error("llm_call_failed", error=str(result))
+                self._consecutive_failures[name] = self._consecutive_failures.get(name, 0) + 1
+                if self._consecutive_failures[name] >= 5:
+                    log.error("model_persistent_failure", model=name,
+                              consecutive=self._consecutive_failures[name])
+            else:
+                self._consecutive_failures[name] = 0
+
+        if len(estimates) < 3:
+            log.warning("ensemble_degraded", responding=len(estimates), total=3)
+
         return aggregate_estimates(estimates, trust_weights)
 
     async def _call_claude(self, prompt: str) -> ModelEstimate:

@@ -51,6 +51,7 @@ def detect_exhaustive_arb(
     markets: list[dict],
     fee_rate: float = 0.02,
     min_net_edge: float = 0.01,
+    max_net_edge: float = 0.20,
 ) -> ArbOpportunity | None:
     """
     Exhaustive (mutually exclusive + collectively exhaustive) group arb.
@@ -65,6 +66,12 @@ def detect_exhaustive_arb(
         return None
 
     yes_sum = sum(m["yes_price"] for m in markets)
+
+    # Sanity check: truly exhaustive groups should have probabilities summing
+    # near 1.0 (with some overround for fees). Reject groups that are clearly
+    # not exhaustive — cosmetic slug groupings often include unrelated markets.
+    if yes_sum < 0.5 or yes_sum > 1.8:
+        return None
 
     # --- Overpriced: buy all NOs ---
     # Cost to buy NO on market i = (1 - yes_price_i)  i.e. no_price
@@ -84,9 +91,10 @@ def detect_exhaustive_arb(
     yes_net_edge = (yes_profit - yes_fee) / yes_sum if yes_sum > 0 else 0.0
 
     # Pick the better opportunity, if any clears the min_net_edge bar
+    # Cap: edges above max_net_edge are almost certainly data quality issues
     best: ArbOpportunity | None = None
 
-    if no_net_edge >= min_net_edge:
+    if no_net_edge >= min_net_edge and no_net_edge <= max_net_edge:
         best = ArbOpportunity(
             arb_type="exhaustive",
             side="NO",
@@ -95,7 +103,7 @@ def detect_exhaustive_arb(
             markets=list(markets),
         )
 
-    if yes_net_edge >= min_net_edge:
+    if yes_net_edge >= min_net_edge and yes_net_edge <= max_net_edge:
         candidate = ArbOpportunity(
             arb_type="exhaustive",
             side="YES",
@@ -186,6 +194,7 @@ class ArbitrageStrategy(Strategy):
             opp = detect_exhaustive_arb(
                 group_markets,
                 fee_rate=self._settings.polymarket_fee_rate,
+                max_net_edge=float(getattr(self._settings, "arb_max_net_edge", 0.20)),
             )
             if opp:
                 log.info("exhaustive_arb_found", group=slug, side=opp.side,
