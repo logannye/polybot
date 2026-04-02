@@ -164,6 +164,14 @@ class ArbitrageStrategy(Strategy):
                       min_required=self._min_bankroll)
             return
 
+        # Per-strategy position cap: reserve slots for forecast/snipe
+        arb_max = int(getattr(self._settings, "arb_max_concurrent", 8))
+        arb_open = await ctx.db.fetchval(
+            "SELECT COUNT(*) FROM trades WHERE strategy = 'arbitrage' AND status IN ('open', 'dry_run', 'filled')")
+        if arb_open and arb_open >= arb_max:
+            log.debug("arb_position_cap", open=arb_open, max=arb_max)
+            return
+
         # Warm dedup cache from recent DB trades (once per process lifetime)
         if not self._dedup_loaded:
             recent = await ctx.db.fetch(

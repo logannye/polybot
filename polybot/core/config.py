@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     min_trade_size: float = 1.0
     max_concurrent_positions: int = 12
     max_positions_per_market: int = 1
+    arb_max_concurrent: int = 8      # reserve slots for forecast/snipe
     daily_loss_limit_pct: float = 0.15
     circuit_breaker_hours: int = 6
     post_breaker_cooldown_hours: int = 24
