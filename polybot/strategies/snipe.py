@@ -10,13 +10,14 @@ from polybot.notifications.email import format_trade_email
 log = structlog.get_logger()
 
 
-def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float = 72.0) -> int | None:
+def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float = 120.0) -> int | None:
     """
     Classify a market into snipe tiers based on price extremity and time remaining.
 
     Tier 0: Near-certain outcome, no LLM needed
     Tier 1: Likely resolved, LLM verification required
     Tier 2: Strong lean, conservative sizing
+    Tier 3: Moderate lean, widest window, most conservative
 
     Returns None if not a snipe candidate.
     """
@@ -33,10 +34,15 @@ def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float =
         if price >= 0.85 or price <= 0.15:
             return 1
 
-    # Tier 2: Moderate lean, wider window (conservative)
+    # Tier 2: Strong lean, wider window (conservative)
     if hours_remaining <= 72.0:
-        if price >= 0.85 or price <= 0.15:
+        if price >= 0.80 or price <= 0.20:
             return 2
+
+    # Tier 3: Moderate lean, widest window (most conservative)
+    if hours_remaining <= 120.0:
+        if price >= 0.75 or price <= 0.25:
+            return 3
 
     return None
 
@@ -147,9 +153,9 @@ class ResolutionSnipeStrategy(Strategy):
             log.info("snipe_candidate", market=m["polymarket_id"],
                      price=m["yes_price"], hours=round(hours_remaining, 1), tier=tier)
 
-            if m["yes_price"] >= 0.80:
+            if m["yes_price"] >= 0.75:
                 side, buy_price = "YES", m["yes_price"]
-            elif m["yes_price"] <= 0.20:
+            elif m["yes_price"] <= 0.25:
                 side, buy_price = "NO", 1 - m["yes_price"]
             else:
                 log.debug("snipe_rejected_price_range", market=m["polymarket_id"],
@@ -187,9 +193,9 @@ class ResolutionSnipeStrategy(Strategy):
                           entries=entries_24h, max=self._max_entries_per_market)
                 continue
 
-            if tier in (1, 2) and self._ensemble:
+            if tier in (1, 2, 3) and self._ensemble:
                 # Tier-appropriate time guard: LLM can only reliably verify near-term outcomes
-                tier_max_hours = {1: 12.0, 2: getattr(ctx.settings, "snipe_tier2_llm_max_hours", 48.0)}
+                tier_max_hours = {1: 12.0, 2: getattr(ctx.settings, "snipe_tier2_llm_max_hours", 48.0), 3: getattr(ctx.settings, "snipe_tier3_llm_max_hours", 120.0)}
                 if hours_remaining > tier_max_hours.get(tier, 12.0):
                     log.info("snipe_rejected_far_future", market=m["polymarket_id"],
                              hours=round(hours_remaining, 1), tier=tier)
@@ -228,7 +234,7 @@ class ResolutionSnipeStrategy(Strategy):
                     growth_threshold=ctx.settings.bankroll_growth_threshold,
                 )
                 # Tier-dependent kelly scaling
-                tier_kelly_scale = {0: 1.0, 1: 0.70, 2: 0.40}
+                tier_kelly_scale = {0: 1.0, 1: 0.85, 2: 0.55, 3: 0.30}
                 kelly_adj *= tier_kelly_scale.get(tier, 1.0)
                 # Tiered edge sizing: larger positions on higher edge
                 kelly_adj *= compute_tiered_kelly_scale(net_edge)

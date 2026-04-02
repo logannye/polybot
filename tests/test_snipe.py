@@ -75,14 +75,39 @@ def test_no_snipe_low_price():
     assert classify_snipe_tier(price=0.70, hours_remaining=2.0) is None
 
 
+def test_tier3_extreme_at_80h():
+    """0.95 at 80h: beyond Tier 2 (72h) but within Tier 3 (120h)."""
+    assert classify_snipe_tier(price=0.95, hours_remaining=80.0) == 3
+
+
+def test_tier2_widened_080_at_30h():
+    """0.80 at 30h: within widened Tier 2 (>= 0.80, <= 72h)."""
+    assert classify_snipe_tier(price=0.80, hours_remaining=30.0) == 2
+
+
 def test_no_snipe_too_far():
-    """0.95 at 80h: beyond even the relaxed 72h Tier 2 window."""
-    assert classify_snipe_tier(price=0.95, hours_remaining=80.0) is None
+    """0.95 at 130h: beyond Tier 3 window (120h)."""
+    assert classify_snipe_tier(price=0.95, hours_remaining=130.0) is None
 
 
-def test_no_snipe_moderate_price_far():
-    """0.80 at 30h: below Tier 2 threshold (0.85), not a snipe candidate."""
-    assert classify_snipe_tier(price=0.80, hours_remaining=30.0) is None
+def test_no_snipe_low_price_below_tier3():
+    """0.70 at 50h: below Tier 3 threshold (0.75), not a snipe candidate."""
+    assert classify_snipe_tier(price=0.70, hours_remaining=50.0) is None
+
+
+def test_tier3_moderate_lean():
+    """0.75 at 100h: within Tier 3 (>= 0.75, <= 120h)."""
+    assert classify_snipe_tier(price=0.75, hours_remaining=100.0) == 3
+
+
+def test_tier3_no_side():
+    """0.25 at 90h: NO side within Tier 3 (<= 0.25, <= 120h)."""
+    assert classify_snipe_tier(price=0.25, hours_remaining=90.0) == 3
+
+
+def test_tier2_widened_no_side():
+    """0.20 at 50h: within widened Tier 2 (<= 0.20, <= 72h)."""
+    assert classify_snipe_tier(price=0.20, hours_remaining=50.0) == 2
 
 
 def test_no_snipe_zero_hours():

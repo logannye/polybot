@@ -89,21 +89,20 @@ class RiskManager:
     def edge_skepticism_discount(edge: float) -> float:
         """
         Discount large edges — they're more likely to be LLM miscalibration
-        than genuine alpha. Small edges (5-7%) are plausible; edges above
-        15% are almost certainly noise.
+        than genuine alpha. Edges up to 12% are plausible; edges above 30%
+        get half weight.
 
-        Returns a multiplier in [0.3, 1.0]:
-          edge ≤ 0.07 → 1.0 (no discount)
-          edge = 0.15 → ~0.76
-          edge = 0.20 → ~0.60
-          edge ≥ 0.30 → 0.3
+        Returns a multiplier in [0.5, 1.0]:
+          edge ≤ 0.12 → 1.0 (no discount)
+          edge = 0.20 → ~0.78
+          edge ≥ 0.30 → 0.5
         """
-        if edge <= 0.07:
+        if edge <= 0.12:
             return 1.0
         if edge >= 0.30:
-            return 0.3
-        # Linear interpolation from 1.0 at 0.07 to 0.3 at 0.30
-        return 1.0 - (edge - 0.07) / 0.23 * 0.7
+            return 0.5
+        # Linear interpolation from 1.0 at 0.12 to 0.5 at 0.30
+        return 1.0 - (edge - 0.12) / 0.18 * 0.5
 
     async def get_portfolio_state(self, db) -> PortfolioState:
         state = await db.fetchrow("SELECT * FROM system_state WHERE id = 1")

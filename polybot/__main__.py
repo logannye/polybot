@@ -17,7 +17,6 @@ from polybot.learning.trade_learning import TradeLearner
 from polybot.notifications.email import EmailNotifier
 from polybot.trading.position_manager import ActivePositionManager
 from polybot.dashboard.app import create_app
-from polybot.strategies.arbitrage import ArbitrageStrategy
 from polybot.strategies.snipe import ResolutionSnipeStrategy
 from polybot.strategies.forecast import EnsembleForecastStrategy
 
@@ -97,7 +96,6 @@ async def main():
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
-    engine.add_strategy(ArbitrageStrategy(settings=settings))
     engine.add_strategy(ResolutionSnipeStrategy(settings=settings, ensemble=ensemble))
     engine.add_strategy(EnsembleForecastStrategy(
         settings=settings, ensemble=ensemble, researcher=researcher))

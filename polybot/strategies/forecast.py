@@ -251,24 +251,25 @@ class EnsembleForecastStrategy(Strategy):
             return
 
         # Category performance filter: skip categories with negative ROI
-        _cat_min_trades = getattr(self._settings, "forecast_category_min_trades", 10)
-        _cat_min_avg = getattr(self._settings, "forecast_category_min_avg_pnl", -1.0)
-        try:
-            _sys_state = await ctx.db.fetchrow("SELECT category_scores FROM system_state WHERE id = 1")
-            if _sys_state:
-                import json as _json
-                _cat_scores_raw = _sys_state.get("category_scores") if hasattr(_sys_state, "get") else None
-                if _cat_scores_raw:
-                    _cat_scores = _json.loads(_cat_scores_raw) if isinstance(_cat_scores_raw, str) else _cat_scores_raw
-                    _cat_data = _cat_scores.get(candidate.category) if isinstance(_cat_scores, dict) else None
-                    if _cat_data and isinstance(_cat_data, dict) and _cat_data.get("trades", 0) >= _cat_min_trades:
-                        _avg_pnl = _cat_data.get("pnl", 0) / max(_cat_data["trades"], 1)
-                        if _avg_pnl < _cat_min_avg:
-                            log.info("forecast_category_filtered", market=candidate.polymarket_id,
-                                     category=candidate.category, avg_pnl=round(_avg_pnl, 2))
-                            return
-        except Exception:
-            pass  # Category filtering is best-effort; don't block trades on DB errors
+        if getattr(self._settings, 'forecast_category_filter_enabled', True):
+            _cat_min_trades = getattr(self._settings, "forecast_category_min_trades", 10)
+            _cat_min_avg = getattr(self._settings, "forecast_category_min_avg_pnl", -1.0)
+            try:
+                _sys_state = await ctx.db.fetchrow("SELECT category_scores FROM system_state WHERE id = 1")
+                if _sys_state:
+                    import json as _json
+                    _cat_scores_raw = _sys_state.get("category_scores") if hasattr(_sys_state, "get") else None
+                    if _cat_scores_raw:
+                        _cat_scores = _json.loads(_cat_scores_raw) if isinstance(_cat_scores_raw, str) else _cat_scores_raw
+                        _cat_data = _cat_scores.get(candidate.category) if isinstance(_cat_scores, dict) else None
+                        if _cat_data and isinstance(_cat_data, dict) and _cat_data.get("trades", 0) >= _cat_min_trades:
+                            _avg_pnl = _cat_data.get("pnl", 0) / max(_cat_data["trades"], 1)
+                            if _avg_pnl < _cat_min_avg:
+                                log.info("forecast_category_filtered", market=candidate.polymarket_id,
+                                         category=candidate.category, avg_pnl=round(_avg_pnl, 2))
+                                return
+            except Exception:
+                pass  # Category filtering is best-effort; don't block trades on DB errors
 
         # 6a. Web research first, then ensemble with full context
         research = await self._researcher.search(candidate.question)
@@ -298,7 +299,7 @@ class EnsembleForecastStrategy(Strategy):
 
         # 7. Market-efficiency shrinkage + calibration correction
         raw_prob = ensemble_result.ensemble_probability
-        prob = shrink_toward_market(raw_prob, candidate.current_price, shrinkage=0.30)
+        prob = shrink_toward_market(raw_prob, candidate.current_price, shrinkage=0.15)
 
         # Challenge pass: if ensemble disagrees with market by >15%,
         # ask Gemini Flash to revise after seeing the market price

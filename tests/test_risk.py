@@ -114,6 +114,34 @@ class TestBankrollKellyAdjustment:
         assert abs(adj - 0.25 * 0.85) < 1e-9
 
 
+class TestEdgeSkepticismDiscount:
+    def test_small_edge_no_discount(self):
+        assert RiskManager.edge_skepticism_discount(0.05) == 1.0
+
+    def test_edge_at_threshold(self):
+        assert RiskManager.edge_skepticism_discount(0.12) == 1.0
+
+    def test_edge_above_threshold(self):
+        result = RiskManager.edge_skepticism_discount(0.15)
+        assert 0.5 < result < 1.0
+
+    def test_edge_at_20pct(self):
+        result = RiskManager.edge_skepticism_discount(0.20)
+        assert result == pytest.approx(1.0 - (0.08 / 0.18) * 0.5, abs=1e-4)
+
+    def test_edge_at_30pct(self):
+        assert RiskManager.edge_skepticism_discount(0.30) == pytest.approx(0.5)
+
+    def test_edge_above_30pct(self):
+        assert RiskManager.edge_skepticism_discount(0.40) == 0.5
+
+    def test_monotonically_decreasing(self):
+        edges = [0.05, 0.12, 0.15, 0.20, 0.25, 0.30, 0.35]
+        discounts = [RiskManager.edge_skepticism_discount(e) for e in edges]
+        for i in range(len(discounts) - 1):
+            assert discounts[i] >= discounts[i + 1]
+
+
 class TestStrategyAwareRiskLimits:
     def test_risk_check_with_strategy_max_single(self):
         rm = RiskManager()

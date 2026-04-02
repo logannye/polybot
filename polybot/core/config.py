@@ -91,8 +91,9 @@ class Settings(BaseSettings):
     stop_loss_threshold: float = 0.15
     position_check_interval: int = 60
 
-    # Snipe tier 2 LLM guard
+    # Snipe tier 2/3 LLM guard
     snipe_tier2_llm_max_hours: float = 48.0
+    snipe_tier3_llm_max_hours: float = 120.0
 
     # Snipe cooldown & re-entry
     snipe_cooldown_hours: float = 4.0
@@ -107,12 +108,14 @@ class Settings(BaseSettings):
     forecast_time_stop_minutes: float = 90.0           # floor — minimum hold time
     forecast_time_stop_fraction: float = 0.15          # hold up to 15% of time-to-resolution
     forecast_time_stop_max_minutes: float = 480.0      # cap — never hold longer than 8h
+    forecast_time_stop_min_resolution_hours: float = 48.0  # skip time-stop if resolving within this window
 
     # Forecast consensus & category filtering
     forecast_min_consensus: int = 2                    # min models agreeing on direction
     forecast_consensus_margin: float = 0.02            # margin from market price to count as "agreeing"
     forecast_category_min_trades: int = 10             # min trades before filtering by category
     forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
+    forecast_category_filter_enabled: bool = True      # disable to skip category filtering
 
     # Learning system
     enable_proxy_trust_learning: bool = True
