@@ -25,16 +25,22 @@ def detect_complement_arb(
     polymarket_id: str,
     yes_price: float,
     no_price: float,
-    fee_rate: float = 0.02,
+    fee_rate: float = 0.04,
     min_net_edge: float = 0.01,
+    is_maker: bool = True,
 ) -> ArbOpportunity | None:
     """Buy both YES and NO when they sum to < 1.0 (guaranteed profit)."""
     total_cost = yes_price + no_price
     gross_edge = 1.0 - total_cost
     if gross_edge <= 0:
         return None
-    # Fee applies to both legs (two purchases)
-    fee_cost = fee_rate * (yes_price + no_price)
+    if is_maker:
+        fee_cost = 0.0
+    else:
+        # Actual Polymarket fee: feeRate * p * (1-p) per share on each leg
+        yes_fee = fee_rate * yes_price * (1.0 - yes_price)
+        no_fee = fee_rate * no_price * (1.0 - no_price)
+        fee_cost = yes_fee + no_fee
     net_edge = gross_edge - fee_cost
     if net_edge < min_net_edge:
         return None
@@ -49,9 +55,10 @@ def detect_complement_arb(
 
 def detect_exhaustive_arb(
     markets: list[dict],
-    fee_rate: float = 0.02,
+    fee_rate: float = 0.04,
     min_net_edge: float = 0.01,
     max_net_edge: float = 0.20,
+    is_maker: bool = True,
 ) -> ArbOpportunity | None:
     """
     Exhaustive (mutually exclusive + collectively exhaustive) group arb.
@@ -74,20 +81,24 @@ def detect_exhaustive_arb(
         return None
 
     # --- Overpriced: buy all NOs ---
-    # Cost to buy NO on market i = (1 - yes_price_i)  i.e. no_price
-    # Payout: exactly (N-1) outcomes are NO, each paying $1 → total = N-1
     no_cost = sum(1.0 - m["yes_price"] for m in markets)
     no_payout = float(n - 1)
-    no_profit = no_payout - no_cost          # absolute gross profit
-    no_gross_edge = no_profit                # absolute dollars of edge
-    no_fee = fee_rate * no_cost
+    no_profit = no_payout - no_cost
+    no_gross_edge = no_profit
+    if is_maker:
+        no_fee = 0.0
+    else:
+        # Actual fee per leg: feeRate * p * (1-p) where p = no_price = 1 - yes_price
+        no_fee = sum(fee_rate * (1.0 - m["yes_price"]) * m["yes_price"] for m in markets)
     no_net_edge = (no_profit - no_fee) / no_cost if no_cost > 0 else 0.0
 
     # --- Underpriced: buy all YESes ---
-    # Cost = yes_sum, payout = 1.0 (exactly one YES wins)
     yes_profit = 1.0 - yes_sum
-    yes_gross_edge = yes_profit              # absolute dollars of edge
-    yes_fee = fee_rate * yes_sum
+    yes_gross_edge = yes_profit
+    if is_maker:
+        yes_fee = 0.0
+    else:
+        yes_fee = sum(fee_rate * m["yes_price"] * (1.0 - m["yes_price"]) for m in markets)
     yes_net_edge = (yes_profit - yes_fee) / yes_sum if yes_sum > 0 else 0.0
 
     # Pick the better opportunity, if any clears the min_net_edge bar
@@ -177,11 +188,14 @@ class ArbitrageStrategy(Strategy):
 
         # 1. Complement arb — check every market individually
         for m in markets:
+            from polybot.trading.fees import get_fee_rate as _get_fee_rate
+            category = m.get("category", "unknown")
             opp = detect_complement_arb(
                 polymarket_id=m["polymarket_id"],
                 yes_price=m["yes_price"],
                 no_price=m["no_price"],
-                fee_rate=self._settings.polymarket_fee_rate,
+                fee_rate=_get_fee_rate(category),
+                is_maker=self._settings.use_maker_orders,
             )
             if opp:
                 log.info("complement_arb_found", market=m["polymarket_id"],
@@ -191,10 +205,13 @@ class ArbitrageStrategy(Strategy):
         # 2. Exhaustive arb — check grouped (multi-outcome) markets
         groups = scanner.fetch_grouped_markets(markets)
         for slug, group_markets in groups.items():
+            # Use category from first market in group for fee rate
+            _cat = group_markets[0].get("category", "unknown") if group_markets else "unknown"
             opp = detect_exhaustive_arb(
                 group_markets,
-                fee_rate=self._settings.polymarket_fee_rate,
+                fee_rate=_get_fee_rate(_cat),
                 max_net_edge=float(getattr(self._settings, "arb_max_net_edge", 0.20)),
+                is_maker=self._settings.use_maker_orders,
             )
             if opp:
                 log.info("exhaustive_arb_found", group=slug, side=opp.side,
@@ -274,7 +291,8 @@ class ArbitrageStrategy(Strategy):
                     "gross_edge": round(opp.gross_edge, 4),
                     "net_edge": round(opp.net_edge, 4),
                     "num_legs": len(legs),
-                })
+                },
+                post_only=self._settings.use_maker_orders)
             placed = sum(1 for r in results if r is not None)
             log.info("arb_executed", arb_type=opp.arb_type, side=opp.side,
                      legs=len(legs), placed=placed, size_usd=size_usd)

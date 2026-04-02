@@ -2,39 +2,51 @@ import pytest
 from polybot.strategies.arbitrage import detect_complement_arb, detect_exhaustive_arb, detect_temporal_arb
 
 
-def test_complement_arb_detected():
-    result = detect_complement_arb(polymarket_id="test", yes_price=0.55, no_price=0.40, fee_rate=0.02)
+def test_complement_arb_detected_maker():
+    """Maker: 0 fees, so gross_edge = net_edge."""
+    result = detect_complement_arb(polymarket_id="test", yes_price=0.55, no_price=0.40,
+                                   fee_rate=0.04, is_maker=True)
     assert result is not None
     assert abs(result.gross_edge - 0.05) < 1e-4
+    assert result.net_edge == pytest.approx(result.gross_edge)
+
+def test_complement_arb_detected_taker():
+    """Taker: fee = rate * p * (1-p) per leg."""
+    result = detect_complement_arb(polymarket_id="test", yes_price=0.55, no_price=0.40,
+                                   fee_rate=0.04, is_maker=False)
+    assert result is not None
+    assert result.net_edge < result.gross_edge
     assert result.net_edge > 0
 
 def test_complement_arb_none_when_sum_is_one():
-    result = detect_complement_arb(polymarket_id="test", yes_price=0.55, no_price=0.45, fee_rate=0.02)
+    result = detect_complement_arb(polymarket_id="test", yes_price=0.55, no_price=0.45,
+                                   fee_rate=0.04, is_maker=True)
     assert result is None
 
 def test_complement_arb_none_when_fee_eats_edge():
-    result = detect_complement_arb(polymarket_id="test", yes_price=0.505, no_price=0.49, fee_rate=0.02)
+    """Taker fees can eat thin arb edges."""
+    result = detect_complement_arb(polymarket_id="test", yes_price=0.505, no_price=0.49,
+                                   fee_rate=0.04, is_maker=False)
     assert result is None
 
-def test_exhaustive_arb_overpriced():
+def test_exhaustive_arb_overpriced_maker():
     markets = [
         {"polymarket_id": "a", "yes_price": 0.45, "no_price": 0.60},
         {"polymarket_id": "b", "yes_price": 0.40, "no_price": 0.65},
         {"polymarket_id": "c", "yes_price": 0.25, "no_price": 0.78},
     ]
-    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
+    result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01, is_maker=True)
     assert result is not None
     assert result.side == "NO"
     assert result.gross_edge > 0.09
 
-def test_exhaustive_arb_underpriced():
-    # yes_sum = 0.90 (below 1.0, underpriced), net_edge ~8.9% (below 20% cap)
+def test_exhaustive_arb_underpriced_maker():
     markets = [
         {"polymarket_id": "a", "yes_price": 0.35, "no_price": 0.67},
         {"polymarket_id": "b", "yes_price": 0.30, "no_price": 0.72},
         {"polymarket_id": "c", "yes_price": 0.25, "no_price": 0.77},
     ]
-    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
+    result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01, is_maker=True)
     assert result is not None
     assert result.side == "YES"
 
@@ -43,7 +55,7 @@ def test_exhaustive_arb_none_when_fair():
         {"polymarket_id": "a", "yes_price": 0.50, "no_price": 0.51},
         {"polymarket_id": "b", "yes_price": 0.50, "no_price": 0.51},
     ]
-    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
+    result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01, is_maker=True)
     assert result is None
 
 def test_exhaustive_arb_none_when_sum_too_low():
@@ -53,7 +65,7 @@ def test_exhaustive_arb_none_when_sum_too_low():
         {"polymarket_id": "b", "yes_price": 0.10, "no_price": 0.92},
         {"polymarket_id": "c", "yes_price": 0.10, "no_price": 0.92},
     ]
-    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
+    result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01, is_maker=True)
     assert result is None
 
 
@@ -64,19 +76,18 @@ def test_exhaustive_arb_none_when_sum_too_high():
         {"polymarket_id": "b", "yes_price": 0.90, "no_price": 0.12},
         {"polymarket_id": "c", "yes_price": 0.85, "no_price": 0.17},
     ]
-    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01)
+    result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01, is_maker=True)
     assert result is None
 
 
 def test_exhaustive_arb_none_when_edge_too_high():
     """Net edge > max_net_edge should be rejected as data quality issue."""
-    # Construct a group where the math produces a valid but absurdly high edge
     markets = [
         {"polymarket_id": "a", "yes_price": 0.60, "no_price": 0.42},
         {"polymarket_id": "b", "yes_price": 0.05, "no_price": 0.97},
     ]
-    result = detect_exhaustive_arb(markets, fee_rate=0.02, min_net_edge=0.01, max_net_edge=0.20)
-    # yes_sum=0.65, within 0.5-1.8, but edge would be huge → capped
+    result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01,
+                                   max_net_edge=0.20, is_maker=True)
     if result is not None:
         assert result.net_edge <= 0.20
 
@@ -100,6 +111,7 @@ class TestArbDedup:
             arb_interval_seconds = 60
             arb_kelly_multiplier = 0.20
             arb_max_single_pct = 0.40
+            use_maker_orders = True
         return ArbitrageStrategy(FakeSettings())
 
     def test_arb_dedup_blocks_seen_market(self):

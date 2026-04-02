@@ -14,15 +14,17 @@ class ClobGateway:
         log.info("clob_gateway_initialized", address=self._client.get_address())
 
     async def submit_order(self, token_id: str, side: str, price: float,
-                           size: float, order_type: str = "GTC") -> str:
+                           size: float, order_type: str = "GTC",
+                           post_only: bool = False) -> str:
         order_args = OrderArgs(token_id=token_id, price=price, size=size, side=side)
         ot = getattr(OrderType, order_type, OrderType.GTC)
         def _create_and_post():
             signed_order = self._client.create_order(order_args)
-            return self._client.post_order(signed_order, orderType=ot)
+            return self._client.post_order(signed_order, orderType=ot, post_only=post_only)
         result = await asyncio.to_thread(_create_and_post)
         order_id = result.get("orderID") or result.get("id", "")
-        log.info("clob_order_submitted", order_id=order_id, token_id=token_id, side=side, price=price, size=size)
+        log.info("clob_order_submitted", order_id=order_id, token_id=token_id,
+                 side=side, price=price, size=size, post_only=post_only)
         return order_id
 
     async def cancel_order(self, clob_order_id: str) -> bool:
@@ -40,18 +42,74 @@ class ClobGateway:
         status_map = {"LIVE": "live", "MATCHED": "matched", "CANCELLED": "cancelled", "CANCELED": "cancelled"}
         return {"status": status_map.get(status_raw, status_raw.lower()), "size_matched": float(result.get("size_matched", 0))}
 
-    async def sell_shares(self, token_id: str, price: float, size: float) -> str:
+    async def sell_shares(self, token_id: str, price: float, size: float,
+                          post_only: bool = False) -> str:
         """Place a sell order for shares we already own."""
         order_args = OrderArgs(token_id=token_id, price=price, size=size, side="SELL")
         def _create_and_post():
             signed_order = self._client.create_order(order_args)
-            return self._client.post_order(signed_order, orderType=OrderType.GTC)
+            return self._client.post_order(signed_order, orderType=OrderType.GTC, post_only=post_only)
         result = await asyncio.to_thread(_create_and_post)
         order_id = result.get("orderID") or result.get("id", "")
         log.info("clob_sell_submitted", order_id=order_id, token_id=token_id,
-                 price=price, size=size)
+                 price=price, size=size, post_only=post_only)
         return order_id
 
     async def get_balance(self) -> float:
         result = await asyncio.to_thread(self._client.get_balance_allowance)
         return float(result.get("balance", 0))
+
+    # --- Market-making support methods ---
+
+    async def send_heartbeat(self, heartbeat_id: str) -> str:
+        """Send heartbeat to keep orders alive. MUST be called every <10s."""
+        result = await asyncio.to_thread(self._client.post_heartbeat, heartbeat_id)
+        new_id = result if isinstance(result, str) else str(result)
+        return new_id
+
+    async def cancel_all_orders(self) -> bool:
+        """Emergency: cancel all resting orders."""
+        try:
+            await asyncio.to_thread(self._client.cancel_all)
+            log.info("clob_all_orders_cancelled")
+            return True
+        except Exception as e:
+            log.error("clob_cancel_all_failed", error=str(e))
+            return False
+
+    async def cancel_orders_batch(self, order_ids: list[str]) -> bool:
+        """Cancel multiple orders in one call."""
+        try:
+            await asyncio.to_thread(self._client.cancel_orders, order_ids)
+            log.info("clob_batch_cancelled", count=len(order_ids))
+            return True
+        except Exception as e:
+            log.error("clob_batch_cancel_failed", error=str(e))
+            return False
+
+    async def submit_batch_orders(self, orders: list[dict],
+                                  post_only: bool = True) -> list[str]:
+        """Batch submit up to 15 post-only orders.
+
+        Each dict: {token_id, side, price, size}.
+        """
+        from py_clob_client.clob_types import PostOrdersArgs
+
+        def _build_and_post():
+            args = []
+            for o in orders:
+                order_args = OrderArgs(
+                    token_id=o["token_id"], price=o["price"],
+                    size=o["size"], side=o["side"])
+                signed = self._client.create_order(order_args)
+                args.append(PostOrdersArgs(
+                    order=signed, orderType=OrderType.GTC, postOnly=post_only))
+            return self._client.post_orders(args)
+
+        result = await asyncio.to_thread(_build_and_post)
+        order_ids = []
+        if isinstance(result, list):
+            for r in result:
+                order_ids.append(r.get("orderID") or r.get("id", ""))
+        log.info("clob_batch_submitted", count=len(orders), post_only=post_only)
+        return order_ids

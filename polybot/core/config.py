@@ -42,8 +42,9 @@ class Settings(BaseSettings):
     snipe_max_single_pct: float = 0.25
     forecast_max_single_pct: float = 0.15
 
-    # Fee
-    polymarket_fee_rate: float = 0.02
+    # Fee model: makers pay 0%, takers pay category-specific rates
+    use_maker_orders: bool = True   # post_only flag → guaranteed 0% maker fee
+    fee_rate_default: float = 0.04  # fallback taker rate for unknown categories
 
     # Snipe thresholds
     snipe_hours_max: float = 72.0
@@ -86,8 +87,11 @@ class Settings(BaseSettings):
 
     # Active position management
     take_profit_threshold: float = 0.20
-    stop_loss_threshold: float = 0.25
+    stop_loss_threshold: float = 0.15
     position_check_interval: int = 60
+
+    # Snipe tier 2 LLM guard
+    snipe_tier2_llm_max_hours: float = 48.0
 
     # Snipe cooldown & re-entry
     snipe_cooldown_hours: float = 4.0
@@ -95,13 +99,19 @@ class Settings(BaseSettings):
     snipe_max_entries_per_market: int = 3
 
     # Arb bankroll gate
-    arb_min_bankroll: float = 2000.0
-    arb_max_hold_days: float = 7.0
+    arb_min_bankroll: float = 5.0
+    arb_max_hold_days: float = 3.0
 
     # Forecast time-stop (dynamic: scales with time-to-resolution)
-    forecast_time_stop_minutes: float = 20.0          # floor — minimum hold time
-    forecast_time_stop_fraction: float = 0.10          # hold up to 10% of time-to-resolution
+    forecast_time_stop_minutes: float = 90.0           # floor — minimum hold time
+    forecast_time_stop_fraction: float = 0.15          # hold up to 15% of time-to-resolution
     forecast_time_stop_max_minutes: float = 480.0      # cap — never hold longer than 8h
+
+    # Forecast consensus & category filtering
+    forecast_min_consensus: int = 2                    # min models agreeing on direction
+    forecast_consensus_margin: float = 0.02            # margin from market price to count as "agreeing"
+    forecast_category_min_trades: int = 10             # min trades before filtering by category
+    forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
 
     # Learning system
     enable_proxy_trust_learning: bool = True
@@ -142,6 +152,32 @@ class Settings(BaseSettings):
     category_min_trades: int = 20
     calibration_min_trades: int = 50
     strategy_kill_min_trades: int = 50
+
+    # Market-making strategy
+    mm_enabled: bool = False
+    mm_cycle_seconds: float = 5.0
+    mm_selection_interval_seconds: float = 300.0
+    mm_kelly_mult: float = 0.15
+    mm_max_single_pct: float = 0.10
+    mm_max_total_pct: float = 0.30
+    mm_max_markets: int = 8
+    mm_base_spread_bps: int = 200
+    mm_min_spread_bps: int = 50
+    mm_max_spread_bps: int = 500
+    mm_quote_size_usd: float = 10.0
+    mm_max_inventory_per_market: float = 50.0
+    mm_max_total_inventory: float = 200.0
+    mm_max_skew_bps: int = 100
+    mm_requote_threshold: float = 0.005
+    mm_min_volume_24h: float = 5000.0
+    mm_min_resolution_hours: float = 168.0
+    mm_emergency_vol_threshold: float = 0.15
+    mm_volatility_pullback_mult: float = 2.0
+    mm_min_book_depth: float = 1000.0
+
+    # WebSocket streaming
+    enable_websocket_streaming: bool = True
+    ws_reconnect_max_delay: float = 30.0
 
     # Monitoring
     health_check_interval: int = 60

@@ -41,14 +41,14 @@ def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float =
     return None
 
 
-def compute_snipe_edge(buy_price: float, fee_rate: float = 0.02) -> float:
+def compute_snipe_edge(buy_price: float, fee_per_dollar: float = 0.0) -> float:
     """
     Compute net edge for a snipe trade.
 
-    For YES bets: edge = (1.0 - buy_price) - fee_rate
-    buy_price is the market price paid
+    For YES bets: edge = (1.0 - buy_price) - fee_per_dollar
+    fee_per_dollar is 0.0 for maker orders, or feeRate*(1-price) for takers.
     """
-    return (1.0 - buy_price) - fee_rate
+    return (1.0 - buy_price) - fee_per_dollar
 
 
 def compute_tiered_kelly_scale(net_edge: float) -> float:
@@ -89,7 +89,7 @@ class ResolutionSnipeStrategy(Strategy):
         self._min_net_edge = settings.snipe_min_net_edge
         self._min_confidence = settings.snipe_min_confidence
         self._max_hours = settings.snipe_hours_max
-        self._fee_rate = settings.polymarket_fee_rate
+        self._use_maker = settings.use_maker_orders
         self._ensemble = ensemble
         self._cooldown_hours = settings.snipe_cooldown_hours
         self._reentry_threshold = settings.snipe_reentry_threshold
@@ -156,7 +156,13 @@ class ResolutionSnipeStrategy(Strategy):
                           price=m["yes_price"])
                 continue
 
-            net_edge = compute_snipe_edge(buy_price, self._fee_rate)
+            from polybot.trading.fees import get_fee_rate, compute_taker_fee_per_dollar
+            category = m.get("category", "unknown")
+            if self._use_maker:
+                fee_per_dollar = 0.0
+            else:
+                fee_per_dollar = compute_taker_fee_per_dollar(buy_price, get_fee_rate(category))
+            net_edge = compute_snipe_edge(buy_price, fee_per_dollar)
             if net_edge < self._min_net_edge:
                 log.debug("snipe_rejected_edge", market=m["polymarket_id"],
                           edge=round(net_edge, 4), min_edge=self._min_net_edge)
@@ -182,10 +188,11 @@ class ResolutionSnipeStrategy(Strategy):
                 continue
 
             if tier in (1, 2) and self._ensemble:
-                # Skip LLM for far-future markets — outcome is never determined
-                if hours_remaining > 12:
+                # Tier-appropriate time guard: LLM can only reliably verify near-term outcomes
+                tier_max_hours = {1: 12.0, 2: getattr(ctx.settings, "snipe_tier2_llm_max_hours", 48.0)}
+                if hours_remaining > tier_max_hours.get(tier, 12.0):
                     log.info("snipe_rejected_far_future", market=m["polymarket_id"],
-                             hours=round(hours_remaining, 1))
+                             hours=round(hours_remaining, 1), tier=tier)
                     continue
                 prompt = build_snipe_prompt(m["question"], str(m["resolution_time"]), hours_remaining, m["yes_price"])
                 try:
@@ -277,6 +284,7 @@ class ResolutionSnipeStrategy(Strategy):
                     token_id=token_id, side=side, size_usd=size,
                     price=buy_price, market_id=market_id,
                     analysis_id=analysis_id, strategy=self.name,
+                    post_only=self._use_maker,
                 )
                 if not result:
                     continue

@@ -250,11 +250,44 @@ class EnsembleForecastStrategy(Strategy):
                      losses=len(self._loss_blacklist.get(candidate.polymarket_id, [])))
             return
 
+        # Category performance filter: skip categories with negative ROI
+        _cat_min_trades = getattr(self._settings, "forecast_category_min_trades", 10)
+        _cat_min_avg = getattr(self._settings, "forecast_category_min_avg_pnl", -1.0)
+        try:
+            _sys_state = await ctx.db.fetchrow("SELECT category_scores FROM system_state WHERE id = 1")
+            if _sys_state:
+                import json as _json
+                _cat_scores_raw = _sys_state.get("category_scores") if hasattr(_sys_state, "get") else None
+                if _cat_scores_raw:
+                    _cat_scores = _json.loads(_cat_scores_raw) if isinstance(_cat_scores_raw, str) else _cat_scores_raw
+                    _cat_data = _cat_scores.get(candidate.category) if isinstance(_cat_scores, dict) else None
+                    if _cat_data and isinstance(_cat_data, dict) and _cat_data.get("trades", 0) >= _cat_min_trades:
+                        _avg_pnl = _cat_data.get("pnl", 0) / max(_cat_data["trades"], 1)
+                        if _avg_pnl < _cat_min_avg:
+                            log.info("forecast_category_filtered", market=candidate.polymarket_id,
+                                     category=candidate.category, avg_pnl=round(_avg_pnl, 2))
+                            return
+        except Exception:
+            pass  # Category filtering is best-effort; don't block trades on DB errors
+
         # 6a. Web research first, then ensemble with full context
         research = await self._researcher.search(candidate.question)
         ensemble_result = await self._ensemble.analyze(
             candidate.question, research, trust_weights
         )
+
+        # Consensus requirement: at least N models must agree on direction
+        _min_consensus = getattr(self._settings, "forecast_min_consensus", 2)
+        _consensus_margin = getattr(self._settings, "forecast_consensus_margin", 0.02)
+        if len(ensemble_result.estimates) >= 2:
+            _above = sum(1 for e in ensemble_result.estimates
+                         if e.probability > candidate.current_price + _consensus_margin)
+            _below = sum(1 for e in ensemble_result.estimates
+                         if e.probability < candidate.current_price - _consensus_margin)
+            if max(_above, _below) < _min_consensus:
+                log.info("forecast_no_consensus", market=candidate.polymarket_id,
+                         above=_above, below=_below, threshold=_min_consensus)
+                return
 
         composite = compute_composite_score(quant, getattr(self._settings, "quant_weights", None) or {})
 
@@ -288,11 +321,18 @@ class EnsembleForecastStrategy(Strategy):
 
         prob = max(0.01, min(0.99, prob))
 
-        # 8a. Fee-adjusted Kelly
+        # 8a. Fee-adjusted Kelly (makers pay 0%, takers pay category-specific rate)
+        from polybot.trading.fees import get_fee_rate as _get_fee_rate, compute_taker_fee_per_dollar
+        if self._settings.use_maker_orders:
+            _fee_per_dollar = 0.0
+        else:
+            _cat_rate = _get_fee_rate(candidate.category)
+            _buy_price = candidate.current_price if prob > candidate.current_price else 1.0 - candidate.current_price
+            _fee_per_dollar = compute_taker_fee_per_dollar(_buy_price, _cat_rate)
         kelly_result = compute_kelly(
             prob,
             candidate.current_price,
-            fee_rate=self._settings.polymarket_fee_rate,
+            fee_per_dollar=_fee_per_dollar,
         )
         if kelly_result.edge < edge_threshold:
             log.debug("low_edge", market=candidate.polymarket_id, edge=kelly_result.edge)
@@ -451,6 +491,7 @@ class EnsembleForecastStrategy(Strategy):
                     "stdev": round(ensemble_result.stdev, 4),
                     "composite_quant": round(composite, 4),
                 },
+                post_only=self._settings.use_maker_orders,
             )
             await ctx.email_notifier.send(
                 f"[POLYBOT] Trade executed: {candidate.question[:60]}",

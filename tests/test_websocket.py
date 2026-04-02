@@ -1,5 +1,7 @@
 import pytest
-from polybot.markets.websocket import PositionTracker, should_early_exit, should_stop_loss
+import asyncio
+from unittest.mock import AsyncMock
+from polybot.markets.websocket import PositionTracker, PriceStreamHub, should_early_exit, should_stop_loss
 
 
 class TestShouldEarlyExit:
@@ -43,3 +45,59 @@ class TestShouldStopLoss:
             current_price=0.65,
             side="NO",
         ) is True
+
+
+class TestPriceStreamHub:
+    def test_subscribe_and_get_price(self):
+        hub = PriceStreamHub()
+        cb = AsyncMock()
+        hub.subscribe("token_a", cb)
+        assert hub.get_price("token_a") is None
+        hub._price_cache["token_a"] = 0.55
+        assert hub.get_price("token_a") == 0.55
+
+    def test_unsubscribe_all(self):
+        hub = PriceStreamHub()
+        cb = AsyncMock()
+        hub.subscribe("token_a", cb)
+        hub.unsubscribe("token_a")
+        assert "token_a" not in hub._subscribers
+
+    def test_unsubscribe_specific_callback(self):
+        hub = PriceStreamHub()
+        cb1 = AsyncMock()
+        cb2 = AsyncMock()
+        hub.subscribe("token_a", cb1)
+        hub.subscribe("token_a", cb2)
+        hub.unsubscribe("token_a", cb1)
+        assert cb2 in hub._subscribers["token_a"]
+        assert cb1 not in hub._subscribers["token_a"]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_calls_subscribers(self):
+        hub = PriceStreamHub()
+        cb = AsyncMock()
+        hub.subscribe("token_a", cb)
+        await hub._dispatch({"token_id": "token_a", "price": "0.65"})
+        cb.assert_awaited_once_with("token_a", 0.65)
+        assert hub.get_price("token_a") == 0.65
+
+    @pytest.mark.asyncio
+    async def test_dispatch_ignores_unknown_token(self):
+        hub = PriceStreamHub()
+        cb = AsyncMock()
+        hub.subscribe("token_a", cb)
+        await hub._dispatch({"token_id": "token_b", "price": "0.50"})
+        cb.assert_not_awaited()
+        # But price cache is still updated
+        assert hub.get_price("token_b") == 0.50
+
+    @pytest.mark.asyncio
+    async def test_dispatch_handles_missing_fields(self):
+        hub = PriceStreamHub()
+        cb = AsyncMock()
+        hub.subscribe("token_a", cb)
+        await hub._dispatch({"token_id": "token_a"})  # no price
+        cb.assert_not_awaited()
+        await hub._dispatch({})  # no fields
+        cb.assert_not_awaited()

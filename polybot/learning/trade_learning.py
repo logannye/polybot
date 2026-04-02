@@ -226,7 +226,7 @@ class TradeLearner:
 
             # Clamp to safe ranges
             best_tp = max(0.10, min(0.50, best_tp))
-            best_sl = max(0.10, min(0.40, best_sl))
+            best_sl = max(0.10, min(0.25, best_sl))
 
             # Store in strategy_performance.learned_params
             current = await self._db.fetchval(

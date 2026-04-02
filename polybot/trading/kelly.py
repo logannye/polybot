@@ -9,7 +9,15 @@ class KellyResult:
     kelly_fraction: float
 
 
-def compute_kelly(ensemble_prob: float, market_price: float, fee_rate: float = 0.02) -> KellyResult:
+def compute_kelly(ensemble_prob: float, market_price: float, fee_per_dollar: float = 0.0) -> KellyResult:
+    """Compute Kelly criterion for a prediction market trade.
+
+    Args:
+        ensemble_prob: Estimated true probability (0-1).
+        market_price: Current YES share price (0-1).
+        fee_per_dollar: Fee drag per dollar spent. Use 0.0 for maker orders,
+            or compute via fees.compute_taker_fee_per_dollar() for taker orders.
+    """
     yes_edge = ensemble_prob - market_price
     no_edge = (1 - ensemble_prob) - (1 - market_price)
 
@@ -23,7 +31,7 @@ def compute_kelly(ensemble_prob: float, market_price: float, fee_rate: float = 0
     else:
         return KellyResult(side="YES", edge=0.0, odds=0.0, kelly_fraction=0.0)
 
-    net_edge = gross_edge - (fee_rate * win_prob)
+    net_edge = gross_edge - fee_per_dollar
     if net_edge <= 0:
         return KellyResult(side=side, edge=0.0, odds=0.0, kelly_fraction=0.0)
 

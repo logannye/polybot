@@ -26,7 +26,7 @@ async def test_forecast_dedup_blocks_existing_trade():
     settings.forecast_interval_seconds = 300
     settings.forecast_kelly_mult = 0.25
     settings.forecast_max_single_pct = 0.15
-    settings.polymarket_fee_rate = 0.02
+    settings.use_maker_orders = True
     settings.max_positions_per_market = 1
     settings.min_trade_size = 1.0
     settings.quant_weights = {

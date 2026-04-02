@@ -93,13 +93,23 @@ def test_no_snipe_negative_hours():
     assert classify_snipe_tier(price=0.95, hours_remaining=-1.0) is None
 
 
-def test_snipe_edge_yes():
-    edge = compute_snipe_edge(buy_price=0.95, fee_rate=0.02)
-    assert abs(edge - 0.03) < 1e-9
+def test_snipe_edge_maker_zero_fee():
+    """Maker orders: full edge, no fee deduction."""
+    edge = compute_snipe_edge(buy_price=0.95, fee_per_dollar=0.0)
+    assert abs(edge - 0.05) < 1e-9
+
+
+def test_snipe_edge_taker_fee():
+    """Taker at p=0.95 with finance rate: fee_per_dollar = 0.04 * 0.05 = 0.002."""
+    from polybot.trading.fees import compute_taker_fee_per_dollar
+    fee_pd = compute_taker_fee_per_dollar(0.95, 0.04)
+    edge = compute_snipe_edge(buy_price=0.95, fee_per_dollar=fee_pd)
+    assert abs(edge - 0.048) < 1e-4
 
 
 def test_snipe_edge_negative():
-    edge = compute_snipe_edge(buy_price=0.99, fee_rate=0.02)
+    """Even with zero fee, p=0.99 leaves only 1 cent of edge."""
+    edge = compute_snipe_edge(buy_price=0.995, fee_per_dollar=0.01)
     assert edge < 0
 
 

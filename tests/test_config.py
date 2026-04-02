@@ -100,7 +100,7 @@ def test_v2_strategy_settings_defaults():
     assert s.arb_max_single_pct == 0.40
     assert s.snipe_max_single_pct == 0.30  # Snipe Factory: 0.25 → 0.30
     assert s.forecast_max_single_pct == 0.15
-    assert s.polymarket_fee_rate == 0.02
+    assert s.use_maker_orders is True
     assert s.max_total_deployed_pct == 0.90  # Snipe Factory: 0.70 → 0.90
     assert s.max_concurrent_positions == 20  # Snipe Factory: 12 → 20
     assert s.daily_loss_limit_pct == 1.0  # Snipe Factory: 0.15 → 1.0 (disabled)

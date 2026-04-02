@@ -279,7 +279,7 @@ async def test_compute_optimal_thresholds_stores_results(db, settings):
         assert "take_profit_threshold" in params
         assert "stop_loss_threshold" in params
         assert 0.10 <= params["take_profit_threshold"] <= 0.50
-        assert 0.10 <= params["stop_loss_threshold"] <= 0.40
+        assert 0.10 <= params["stop_loss_threshold"] <= 0.25
         assert params["threshold_sample_size"] == 15
 
 

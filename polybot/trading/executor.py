@@ -32,7 +32,8 @@ class OrderExecutor:
         return elapsed_seconds > self._fill_timeout_seconds
 
     async def place_order(self, token_id, side, size_usd, price, market_id, analysis_id,
-                          strategy: str = "forecast", kelly_inputs: dict | None = None):
+                          strategy: str = "forecast", kelly_inputs: dict | None = None,
+                          post_only: bool = False):
         shares = self._wallet.compute_shares(size_usd, price)
         if shares <= 0:
             return None
@@ -58,7 +59,8 @@ class OrderExecutor:
         if not self._dry_run and self._clob is not None:
             try:
                 clob_order_id = await self._clob.submit_order(
-                    token_id=token_id, side=side, price=price, size=shares)
+                    token_id=token_id, side=side, price=price, size=shares,
+                    post_only=post_only)
                 await self._db.execute(
                     "UPDATE trades SET clob_order_id = $1 WHERE id = $2",
                     clob_order_id, trade_id)
@@ -74,14 +76,16 @@ class OrderExecutor:
         return {"trade_id": trade_id, "order_id": clob_order_id, "shares": shares}
 
     async def place_multi_leg_order(self, legs: list[dict], strategy: str = "arbitrage",
-                                    kelly_inputs: dict | None = None) -> list[dict | None]:
+                                    kelly_inputs: dict | None = None,
+                                    post_only: bool = False) -> list[dict | None]:
         results = []
         for leg in legs:
             result = await self.place_order(
                 token_id=leg["token_id"], side=leg["side"],
                 size_usd=leg["size_usd"], price=leg["price"],
                 market_id=leg["market_id"], analysis_id=leg.get("analysis_id"),
-                strategy=strategy, kelly_inputs=kelly_inputs)
+                strategy=strategy, kelly_inputs=kelly_inputs,
+                post_only=post_only)
             results.append(result)
         return results
 
