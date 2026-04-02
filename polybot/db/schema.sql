@@ -112,10 +112,10 @@ ALTER TABLE trades ADD CONSTRAINT trades_status_check
     CHECK (status IN ('open', 'filled', 'partial', 'cancelled', 'closed',
                       'dry_run', 'dry_run_resolved'));
 
--- v2.3: Expand exit_reason for time-stop exits
+-- v2.3: Expand exit_reason for time-stop and arb TTL exits
 ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_exit_reason_check;
 ALTER TABLE trades ADD CONSTRAINT trades_exit_reason_check
-    CHECK (exit_reason IN ('resolution', 'early_exit', 'stop_loss', 'take_profit', 'time_stop'));
+    CHECK (exit_reason IN ('resolution', 'early_exit', 'stop_loss', 'take_profit', 'time_stop', 'arb_ttl_expired'));
 
 -- v2.4: Learning system — per-strategy learned parameters
 ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS learned_params JSONB NOT NULL DEFAULT '{}';
