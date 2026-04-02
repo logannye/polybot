@@ -115,14 +115,15 @@ Strategy-aware risk management with aggressive sizing for high-certainty trades:
 |------|-----------|-------|----------|-------------|
 | Kelly multiplier | 0.80x | 0.50x (+ tiered edge scaling) | 0.25x | 0.15x |
 | Max single position | 40% | 30% | 15% | 10% |
+| Max concurrent (strategy) | 8 | — | — | `mm_max_markets` (8) |
 | Bankroll gate | $5 minimum | — | — | Live mode only |
 
 | Rule | Default |
 |------|---------|
 | Max total deployed | 90% of bankroll |
 | Max per category | 25% of bankroll |
-| Max concurrent positions | 20 |
-| Daily loss limit | Configurable (default 15%, disabled during sprint mode) |
+| Max concurrent positions | 20 (arb capped at 8 to reserve slots for forecast/snipe) |
+| Daily loss limit | 15% of bankroll (triggers 6h circuit breaker) |
 | Post-breaker cooldown | 24h at 50% Kelly |
 | Min trade size | $1 |
 
