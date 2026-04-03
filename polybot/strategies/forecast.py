@@ -299,7 +299,7 @@ class EnsembleForecastStrategy(Strategy):
 
         # 7. Market-efficiency shrinkage + calibration correction
         raw_prob = ensemble_result.ensemble_probability
-        prob = shrink_toward_market(raw_prob, candidate.current_price, shrinkage=0.15)
+        prob = shrink_toward_market(raw_prob, candidate.current_price, shrinkage=0.35)
 
         # Challenge pass: if ensemble disagrees with market by >15%,
         # ask Gemini Flash to revise after seeing the market price

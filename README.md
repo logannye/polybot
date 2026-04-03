@@ -1,8 +1,8 @@
 # Polybot
 
-Fully autonomous AI trading bot for [Polymarket](https://polymarket.com). Uses a multi-strategy architecture — arbitrage scanning, resolution sniping, and a multi-model LLM ensemble — to find and exploit edge in binary outcome markets. The system learns from every resolved trade, adapting model weights, category preferences, and sizing parameters over time.
+Fully autonomous AI trading bot for [Polymarket](https://polymarket.com). Uses a multi-strategy architecture — resolution sniping, ensemble forecasting, market making, and mean reversion — to find and exploit edge in binary outcome markets. The system learns from every resolved trade, adapting model weights, category preferences, and sizing parameters over time.
 
-Built for micro-scale bankrolls ($100-500) targeting aggressive compounding through mathematically provable edge (arbitrage), near-certain edge (resolution sniping), analytical edge (ensemble forecasting), and passive income from market making (spread capture + maker rebates + liquidity rewards).
+Built for micro-scale bankrolls ($100-500) targeting aggressive compounding through near-certain edge (resolution sniping), analytical edge (ensemble forecasting), passive income (market making spread capture + maker rebates), and contrarian edge (mean reversion after overreactions).
 
 ## Who is this for?
 
@@ -13,31 +13,22 @@ Built for micro-scale bankrolls ($100-500) targeting aggressive compounding thro
 
 ## How it works
 
-Four concurrent strategies run at independent frequencies within a single async process:
+Five concurrent strategies run at independent frequencies within a single async process:
 
-### Strategy 1: Arbitrage Scanner (every 45s)
-
-Detects mathematically provable mispricings between related markets. No LLMs, pure math.
-
-- **Complement arbitrage** — YES + NO prices on a single market sum to less than $1.00 (buy both for guaranteed profit)
-- **Exhaustive outcome arbitrage** — Multi-outcome groups (e.g., "Who wins?" with candidates A, B, C) where YES prices don't sum to $1.00. Groups are validated: probability sums must be between 0.5-1.8, and net edge is capped at 20% to reject false positives from cosmetic API groupings
-- **Temporal subset arbitrage** — "Will X happen by June?" priced higher than "Will X happen by July?" (logically impossible)
-
-Sizing: Near-full Kelly (0.80x). Edge is mathematically certain — the only risk is execution. No bankroll minimum — arb trades fire at any bankroll size above $5.
-
-### Strategy 2: Resolution Sniping (every 2 min)
+### Strategy 1: Resolution Sniping (every 60s)
 
 Targets markets approaching resolution where the outcome is effectively determined but the price hasn't converged. Three confidence tiers with expanding time windows:
 
 - **Tier 0** (no LLM): Price at $0.95+ or $0.05-, within 24h — near-certain, just collecting convergence
 - **Tier 1** (single Gemini Flash call): Price $0.85-$0.95, within 12h — cheap LLM verifies outcome is determined
-- **Tier 2** (single Gemini Flash call): Price $0.85-$0.95, within 120h — conservative sizing, LLM verified
+- **Tier 2** (single Gemini Flash call): Price $0.80-$0.85, within 72h — conservative sizing, LLM verified
+- **Tier 3** (single Gemini Flash call): Price $0.75-$0.80, within 120h — most conservative sizing
 
-Sizing: Tier-dependent Kelly — T0: 0.50x (full snipe kelly), T1: 0.35x, T2: 0.20x. High-edge trades (3-5%) get 1.5x sizing; 5%+ edge gets 2x.
+Sizing: Tier-dependent Kelly — T0: 0.50x (full snipe kelly), T1: 0.43x, T2: 0.28x, T3: 0.15x. High-edge trades (3-5%) get 1.5x sizing; 5%+ edge gets 2x.
 
-**Per-market cooldown**: After exiting a market, re-entry is blocked for 4 hours unless price moves 3%+ (capturing second-leg convergence). Capped at 3 entries per market per 24h.
+**Per-market cooldown**: After exiting a market, re-entry is blocked for 1 hour unless price moves 3%+ (capturing second-leg convergence). Capped at 2 entries per market per 24h, with a cumulative exposure cap of 30% of bankroll per market across all open snipe positions.
 
-### Strategy 3: Ensemble Forecast (every 3 min)
+### Strategy 2: Ensemble Forecast (every 5 min)
 
 The full analysis pipeline with a cost-efficient tiered funnel:
 
@@ -59,7 +50,7 @@ The full analysis pipeline with a cost-efficient tiered funnel:
 
 Three models estimate probability **blind** — the market price is intentionally withheld to prevent anchoring bias. Estimates are aggregated using confidence-weighted averaging with trust weights that evolve based on each model's historical Brier score.
 
-Sizing: Quarter-Kelly (0.25x) with confidence modulation.
+Sizing: Quarter-Kelly (0.20x) with confidence modulation. Market-efficiency shrinkage of 35% blends ensemble probability toward the market price to counteract LLM overconfidence.
 
 **Market loss blacklist**: After 2 stop-losses on the same market within 12 hours, the market is blacklisted — preventing repeated losing entries on the same thesis.
 
@@ -69,9 +60,9 @@ Sizing: Quarter-Kelly (0.25x) with confidence modulation.
 
 **Time-stop**: Forecast trades are automatically exited if held past a dynamic time limit that scales with time-to-resolution — `max(90min floor, 15% of hours-to-resolution)`, capped at 8 hours. Only fires on flat or losing positions — profitable trades fall through to the normal take-profit/stop-loss checks.
 
-### Strategy 4: Market Making (every 5s, opt-in)
+### Strategy 3: Market Making (every 5s, opt-in)
 
-Posts two-sided quotes on selected markets to earn spread capture, maker rebates, and liquidity rewards. This is the only strategy that requires live mode (`DRY_RUN=false`).
+Posts two-sided quotes on selected markets to earn spread capture, maker rebates, and liquidity rewards. Supports dry-run simulation mode — simulates fills when market price crosses quote prices, tracking P&L without placing real orders.
 
 - **Market selection** — Scores markets by volume (≥$5K/day), book depth (≥$1K), resolution time (≥7 days out), and price range (0.10-0.90 for 3x two-sided reward bonus). Re-evaluates every 5 minutes, maintains 3-8 active markets.
 - **Zero-fee quoting** — All orders use `post_only=True`, guaranteeing maker status (0% fees). Earns 20-25% of taker fees as maker rebates.
@@ -81,6 +72,22 @@ Posts two-sided quotes on selected markets to earn spread capture, maker rebates
 
 Revenue sources: spread capture + maker rebates (20-25% of taker fees, daily) + liquidity rewards (quadratic scoring, daily) + holding rewards (4% APY).
 
+### Strategy 4: Mean Reversion (every 5 min, opt-in)
+
+Detects markets where price has moved >10% in the last scan cycle and takes a contrarian position betting on partial reversion. Markets tend to overreact to news — this strategy captures the correction.
+
+- **Price snapshot tracking** — Maintains in-memory price snapshots for all ~4,800 active markets. Compares current price against last snapshot to detect large moves without fetching price history for every market.
+- **Contrarian entry** — Price spiked UP → buy NO (bet on reversion down). Price dropped → buy YES (bet on reversion up).
+- **Edge estimation** — Expected edge = move magnitude × reversion fraction (default 40%). Only triggers on moves >10% with net edge >2%.
+- **Custom exit targets** — Take-profit when 40% of the move reverts; stop-loss if price extends 25% further in the overreaction direction; time-stop at 24 hours.
+- **Cooldown** — 24h per-market cooldown prevents chasing the same overreaction.
+
+Sizing: Conservative Kelly (0.15x), max 10% bankroll per position, max 5 concurrent mean-reversion positions.
+
+### Strategy 5: Arbitrage Scanner (every 45s, disabled)
+
+Detects mathematically provable mispricings between related markets. Currently disabled pending fixes to the exhaustive group detection logic (non-mutually-exclusive markets were being incorrectly grouped as exhaustive outcomes).
+
 ## Architecture
 
 Single Python async process (`asyncio`). Each strategy runs as an independent coroutine with its own scan interval, Kelly multiplier, and risk limits. Shared resources (DB, scanner, executor) are passed via a `TradingContext` dataclass. Bankroll contention between strategies is managed by an `asyncio.Lock` held only during the DB read-check-write window (~5ms).
@@ -88,7 +95,7 @@ Single Python async process (`asyncio`). Each strategy runs as an independent co
 ```
 polybot/
 ├── core/           # Engine orchestrator, configuration
-├── strategies/     # Strategy framework + arbitrage, snipe, forecast, market_maker
+├── strategies/     # Strategy framework + snipe, forecast, market_maker, mean_reversion, arbitrage
 ├── markets/        # Polymarket API client (Gamma + CLOB), filters, WebSocket hub, rewards client
 ├── analysis/       # LLM ensemble, quant signals, web research, pre-scoring
 ├── trading/        # Kelly sizing, risk management, order execution, CLOB gateway, fees, inventory, quotes
@@ -111,18 +118,18 @@ polybot/
 
 Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
-| Rule | Arbitrage | Snipe | Forecast | Market Maker |
-|------|-----------|-------|----------|-------------|
-| Kelly multiplier | 0.80x | 0.50x (+ tiered edge scaling) | 0.25x | 0.15x |
-| Max single position | 40% | 30% | 15% | 10% |
-| Max concurrent (strategy) | 8 | — | — | `mm_max_markets` (8) |
-| Bankroll gate | $5 minimum | — | — | Live mode only |
+| Rule | Snipe | Forecast | Market Maker | Mean Reversion |
+|------|-------|----------|-------------|----------------|
+| Kelly multiplier | 0.50x (+ tiered edge scaling) | 0.20x | 0.15x | 0.15x |
+| Max single position | 25% | 15% | 10% | 10% |
+| Max per market (cumulative) | 30% | 1 position | `mm_max_inventory` ($50) | 1 position |
+| Max concurrent (strategy) | — | — | 8 markets | 5 |
 
 | Rule | Default |
 |------|---------|
-| Max total deployed | 90% of bankroll |
+| Max total deployed | 70% of bankroll |
 | Max per category | 25% of bankroll |
-| Max concurrent positions | 20 (arb capped at 8 to reserve slots for forecast/snipe) |
+| Max concurrent positions | 12 |
 | Daily loss limit | 15% of bankroll (triggers 6h circuit breaker) |
 | Post-breaker cooldown | 24h at 50% Kelly |
 | Min trade size | $1 |
@@ -279,10 +286,14 @@ KELLY_MULT=0.25
 EDGE_THRESHOLD=0.05
 SCAN_INTERVAL_SECONDS=300
 
-# Market Making (opt-in, requires DRY_RUN=false)
+# Market Making (opt-in, supports dry-run simulation)
 MM_ENABLED=false
 MM_QUOTE_SIZE_USD=10.0
 MM_MAX_MARKETS=8
+
+# Mean Reversion (opt-in)
+MR_ENABLED=false
+MR_TRIGGER_THRESHOLD=0.10
 ```
 
 ### Database setup
@@ -300,7 +311,7 @@ The schema is applied automatically on first run.
 uv run python -m polybot
 ```
 
-The bot starts all three strategies immediately. A dashboard is available at `http://localhost:8080`.
+The bot starts all enabled strategies immediately. A dashboard is available at `http://localhost:8080`.
 
 ### Going live
 
@@ -377,14 +388,14 @@ Or manually: `ssh polybot@vps "cd /opt/polybot && git pull && uv sync && sudo sy
 ## Testing
 
 ```bash
-uv run pytest tests/ -v                                    # Run all 331 tests
+uv run pytest tests/ -v                                    # Run all tests
 uv run pytest tests/ --cov=polybot --cov-report=term       # With coverage
 uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 ```
 
 ## Key design decisions
 
-- **Multi-strategy architecture** — Arb, snipe, and forecast run at different frequencies (45s/2min/5min) because different edge types have different time sensitivities. A single loop would bottleneck arb detection behind slow LLM calls.
+- **Multi-strategy architecture** — Five strategies run at different frequencies (5s/60s/5min/5min/45s) because different edge types have different time sensitivities. A single loop would bottleneck market making behind slow LLM calls.
 - **Anti-anchoring** — LLMs never see the market price when estimating probability. This prevents them from simply parroting the market consensus.
 - **Category-aware fee model** — Edge calculations use Polymarket's actual fee formula (`feeRate * p * (1-p)`) with per-category rates, not a flat 2%. All orders default to `post_only=True` (maker status, 0% fees). This dramatically improves edge accuracy at extreme prices where the old flat rate overestimated fees by 10x.
 - **Strategy-specific Kelly** — Full Kelly for mathematically certain arb (0.80x), half for near-certain snipes (0.50x), quarter for uncertain forecasts (0.25x). This maximizes compounding on the highest-confidence trades.

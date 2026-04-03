@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     snipe_cooldown_hours: float = 4.0
     snipe_reentry_threshold: float = 0.03
     snipe_max_entries_per_market: int = 3
+    snipe_max_market_exposure_pct: float = 0.30  # max cumulative exposure per market
 
     # Arb bankroll gate
     arb_min_bankroll: float = 5.0
@@ -178,6 +179,19 @@ class Settings(BaseSettings):
     mm_emergency_vol_threshold: float = 0.15
     mm_volatility_pullback_mult: float = 2.0
     mm_min_book_depth: float = 1000.0
+
+    # Mean reversion strategy
+    mr_enabled: bool = False
+    mr_interval_seconds: float = 300.0
+    mr_trigger_threshold: float = 0.10
+    mr_reversion_fraction: float = 0.40
+    mr_kelly_mult: float = 0.15
+    mr_max_single_pct: float = 0.10
+    mr_max_concurrent: int = 5
+    mr_min_volume_24h: float = 5000.0
+    mr_min_book_depth: float = 500.0
+    mr_cooldown_hours: float = 12.0
+    mr_max_hold_hours: float = 24.0
 
     # WebSocket streaming
     enable_websocket_streaming: bool = True

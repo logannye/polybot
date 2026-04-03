@@ -142,6 +142,11 @@ class ResolutionSnipeStrategy(Strategy):
         raw_markets = await ctx.scanner.fetch_markets()
         now = datetime.now(timezone.utc)
 
+        # Pre-fetch bankroll for cumulative exposure checks (avoids lock per candidate)
+        state_row = await ctx.db.fetchrow("SELECT bankroll FROM system_state WHERE id = 1")
+        bankroll_snapshot = float(state_row["bankroll"]) if state_row else 0.0
+        max_market_exposure_pct = getattr(ctx.settings, "snipe_max_market_exposure_pct", 0.30)
+
         snipe_candidates = 0
         for m in raw_markets:
             hours_remaining = (m["resolution_time"] - now).total_seconds() / 3600
@@ -191,6 +196,19 @@ class ResolutionSnipeStrategy(Strategy):
             if entries_24h and entries_24h >= self._max_entries_per_market:
                 log.debug("snipe_entry_cap", market=m["polymarket_id"],
                           entries=entries_24h, max=self._max_entries_per_market)
+                continue
+
+            # Per-market cumulative USD exposure cap
+            cumulative_exposure = await ctx.db.fetchval(
+                """SELECT COALESCE(SUM(position_size_usd), 0) FROM trades t
+                   JOIN markets m2 ON t.market_id = m2.id
+                   WHERE m2.polymarket_id = $1 AND t.strategy = 'snipe'
+                     AND t.status IN ('open', 'filled', 'dry_run')""",
+                m["polymarket_id"])
+            max_market_exposure = bankroll_snapshot * max_market_exposure_pct
+            if float(cumulative_exposure) >= max_market_exposure:
+                log.debug("snipe_cumulative_cap", market=m["polymarket_id"],
+                          exposure=float(cumulative_exposure), max=round(max_market_exposure, 2))
                 continue
 
             if tier in (1, 2, 3) and self._ensemble:

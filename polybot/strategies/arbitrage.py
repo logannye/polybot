@@ -157,6 +157,15 @@ class ArbitrageStrategy(Strategy):
         self._min_bankroll = float(getattr(settings, "arb_min_bankroll", 2000.0))
 
     async def run_once(self, ctx: TradingContext) -> None:
+        # Check if this strategy is enabled in DB
+        enabled_row = await ctx.db.fetchrow(
+            "SELECT enabled FROM strategy_performance WHERE strategy = $1",
+            self.name,
+        )
+        if enabled_row and not enabled_row["enabled"]:
+            log.debug("strategy_skipped", strategy=self.name, reason="strategy_disabled")
+            return
+
         # Bankroll gate: don't lock capital in arb at small bankrolls
         state = await ctx.db.fetchrow("SELECT bankroll FROM system_state WHERE id = 1")
         if state and float(state["bankroll"]) < self._min_bankroll:

@@ -70,7 +70,7 @@ class ActivePositionManager:
         positions = await self._db.fetch(
             """SELECT t.id, t.side, t.entry_price, t.shares,
                       t.position_size_usd, t.strategy, t.status,
-                      t.opened_at,
+                      t.opened_at, t.kelly_inputs,
                       m.polymarket_id, m.question, m.resolution_time,
                       a.ensemble_probability
                FROM trades t
@@ -153,6 +153,53 @@ class ActivePositionManager:
                             continue
 
             exit_reason = None
+
+            # Mean-reversion custom exit: use stored price targets from kelly_inputs
+            if pos["strategy"] == "mean_reversion" and pos.get("kelly_inputs"):
+                try:
+                    ki = json.loads(pos["kelly_inputs"]) if isinstance(pos["kelly_inputs"], str) else pos["kelly_inputs"]
+                    tp_yes = ki.get("tp_yes_price")
+                    sl_yes = ki.get("sl_yes_price")
+                    max_hold = ki.get("max_hold_hours", 24.0)
+
+                    # Take-profit: price reverted toward target
+                    if tp_yes is not None:
+                        if (pos["side"] == "NO" and current_yes_price <= tp_yes) or \
+                           (pos["side"] == "YES" and current_yes_price >= tp_yes):
+                            exit_reason = "take_profit"
+
+                    # Stop-loss: price moved further against us
+                    if not exit_reason and sl_yes is not None:
+                        if (pos["side"] == "NO" and current_yes_price >= sl_yes) or \
+                           (pos["side"] == "YES" and current_yes_price <= sl_yes):
+                            exit_reason = "stop_loss"
+
+                    # Time-stop: held too long
+                    if not exit_reason and pos.get("opened_at"):
+                        hold_hours = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 3600
+                        if hold_hours > max_hold:
+                            exit_reason = "time_stop"
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    pass
+
+                if exit_reason:
+                    exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                    unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
+                    if self._portfolio_lock:
+                        async with self._portfolio_lock:
+                            pnl = await self._executor.exit_position(
+                                trade_id=trade_id, exit_price=exit_price,
+                                exit_reason=exit_reason)
+                    else:
+                        pnl = await self._executor.exit_position(
+                            trade_id=trade_id, exit_price=exit_price,
+                            exit_reason=exit_reason)
+                    if pnl is not None:
+                        exits_triggered += 1
+                        log.info("mr_position_exit", trade_id=trade_id,
+                                 reason=exit_reason, pnl=round(pnl, 4),
+                                 market=pos["question"][:60])
+                    continue
 
             strategy = pos["strategy"]
             tp_threshold = learned_thresholds.get(strategy, {}).get(

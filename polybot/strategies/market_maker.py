@@ -24,8 +24,8 @@ class MarketMakerStrategy:
 
     name = "market_maker"
 
-    def __init__(self, settings, clob, scanner, rewards_client=None,
-                 inventory=None, quote_manager=None):
+    def __init__(self, settings, clob, scanner, dry_run=False,
+                 rewards_client=None, inventory=None, quote_manager=None):
         self.interval_seconds = settings.mm_cycle_seconds
         self.kelly_multiplier = settings.mm_kelly_mult
         self.max_single_pct = settings.mm_max_single_pct
@@ -33,19 +33,23 @@ class MarketMakerStrategy:
         self._settings = settings
         self._clob = clob
         self._scanner = scanner
+        self._dry_run = dry_run
         self._rewards = rewards_client or RewardsClient()
         self._inventory = inventory or InventoryTracker(
             max_per_market=settings.mm_max_inventory_per_market,
             max_total=settings.mm_max_total_inventory,
             max_skew_bps=settings.mm_max_skew_bps,
         )
-        self._quote_mgr = quote_manager or QuoteManager(clob=clob, settings=settings)
+        self._quote_mgr = quote_manager or QuoteManager(
+            clob=clob, settings=settings, dry_run=dry_run)
 
         self._active_markets: dict[str, ActiveMarket] = {}
         self._last_selection: datetime | None = None
         self._heartbeat_id: str = str(uuid4())
         self._last_heartbeat: datetime | None = None
         self._vol_blacklist: dict[str, datetime] = {}  # market -> blacklist_until
+        self._sim_pnl: float = 0.0
+        self._sim_fills: int = 0
 
     async def run_once(self, ctx) -> None:
         """Main 5-second loop: heartbeat, select, quote, check fills."""
@@ -69,8 +73,15 @@ class MarketMakerStrategy:
             except Exception as e:
                 log.error("mm_quote_error", market=market.polymarket_id, error=str(e))
 
+        # 4. Simulate fills in dry-run mode
+        if self._dry_run:
+            self._simulate_fills()
+
     async def _send_heartbeat(self) -> None:
         """Send heartbeat to Polymarket to keep orders alive."""
+        if self._dry_run:
+            self._last_heartbeat = datetime.now(timezone.utc)
+            return
         try:
             self._heartbeat_id = await self._clob.send_heartbeat(self._heartbeat_id)
             self._last_heartbeat = datetime.now(timezone.utc)
@@ -211,6 +222,39 @@ class MarketMakerStrategy:
         await self._quote_mgr.requote(
             market, bid_price, bid_size, ask_price, ask_size,
             threshold=s.mm_requote_threshold)
+
+    def _simulate_fills(self) -> None:
+        """Simulate fills in dry-run mode by checking if market price crossed our quotes."""
+        for market in self._active_markets.values():
+            bid, ask = self._quote_mgr.get_quotes(market.polymarket_id)
+            if not bid and not ask:
+                continue
+            cached = self._scanner.get_cached_price(market.polymarket_id)
+            if not cached:
+                continue
+            current_price = cached.get("yes_price", market.fair_value)
+
+            # Bid fill: market dropped to or below our bid
+            if bid and bid.status == "live" and current_price <= bid.price:
+                spread_earned = market.fair_value - bid.price
+                self._inventory.record_fill(market.polymarket_id, "BUY", bid.price, bid.size)
+                self._sim_pnl += spread_earned * bid.size
+                self._sim_fills += 1
+                log.info("mm_sim_bid_fill", market=market.polymarket_id,
+                         bid=round(bid.price, 4), market_price=round(current_price, 4),
+                         spread=round(spread_earned, 4), size=round(bid.size, 2),
+                         cumulative_pnl=round(self._sim_pnl, 4), total_fills=self._sim_fills)
+
+            # Ask fill: market rose to or above our ask
+            if ask and ask.status == "live" and current_price >= ask.price:
+                spread_earned = ask.price - market.fair_value
+                self._inventory.record_fill(market.polymarket_id, "SELL", ask.price, ask.size)
+                self._sim_pnl += spread_earned * ask.size
+                self._sim_fills += 1
+                log.info("mm_sim_ask_fill", market=market.polymarket_id,
+                         ask=round(ask.price, 4), market_price=round(current_price, 4),
+                         spread=round(spread_earned, 4), size=round(ask.size, 2),
+                         cumulative_pnl=round(self._sim_pnl, 4), total_fills=self._sim_fills)
 
     async def emergency_withdraw(self) -> None:
         """Cancel all quotes and stop market making."""

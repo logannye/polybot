@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import uuid4
 import structlog
 
 log = structlog.get_logger()
@@ -35,9 +36,10 @@ class ActiveMarket:
 class QuoteManager:
     """Manages two-sided quotes across multiple markets."""
 
-    def __init__(self, clob, settings):
+    def __init__(self, clob, settings, dry_run: bool = False):
         self._clob = clob
         self._settings = settings
+        self._dry_run = dry_run
         self._active_quotes: dict[str, tuple[Quote | None, Quote | None]] = {}
 
     async def place_two_sided(
@@ -48,27 +50,35 @@ class QuoteManager:
         bid_id = ask_id = None
         now = datetime.now(timezone.utc)
 
-        try:
-            bid_id = await self._clob.submit_order(
-                token_id=market.yes_token_id, side="BUY",
-                price=round(bid_price, 4), size=round(bid_size, 2),
-                post_only=True)
+        if self._dry_run:
+            bid_id = f"dry_{uuid4().hex[:8]}"
+            ask_id = f"dry_{uuid4().hex[:8]}"
             bid_quote = Quote(order_id=bid_id, token_id=market.yes_token_id,
                               side="BUY", price=bid_price, size=bid_size, posted_at=now)
-        except Exception as e:
-            log.error("mm_bid_failed", market=market.polymarket_id, error=str(e))
-            bid_quote = None
-
-        try:
-            ask_id = await self._clob.submit_order(
-                token_id=market.yes_token_id, side="SELL",
-                price=round(ask_price, 4), size=round(ask_size, 2),
-                post_only=True)
             ask_quote = Quote(order_id=ask_id, token_id=market.yes_token_id,
                               side="SELL", price=ask_price, size=ask_size, posted_at=now)
-        except Exception as e:
-            log.error("mm_ask_failed", market=market.polymarket_id, error=str(e))
-            ask_quote = None
+        else:
+            try:
+                bid_id = await self._clob.submit_order(
+                    token_id=market.yes_token_id, side="BUY",
+                    price=round(bid_price, 4), size=round(bid_size, 2),
+                    post_only=True)
+                bid_quote = Quote(order_id=bid_id, token_id=market.yes_token_id,
+                                  side="BUY", price=bid_price, size=bid_size, posted_at=now)
+            except Exception as e:
+                log.error("mm_bid_failed", market=market.polymarket_id, error=str(e))
+                bid_quote = None
+
+            try:
+                ask_id = await self._clob.submit_order(
+                    token_id=market.yes_token_id, side="SELL",
+                    price=round(ask_price, 4), size=round(ask_size, 2),
+                    post_only=True)
+                ask_quote = Quote(order_id=ask_id, token_id=market.yes_token_id,
+                                  side="SELL", price=ask_price, size=ask_size, posted_at=now)
+            except Exception as e:
+                log.error("mm_ask_failed", market=market.polymarket_id, error=str(e))
+                ask_quote = None
 
         self._active_quotes[market.polymarket_id] = (bid_quote, ask_quote)
         market.bid_quote = bid_quote
@@ -98,19 +108,21 @@ class QuoteManager:
 
     async def cancel_market_quotes(self, polymarket_id: str) -> None:
         """Cancel all quotes for a specific market."""
-        old_bid, old_ask = self._active_quotes.get(polymarket_id, (None, None))
-        ids_to_cancel = []
-        if old_bid and old_bid.status == "live":
-            ids_to_cancel.append(old_bid.order_id)
-        if old_ask and old_ask.status == "live":
-            ids_to_cancel.append(old_ask.order_id)
-        if ids_to_cancel:
-            await self._clob.cancel_orders_batch(ids_to_cancel)
+        if not self._dry_run:
+            old_bid, old_ask = self._active_quotes.get(polymarket_id, (None, None))
+            ids_to_cancel = []
+            if old_bid and old_bid.status == "live":
+                ids_to_cancel.append(old_bid.order_id)
+            if old_ask and old_ask.status == "live":
+                ids_to_cancel.append(old_ask.order_id)
+            if ids_to_cancel:
+                await self._clob.cancel_orders_batch(ids_to_cancel)
         self._active_quotes.pop(polymarket_id, None)
 
     async def cancel_all_quotes(self) -> None:
         """Emergency: cancel all quotes across all markets."""
-        await self._clob.cancel_all_orders()
+        if not self._dry_run:
+            await self._clob.cancel_all_orders()
         self._active_quotes.clear()
         log.warning("mm_all_quotes_cancelled")
 
