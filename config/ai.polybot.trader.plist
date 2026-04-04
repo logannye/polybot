@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.polybot.trader</string>
+
+    <key>Description</key>
+    <string>Polybot — Autonomous Polymarket trading bot (dry-run by default)</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/logannye/polybot/scripts/run_polybot.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/logannye/polybot</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/logannye</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Wait 45s between restarts to avoid hammering APIs after a crash -->
+    <key>ThrottleInterval</key>
+    <integer>45</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/logannye/polybot/data/polybot_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/logannye/polybot/data/polybot_stderr.log</string>
+
+    <key>Nice</key>
+    <integer>0</integer>
+
+    <key>ProcessType</key>
+    <string>Standard</string>
+
+    <!-- 4GB soft memory limit (polybot is lightweight vs Galen) -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>MemoryLimit</key>
+        <integer>4294967296</integer>
+    </dict>
+</dict>
+</plist>
