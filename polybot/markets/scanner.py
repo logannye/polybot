@@ -176,10 +176,52 @@ class PolymarketScanner:
         return None
 
     @staticmethod
+    def validate_exhaustive_group(markets: list[dict]) -> bool:
+        """Validate that a group is likely mutually exclusive + collectively exhaustive.
+
+        Checks:
+        1. yes_sum in tight band around 1.0 (0.85-1.15)
+        2. All markets share the same resolution_time (within 1h tolerance)
+        3. Common question prefix (at least 40% of shortest question)
+        """
+        if len(markets) < 2:
+            return False
+
+        # Check 1: Probability sum near 1.0
+        yes_sum = sum(m.get("yes_price", 0) for m in markets)
+        if yes_sum < 0.85 or yes_sum > 1.15:
+            return False
+
+        # Check 2: Same resolution time (within 1 hour)
+        res_times = [m.get("resolution_time") for m in markets if m.get("resolution_time")]
+        if len(res_times) != len(markets):
+            return False
+        min_res = min(res_times)
+        max_res = max(res_times)
+        if (max_res - min_res).total_seconds() > 3600:
+            return False
+
+        # Check 3: Common question prefix
+        questions = [m.get("question", "") for m in markets]
+        if not all(questions):
+            return False
+        prefix = questions[0]
+        for q in questions[1:]:
+            while not q.startswith(prefix) and prefix:
+                prefix = prefix[:-1]
+        min_len = min(len(q) for q in questions)
+        if min_len == 0 or len(prefix) / min_len < 0.4:
+            return False
+
+        return True
+
+    @staticmethod
     def fetch_grouped_markets(markets: list[dict]) -> dict[str, list[dict]]:
         groups: dict[str, list[dict]] = {}
         for m in markets:
             slug = m.get("group_slug")
             if slug:
                 groups.setdefault(slug, []).append(m)
-        return {k: v for k, v in groups.items() if len(v) >= 2}
+        # Require at least 2 markets AND passing exhaustive validation
+        return {k: v for k, v in groups.items()
+                if len(v) >= 2 and PolymarketScanner.validate_exhaustive_group(v)}

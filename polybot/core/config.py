@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # Pre-scoring
     prescore_top_n: int = 5
-    quick_screen_max_edge_gap: float = 0.03
+    quick_screen_max_edge_gap: float = 0.07
 
     # Portfolio limits
     max_single_position_pct: float = 0.15
@@ -113,7 +113,7 @@ class Settings(BaseSettings):
 
     # Forecast consensus & category filtering
     forecast_min_consensus: int = 2                    # min models agreeing on direction
-    forecast_consensus_margin: float = 0.02            # margin from market price to count as "agreeing"
+    forecast_consensus_margin: float = 0.05            # margin from market price to count as "agreeing"
     forecast_category_min_trades: int = 10             # min trades before filtering by category
     forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
     forecast_category_filter_enabled: bool = True      # disable to skip category filtering
@@ -166,7 +166,7 @@ class Settings(BaseSettings):
     mm_max_single_pct: float = 0.10
     mm_max_total_pct: float = 0.30
     mm_max_markets: int = 8
-    mm_base_spread_bps: int = 200
+    mm_base_spread_bps: int = 150
     mm_min_spread_bps: int = 50
     mm_max_spread_bps: int = 500
     mm_quote_size_usd: float = 10.0
@@ -182,15 +182,15 @@ class Settings(BaseSettings):
 
     # Mean reversion strategy
     mr_enabled: bool = False
-    mr_interval_seconds: float = 300.0
-    mr_trigger_threshold: float = 0.10
+    mr_interval_seconds: float = 120.0
+    mr_trigger_threshold: float = 0.05
     mr_reversion_fraction: float = 0.40
     mr_kelly_mult: float = 0.15
     mr_max_single_pct: float = 0.10
     mr_max_concurrent: int = 5
-    mr_min_volume_24h: float = 5000.0
+    mr_min_volume_24h: float = 2000.0
     mr_min_book_depth: float = 500.0
-    mr_cooldown_hours: float = 12.0
+    mr_cooldown_hours: float = 6.0
     mr_max_hold_hours: float = 24.0
 
     # WebSocket streaming

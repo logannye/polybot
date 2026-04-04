@@ -41,7 +41,7 @@ The full analysis pipeline with a cost-efficient tiered funnel:
     v  Pre-score (no LLM) — rank by quant signals + book depth + category history
 ~5 markets
     |
-    v  Quick screen (single Gemini Flash) — discard if <3% edge
+    v  Quick screen (single Gemini Flash) — discard if <7% edge
 ~2-3 markets
     |
     v  Full ensemble (Claude Haiku + GPT-5.4-mini + Gemini 3 Flash) — 3-model blind analysis + web research
@@ -50,11 +50,11 @@ The full analysis pipeline with a cost-efficient tiered funnel:
 
 Three models estimate probability **blind** — the market price is intentionally withheld to prevent anchoring bias. Estimates are aggregated using confidence-weighted averaging with trust weights that evolve based on each model's historical Brier score.
 
-Sizing: Quarter-Kelly (0.20x) with confidence modulation. Market-efficiency shrinkage of 35% blends ensemble probability toward the market price to counteract LLM overconfidence.
+Sizing: Quarter-Kelly (0.20x) with confidence modulation. Market-efficiency shrinkage of 45% blends ensemble probability toward the market price to counteract LLM overconfidence.
 
 **Market loss blacklist**: After 2 stop-losses on the same market within 12 hours, the market is blacklisted — preventing repeated losing entries on the same thesis.
 
-**Ensemble consensus**: Requires 2+ of 3 models to agree on direction (above or below market price) before placing a trade. Prevents one outlier model from dragging the ensemble into a bad position.
+**Ensemble consensus**: Requires 2+ of 3 models to agree on direction (at least 5% from market price) before placing a trade. Prevents one outlier model from dragging the ensemble into a bad position.
 
 **Category filtering**: Markets in categories with negative average P&L (after 10+ trades) are automatically excluded from the forecast funnel.
 
@@ -65,28 +65,29 @@ Sizing: Quarter-Kelly (0.20x) with confidence modulation. Market-efficiency shri
 Posts two-sided quotes on selected markets to earn spread capture, maker rebates, and liquidity rewards. Supports dry-run simulation mode — simulates fills when market price crosses quote prices, tracking P&L without placing real orders.
 
 - **Market selection** — Scores markets by volume (≥$5K/day), book depth (≥$1K), resolution time (≥7 days out), and price range (0.10-0.90 for 3x two-sided reward bonus). Re-evaluates every 5 minutes, maintains 3-8 active markets.
-- **Zero-fee quoting** — All orders use `post_only=True`, guaranteeing maker status (0% fees). Earns 20-25% of taker fees as maker rebates.
+- **Zero-fee quoting** — All orders use `post_only=True`, guaranteeing maker status (0% fees). Base spread of 150 bps (1.5% total), tightened toward reward thresholds when eligible. Earns 20-25% of taker fees as maker rebates.
+- **Fill simulation** — In dry-run mode, fills are checked at the start of each cycle by comparing the latest scanner price against quotes placed in the previous cycle. This gives the market a full cycle to move, avoiding the false-negative of checking same-cycle prices.
 - **Inventory skew** — Linear skew proportional to net delta: when long YES, widens the ask and tightens the bid to encourage rebalancing. Hard limit of $50 net exposure per market.
 - **Heartbeat** — Sends heartbeat every 5s (Polymarket cancels all orders if no heartbeat within 10s).
 - **Volatility circuit breaker** — If any market moves >15% in 15 minutes, all quotes in that market are cancelled and it's blacklisted for 1 hour.
 
 Revenue sources: spread capture + maker rebates (20-25% of taker fees, daily) + liquidity rewards (quadratic scoring, daily) + holding rewards (4% APY).
 
-### Strategy 4: Mean Reversion (every 5 min, opt-in)
+### Strategy 4: Mean Reversion (every 2 min, opt-in)
 
-Detects markets where price has moved >10% in the last scan cycle and takes a contrarian position betting on partial reversion. Markets tend to overreact to news — this strategy captures the correction.
+Detects markets where price has moved >5% over a sliding window and takes a contrarian position betting on partial reversion. Markets tend to overreact to news — this strategy captures the correction.
 
-- **Price snapshot tracking** — Maintains in-memory price snapshots for all ~4,800 active markets. Compares current price against last snapshot to detect large moves without fetching price history for every market.
-- **Contrarian entry** — Price spiked UP → buy NO (bet on reversion down). Price dropped → buy YES (bet on reversion up).
-- **Edge estimation** — Expected edge = move magnitude × reversion fraction (default 40%). Only triggers on moves >10% with net edge >2%.
+- **Sliding window detection** — Maintains a sliding window of the last 5 price snapshots per market (~10 minutes at 2-min intervals). Compares current price against the min and max over the window, catching gradual moves that single-snapshot comparison would miss.
+- **Contrarian entry** — Price spiked UP from recent low → buy NO (bet on reversion down). Price dropped from recent high → buy YES (bet on reversion up).
+- **Edge estimation** — Expected edge = move magnitude × reversion fraction (default 40%). Only triggers on moves >5% with net edge >2%.
 - **Custom exit targets** — Take-profit when 40% of the move reverts; stop-loss if price extends 25% further in the overreaction direction; time-stop at 24 hours.
-- **Cooldown** — 24h per-market cooldown prevents chasing the same overreaction.
+- **Cooldown** — 6h per-market cooldown prevents chasing the same overreaction.
 
 Sizing: Conservative Kelly (0.15x), max 10% bankroll per position, max 5 concurrent mean-reversion positions.
 
 ### Strategy 5: Arbitrage Scanner (every 45s, disabled)
 
-Detects mathematically provable mispricings between related markets. Currently disabled pending fixes to the exhaustive group detection logic (non-mutually-exclusive markets were being incorrectly grouped as exhaustive outcomes).
+Detects mathematically provable mispricings between related markets. Currently disabled — the exhaustive group detection logic has been hardened with a 3-check validation heuristic (probability sum within 0.85-1.15, same resolution time within 1h, common question prefix ≥40%) to prevent false positives from cosmetic API groupings. Will be re-enabled once bankroll grows past the $2K gate.
 
 ## Architecture
 
@@ -283,7 +284,7 @@ DRY_RUN=true
 # Bot Config (all optional — defaults shown)
 STARTING_BANKROLL=300.00
 KELLY_MULT=0.25
-EDGE_THRESHOLD=0.05
+EDGE_THRESHOLD=0.07
 SCAN_INTERVAL_SECONDS=300
 
 # Market Making (opt-in, supports dry-run simulation)
@@ -293,7 +294,7 @@ MM_MAX_MARKETS=8
 
 # Mean Reversion (opt-in)
 MR_ENABLED=false
-MR_TRIGGER_THRESHOLD=0.10
+MR_TRIGGER_THRESHOLD=0.05
 ```
 
 ### Database setup
@@ -395,7 +396,7 @@ uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 
 ## Key design decisions
 
-- **Multi-strategy architecture** — Five strategies run at different frequencies (5s/60s/5min/5min/45s) because different edge types have different time sensitivities. A single loop would bottleneck market making behind slow LLM calls.
+- **Multi-strategy architecture** — Five strategies run at different frequencies (5s/60s/2min/5min/45s) because different edge types have different time sensitivities. A single loop would bottleneck market making behind slow LLM calls.
 - **Anti-anchoring** — LLMs never see the market price when estimating probability. This prevents them from simply parroting the market consensus.
 - **Category-aware fee model** — Edge calculations use Polymarket's actual fee formula (`feeRate * p * (1-p)`) with per-category rates, not a flat 2%. All orders default to `post_only=True` (maker status, 0% fees). This dramatically improves edge accuracy at extreme prices where the old flat rate overestimated fees by 10x.
 - **Strategy-specific Kelly** — Full Kelly for mathematically certain arb (0.80x), half for near-certain snipes (0.50x), quarter for uncertain forecasts (0.25x). This maximizes compounding on the highest-confidence trades.

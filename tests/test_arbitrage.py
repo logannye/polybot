@@ -59,7 +59,7 @@ def test_exhaustive_arb_none_when_fair():
     assert result is None
 
 def test_exhaustive_arb_none_when_sum_too_low():
-    """Groups with yes_sum < 0.5 are clearly not exhaustive — reject."""
+    """Groups with yes_sum < 0.85 are clearly not exhaustive — reject."""
     markets = [
         {"polymarket_id": "a", "yes_price": 0.10, "no_price": 0.92},
         {"polymarket_id": "b", "yes_price": 0.10, "no_price": 0.92},
@@ -70,12 +70,24 @@ def test_exhaustive_arb_none_when_sum_too_low():
 
 
 def test_exhaustive_arb_none_when_sum_too_high():
-    """Groups with yes_sum > 1.8 are clearly not exhaustive — reject."""
+    """Groups with yes_sum > 1.15 are clearly not exhaustive — reject."""
     markets = [
         {"polymarket_id": "a", "yes_price": 0.80, "no_price": 0.22},
         {"polymarket_id": "b", "yes_price": 0.90, "no_price": 0.12},
         {"polymarket_id": "c", "yes_price": 0.85, "no_price": 0.17},
     ]
+    result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01, is_maker=True)
+    assert result is None
+
+
+def test_exhaustive_arb_rejects_moderately_bad_sum():
+    """Sum=1.5 was previously accepted (old bounds 0.5-1.8), now rejected (0.85-1.15)."""
+    markets = [
+        {"polymarket_id": "a", "yes_price": 0.50, "no_price": 0.52},
+        {"polymarket_id": "b", "yes_price": 0.50, "no_price": 0.52},
+        {"polymarket_id": "c", "yes_price": 0.50, "no_price": 0.52},
+    ]
+    # yes_sum = 1.50 — outside 0.85-1.15
     result = detect_exhaustive_arb(markets, fee_rate=0.04, min_net_edge=0.01, is_maker=True)
     assert result is None
 

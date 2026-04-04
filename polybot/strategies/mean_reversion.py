@@ -31,8 +31,9 @@ class MeanReversionStrategy(Strategy):
         self._cooldown_hours = settings.mr_cooldown_hours
         self._max_hold_hours = settings.mr_max_hold_hours
         self._settings = settings
-        # Price snapshots for detecting moves (polymarket_id -> (price, timestamp))
-        self._price_snapshots: dict[str, tuple[float, datetime]] = {}
+        # Sliding window of price snapshots (polymarket_id -> [(price, timestamp), ...])
+        self._price_snapshots: dict[str, list[tuple[float, datetime]]] = {}
+        self._snapshot_window: int = 5  # keep last N snapshots per market
 
     async def run_once(self, ctx: TradingContext) -> None:
         enabled = await ctx.db.fetchval(
@@ -76,23 +77,31 @@ class MeanReversionStrategy(Strategy):
             if price < 0.10 or price > 0.90:
                 continue
 
-            # Compare to snapshot
+            # Compare against sliding window of recent snapshots
             if pid in self._price_snapshots:
-                old_price, snap_time = self._price_snapshots[pid]
-                elapsed_h = (now - snap_time).total_seconds() / 3600
-                if elapsed_h < 0.1:
-                    # Snapshot too recent, skip
-                    continue
-                move = price - old_price
-                if abs(move) >= self._trigger:
-                    candidates.append((abs(move), move, m, old_price))
+                snapshots = self._price_snapshots[pid]
+                # Only consider snapshots from the last 30 minutes
+                recent = [(p, ts) for p, ts in snapshots
+                          if (now - ts).total_seconds() < 1800]
+                if recent:
+                    min_price_in_window = min(p for p, _ in recent)
+                    max_price_in_window = max(p for p, _ in recent)
+                    # Check for drop from recent high
+                    move_down = price - max_price_in_window
+                    # Check for rise from recent low
+                    move_up = price - min_price_in_window
+                    if move_down < 0 and abs(move_down) >= self._trigger:
+                        candidates.append((abs(move_down), move_down, m, max_price_in_window))
+                    elif move_up > 0 and abs(move_up) >= self._trigger:
+                        candidates.append((abs(move_up), move_up, m, min_price_in_window))
 
-            # Update snapshot
-            self._price_snapshots[pid] = (price, now)
+            # Append to snapshot window
+            self._price_snapshots.setdefault(pid, []).append((price, now))
+            self._price_snapshots[pid] = self._price_snapshots[pid][-self._snapshot_window:]
 
-        # Prune stale snapshots (older than 2h)
-        stale = [pid for pid, (_, ts) in self._price_snapshots.items()
-                 if (now - ts).total_seconds() > 7200]
+        # Prune stale snapshots (markets not seen in 2h)
+        stale = [pid for pid, snaps in self._price_snapshots.items()
+                 if not snaps or (now - snaps[-1][1]).total_seconds() > 7200]
         for pid in stale:
             del self._price_snapshots[pid]
 

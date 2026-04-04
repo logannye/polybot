@@ -79,6 +79,33 @@ async def test_cleanup_stale_arbs_no_stale():
 
 
 @pytest.mark.asyncio
+async def test_hourly_kelly_edge_adjust_skips_null_edge():
+    """Null edge or pnl values in joined trades should be skipped, not crash."""
+    engine = make_engine()
+    engine._db.fetchrow = AsyncMock(return_value={
+        "bankroll": 500.0, "kelly_mult": 0.25, "edge_threshold": 0.05,
+    })
+    # First fetch: trades for drawdown calc
+    # Second fetch: edge_trades with some null values
+    engine._db.fetch = AsyncMock(side_effect=[
+        [{"pnl": 1.0}, {"pnl": -0.5}],                # trades for drawdown
+        [
+            {"edge": 0.05, "pnl": 1.0},                # valid
+            {"edge": None, "pnl": -0.5},                # null edge — should skip
+            {"edge": 0.08, "pnl": None},                # null pnl — should skip
+            {"edge": 0.10, "pnl": 2.0},                 # valid
+        ],
+        [],  # resolved analyses for calibration
+    ])
+    engine._db.execute = AsyncMock()
+    engine._db.fetchval = AsyncMock(return_value=None)
+
+    # Should complete without TypeError
+    await engine._hourly_kelly_edge_adjust()
+    engine._db.execute.assert_called()
+
+
+@pytest.mark.asyncio
 async def test_run_strategy_disables_after_consecutive_errors(monkeypatch):
     # Patch asyncio.sleep to be instant during backoff
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())

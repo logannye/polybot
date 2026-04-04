@@ -368,6 +368,8 @@ class Engine:
                  AND t.closed_at > NOW() - INTERVAL '3 days'""")
         buckets = {}
         for t in edge_trades:
+            if t["edge"] is None or t["pnl"] is None:
+                continue
             bucket_key = round(float(t["edge"]) * 20) / 20
             if bucket_key not in buckets:
                 buckets[bucket_key] = {"count": 0, "total_pnl": 0.0}
@@ -448,6 +450,8 @@ class Engine:
                WHERE t.status='closed' AND t.closed_at > NOW() - INTERVAL '7 days'""")
         buckets: dict[float, dict] = {}
         for t in edge_trades:
+            if t["edge"] is None or t["pnl"] is None:
+                continue
             bucket_key = round(float(t["edge"]) * 20) / 20
             if bucket_key not in buckets:
                 buckets[bucket_key] = {"count": 0, "total_pnl": 0.0}

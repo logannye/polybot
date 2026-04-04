@@ -112,17 +112,73 @@ class TestPolymarketScanner:
         result = await scanner.fetch_market_resolution("test-id")
         assert result is None
 
-    def test_fetch_grouped_markets_groups_by_slug(self):
+    def test_fetch_grouped_markets_valid_exhaustive(self):
+        """Valid exhaustive group: same slug, similar resolution, common question prefix, sum ~1.0."""
+        res = datetime(2026, 5, 1, tzinfo=timezone.utc)
         markets = [
-            {"polymarket_id": "a", "group_slug": "election-2026"},
-            {"polymarket_id": "b", "group_slug": "election-2026"},
-            {"polymarket_id": "c", "group_slug": None},
-            {"polymarket_id": "d", "group_slug": "single-group"},
+            {"polymarket_id": "a", "group_slug": "who-wins-election",
+             "yes_price": 0.40, "question": "Who will win the 2026 election? — Alice",
+             "resolution_time": res},
+            {"polymarket_id": "b", "group_slug": "who-wins-election",
+             "yes_price": 0.35, "question": "Who will win the 2026 election? — Bob",
+             "resolution_time": res},
+            {"polymarket_id": "c", "group_slug": "who-wins-election",
+             "yes_price": 0.25, "question": "Who will win the 2026 election? — Carol",
+             "resolution_time": res},
+            {"polymarket_id": "d", "group_slug": None, "yes_price": 0.50,
+             "question": "Unrelated?", "resolution_time": res},
         ]
         groups = PolymarketScanner.fetch_grouped_markets(markets)
-        assert "election-2026" in groups
-        assert len(groups["election-2026"]) == 2
-        assert "single-group" not in groups  # only 1 market, not useful for arb
+        assert "who-wins-election" in groups
+        assert len(groups["who-wins-election"]) == 3
+
+    def test_fetch_grouped_markets_rejects_bad_sum(self):
+        """Group with yes_sum=1.5 is NOT exhaustive -> rejected."""
+        res = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        markets = [
+            {"polymarket_id": "a", "group_slug": "bad-group",
+             "yes_price": 0.80, "question": "Will X happen by June?",
+             "resolution_time": res},
+            {"polymarket_id": "b", "group_slug": "bad-group",
+             "yes_price": 0.70, "question": "Will Y happen by June?",
+             "resolution_time": res},
+        ]
+        groups = PolymarketScanner.fetch_grouped_markets(markets)
+        assert "bad-group" not in groups
+
+    def test_fetch_grouped_markets_rejects_different_resolution(self):
+        """Group with different resolution times -> rejected."""
+        markets = [
+            {"polymarket_id": "a", "group_slug": "split-res",
+             "yes_price": 0.50, "question": "Will Alice win the race?",
+             "resolution_time": datetime(2026, 5, 1, tzinfo=timezone.utc)},
+            {"polymarket_id": "b", "group_slug": "split-res",
+             "yes_price": 0.50, "question": "Will Bob win the race?",
+             "resolution_time": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+        ]
+        groups = PolymarketScanner.fetch_grouped_markets(markets)
+        assert "split-res" not in groups
+
+    def test_fetch_grouped_markets_rejects_unrelated_questions(self):
+        """Group with no common question prefix -> rejected."""
+        res = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        markets = [
+            {"polymarket_id": "a", "group_slug": "cosmetic-group",
+             "yes_price": 0.50, "question": "Will Bitcoin hit $100K?",
+             "resolution_time": res},
+            {"polymarket_id": "b", "group_slug": "cosmetic-group",
+             "yes_price": 0.50, "question": "Will the Lakers win the championship?",
+             "resolution_time": res},
+        ]
+        groups = PolymarketScanner.fetch_grouped_markets(markets)
+        assert "cosmetic-group" not in groups
+
+    def test_validate_exhaustive_group_single_market(self):
+        """A single market cannot be an exhaustive group."""
+        assert PolymarketScanner.validate_exhaustive_group([
+            {"yes_price": 0.50, "question": "Test?",
+             "resolution_time": datetime(2026, 5, 1, tzinfo=timezone.utc)}
+        ]) is False
 
     def test_parse_market_response_preserves_group_slug(self):
         raw = {

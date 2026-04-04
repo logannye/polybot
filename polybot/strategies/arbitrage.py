@@ -77,7 +77,7 @@ def detect_exhaustive_arb(
     # Sanity check: truly exhaustive groups should have probabilities summing
     # near 1.0 (with some overround for fees). Reject groups that are clearly
     # not exhaustive — cosmetic slug groupings often include unrelated markets.
-    if yes_sum < 0.5 or yes_sum > 1.8:
+    if yes_sum < 0.85 or yes_sum > 1.15:
         return None
 
     # --- Overpriced: buy all NOs ---
