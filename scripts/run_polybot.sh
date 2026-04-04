@@ -65,6 +65,16 @@ if [ -f "$PID_FILE" ]; then
     fi
 fi
 
+# ── Port Cleanup (prevent EADDRINUSE on restart) ───────────────────
+DASHBOARD_PORT=8080
+STALE_PID=$(lsof -ti :$DASHBOARD_PORT 2>/dev/null || true)
+if [ -n "$STALE_PID" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%S) Killing stale process on port $DASHBOARD_PORT (PID $STALE_PID)"
+    kill -TERM $STALE_PID 2>/dev/null || true
+    sleep 2
+    kill -KILL $STALE_PID 2>/dev/null || true
+fi
+
 # ── Pre-flight ───────────────────────────────────────────────────────
 echo "$(date -u +%Y-%m-%dT%H:%M:%S) Starting Polybot..."
 echo "  uv:    $(uv --version 2>&1)"
