@@ -32,6 +32,36 @@ structlog.configure(
 log = structlog.get_logger()
 
 
+async def _run_bot_tasks(engine_fn, dashboard_fn, shutdown_event: asyncio.Event):
+    """Run engine and dashboard concurrently. Dashboard failure is non-fatal."""
+    engine_task = asyncio.create_task(engine_fn())
+    dashboard_task = asyncio.create_task(dashboard_fn())
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+
+    def _on_dashboard_done(task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            log.error("dashboard_crashed", error=str(exc))
+
+    dashboard_task.add_done_callback(_on_dashboard_done)
+
+    # Wait for shutdown signal or engine exit (NOT dashboard exit)
+    await asyncio.wait(
+        [engine_task, shutdown_task],
+        return_when=asyncio.FIRST_COMPLETED)
+
+    # Cancel everything
+    for task in [engine_task, dashboard_task, shutdown_task]:
+        task.cancel()
+    results = await asyncio.gather(engine_task, dashboard_task, shutdown_task, return_exceptions=True)
+    engine_result = results[0]
+    if isinstance(engine_result, BaseException) and not isinstance(engine_result, asyncio.CancelledError):
+        log.error("engine_crashed", error=str(engine_result))
+        raise engine_result
+
+
 async def main():
     settings = Settings()
     log.info("polybot_starting", bankroll=settings.starting_bankroll)
@@ -127,18 +157,8 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _signal_handler, sig)
 
-    engine_task = asyncio.create_task(engine.run_forever())
-    dashboard_task = asyncio.create_task(dashboard_server.serve())
-
     try:
-        # Wait until shutdown signal or engine exits
-        done, pending = await asyncio.wait(
-            [engine_task, dashboard_task, asyncio.create_task(shutdown_event.wait())],
-            return_when=asyncio.FIRST_COMPLETED)
-        # Cancel remaining tasks
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        await _run_bot_tasks(engine.run_forever, dashboard_server.serve, shutdown_event)
     finally:
         # Log open positions on shutdown
         try:
