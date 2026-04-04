@@ -167,3 +167,17 @@ def test_calibration_lookup_empty():
 def test_calibration_lookup_none():
     """None corrections should return 0.0."""
     assert _lookup_calibration_correction(0.5, None) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_forecast_edge_threshold_0_04_admits_moderate_disagreement():
+    """With edge_threshold=0.04, an ensemble that disagrees by 10 cents raw
+    should pass after 45% shrinkage (edge = 0.10 * 0.55 = 0.055 > 0.04)."""
+    from polybot.analysis.ensemble import shrink_toward_market
+    raw_prob = 0.60  # ensemble says 60%
+    market_price = 0.50  # market says 50%
+    shrunk = shrink_toward_market(raw_prob, market_price, shrinkage=0.45)
+    # shrunk = 0.60 * 0.55 + 0.50 * 0.45 = 0.33 + 0.225 = 0.555
+    edge = shrunk - market_price  # 0.555 - 0.50 = 0.055
+    assert edge > 0.04, f"Edge {edge} should exceed 0.04 threshold"
+    assert edge < 0.07, f"Edge {edge} should be below old 0.07 threshold (proving old config blocked this)"
