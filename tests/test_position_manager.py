@@ -668,3 +668,128 @@ async def test_dynamic_time_stop_respects_cap():
     # Held 600 min > 480 → should time-stop
     executor.exit_position.assert_called_once_with(
         trade_id=31, exit_price=0.48, exit_reason="time_stop")
+
+
+@pytest.mark.asyncio
+async def test_mr_min_edge_no_early_exit():
+    """MR trade with expected_reversion=0.02 must NOT trigger generic early_exit.
+
+    Bug: MR stores tp_yes_price as ensemble_probability. The generic
+    should_early_exit computes remaining_edge = tp - current = 0.02,
+    which equals early_exit_edge (0.02), triggering immediate exit.
+    """
+    db = AsyncMock()
+    db.fetch = AsyncMock(return_value=[{
+        "id": 100, "side": "YES", "entry_price": 0.595, "shares": 5.97,
+        "position_size_usd": 3.55, "strategy": "mean_reversion",
+        "status": "dry_run", "opened_at": datetime.now(timezone.utc),
+        "polymarket_id": "mkt-mr-min", "question": "MR min edge test?",
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=168),
+        "ensemble_probability": 0.615,  # this is tp_yes_price, NOT ensemble prob
+        "kelly_inputs": {
+            "move": -0.05, "old_price": 0.645, "trigger_price": 0.595,
+            "expected_reversion": 0.02, "tp_yes_price": 0.615,
+            "sl_yes_price": 0.5825, "max_hold_hours": 24.0,
+        },
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    # Price unchanged from entry — no TP or SL hit
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-mr-min": {"yes_price": 0.595, "no_price": 0.405},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    # Must NOT exit — the MR custom block found no TP/SL, and generic
+    # early_exit should be skipped entirely for mean_reversion trades
+    executor.exit_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mr_min_edge_no_side_no_early_exit():
+    """MR NO-side trade with expected_reversion=0.02 must NOT early_exit."""
+    db = AsyncMock()
+    db.fetch = AsyncMock(return_value=[{
+        "id": 101, "side": "NO", "entry_price": 0.445, "shares": 5.82,
+        "position_size_usd": 2.59, "strategy": "mean_reversion",
+        "status": "dry_run", "opened_at": datetime.now(timezone.utc),
+        "polymarket_id": "mkt-mr-no", "question": "MR NO side test?",
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=168),
+        "ensemble_probability": 0.535,  # tp_yes_price, NOT ensemble prob
+        "kelly_inputs": {
+            "move": 0.05, "old_price": 0.505, "trigger_price": 0.555,
+            "expected_reversion": 0.02, "tp_yes_price": 0.535,
+            "sl_yes_price": 0.5675, "max_hold_hours": 24.0,
+        },
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-mr-no": {"yes_price": 0.555, "no_price": 0.445},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mr_custom_tp_still_fires():
+    """MR trade that hits its tp_yes_price must still exit as take_profit."""
+    db = AsyncMock()
+    db.fetch = AsyncMock(return_value=[{
+        "id": 102, "side": "YES", "entry_price": 0.24, "shares": 18.32,
+        "position_size_usd": 4.37, "strategy": "mean_reversion",
+        "status": "dry_run", "opened_at": datetime.now(timezone.utc),
+        "polymarket_id": "mkt-mr-tp", "question": "MR TP test?",
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=168),
+        "ensemble_probability": 0.306,
+        "kelly_inputs": {
+            "move": -0.066, "old_price": 0.306, "trigger_price": 0.24,
+            "expected_reversion": 0.0264, "tp_yes_price": 0.2664,
+            "sl_yes_price": 0.2235, "max_hold_hours": 24.0,
+        },
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=1.24)
+
+    scanner = MagicMock()
+    # Price reverted past the TP target (0.306 > 0.2664)
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-mr-tp": {"yes_price": 0.306, "no_price": 0.694},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=102, exit_price=0.306, exit_reason="take_profit")
