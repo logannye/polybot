@@ -36,6 +36,23 @@ class MeanReversionStrategy(Strategy):
         self._price_snapshots: dict[str, list[tuple[float, datetime]]] = {}
         self._snapshot_window: int = 5  # keep last N snapshots per market
 
+    def inject_snapshots(self, market_id: str, price: float, old_price: float) -> None:
+        """Inject a synthetic snapshot pair from external price history scanning.
+
+        This allows the PriceHistoryScanner to feed detected big moves
+        into the MR sliding window, enabling the standard run_once()
+        candidate detection to pick them up on the next cycle.
+        """
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        # Only inject if we don't already have snapshots for this market
+        if not self._price_snapshots.get(market_id):
+            self._price_snapshots[market_id] = [
+                (old_price, now - timedelta(minutes=5)),
+            ]
+            log.info("mr_snapshot_injected", market=market_id,
+                     old_price=round(old_price, 4), current=round(price, 4))
+
     async def run_once(self, ctx: TradingContext) -> None:
         enabled = await ctx.db.fetchval(
             "SELECT enabled FROM strategy_performance WHERE strategy = $1",

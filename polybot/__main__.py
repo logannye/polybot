@@ -21,6 +21,7 @@ from polybot.strategies.snipe import ResolutionSnipeStrategy
 from polybot.strategies.forecast import EnsembleForecastStrategy
 from polybot.strategies.market_maker import MarketMakerStrategy
 from polybot.strategies.mean_reversion import MeanReversionStrategy
+from polybot.markets.price_history import PriceHistoryScanner
 
 structlog.configure(
     processors=[
@@ -119,12 +120,14 @@ async def main():
         email_notifier=email_notifier, settings=settings,
         portfolio_lock=portfolio_lock)
 
+    price_history_scanner = None
     engine = Engine(
         db=db, scanner=scanner, researcher=researcher, ensemble=ensemble,
         executor=executor, recorder=recorder, risk_manager=risk_manager,
         settings=settings, email_notifier=email_notifier,
         position_manager=position_manager, clob=clob,
-        portfolio_lock=portfolio_lock, trade_learner=trade_learner)
+        portfolio_lock=portfolio_lock, trade_learner=trade_learner,
+        price_history_scanner=price_history_scanner)
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
@@ -141,6 +144,13 @@ async def main():
     if getattr(settings, 'mr_enabled', False):
         mr_strategy = MeanReversionStrategy(settings=settings)
         engine.add_strategy(mr_strategy)
+        price_history_scanner = PriceHistoryScanner(
+            scanner=scanner,
+            min_volume=settings.mr_min_volume_24h,
+            move_threshold=settings.mr_trigger_threshold,
+            max_markets=100,
+        )
+        engine._price_history_scanner = price_history_scanner
 
     app = create_app(db)
     dashboard_server = uvicorn.Server(
