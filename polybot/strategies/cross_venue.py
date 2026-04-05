@@ -101,6 +101,8 @@ class CrossVenueStrategy(Strategy):
                 if size <= 0:
                     continue
 
+                pid = matching_market["polymarket_id"]
+
                 # Conviction stacking: check if MR has a position on matching market
                 if self._conviction_enabled and size > 0 and matching_market:
                     mr_confirms = await ctx.db.fetchval(
@@ -135,8 +137,6 @@ class CrossVenueStrategy(Strategy):
                     log.info("cv_risk_rejected", outcome=div["outcome_name"],
                              reason=risk_result.reason)
                     continue
-
-                pid = matching_market["polymarket_id"]
 
                 market_id = await ctx.db.fetchval(
                     """INSERT INTO markets (polymarket_id, question, category, resolution_time,

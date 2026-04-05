@@ -136,7 +136,16 @@ async def main():
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
-    engine.add_strategy(ResolutionSnipeStrategy(settings=settings, ensemble=ensemble))
+    _snipe_odds = None
+    if getattr(settings, 'snipe_odds_verification_enabled', False) and getattr(settings, 'odds_api_key', ''):
+        if 'odds_client' in dir():
+            _snipe_odds = odds_client
+        else:
+            from polybot.analysis.odds_client import OddsClient as _OC
+            _snipe_odds = _OC(api_key=settings.odds_api_key)
+            await _snipe_odds.start()
+    engine.add_strategy(ResolutionSnipeStrategy(
+        settings=settings, ensemble=ensemble, odds_client=_snipe_odds))
     engine.add_strategy(EnsembleForecastStrategy(
         settings=settings, ensemble=ensemble, researcher=researcher))
 

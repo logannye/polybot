@@ -142,7 +142,7 @@ async def verify_snipe_via_odds(
 class ResolutionSnipeStrategy(Strategy):
     name = "snipe"
 
-    def __init__(self, settings, ensemble=None):
+    def __init__(self, settings, ensemble=None, odds_client=None):
         self.interval_seconds = settings.snipe_interval_seconds
         self.kelly_multiplier = settings.snipe_kelly_mult
         self.max_single_pct = settings.snipe_max_single_pct
@@ -155,6 +155,9 @@ class ResolutionSnipeStrategy(Strategy):
         self._reentry_threshold = settings.snipe_reentry_threshold
         self._max_entries_per_market = settings.snipe_max_entries_per_market
         self._market_cooldowns: dict[str, dict] = {}
+        self._odds_client = odds_client
+        self._odds_verification_enabled = getattr(settings, 'snipe_odds_verification_enabled', False)
+        self._odds_min_consensus = getattr(settings, 'snipe_odds_min_consensus', 0.85)
 
     async def run_once(self, ctx: TradingContext) -> None:
         enabled = await ctx.db.fetchval(
@@ -265,32 +268,55 @@ class ResolutionSnipeStrategy(Strategy):
                           exposure=float(cumulative_exposure), max=round(max_market_exposure, 2))
                 continue
 
-            if tier in (1, 2, 3) and self._ensemble:
-                # Tier-appropriate time guard: LLM can only reliably verify near-term outcomes
-                tier_max_hours = {1: 12.0, 2: getattr(ctx.settings, "snipe_tier2_llm_max_hours", 48.0), 3: getattr(ctx.settings, "snipe_tier3_llm_max_hours", 120.0)}
-                if hours_remaining > tier_max_hours.get(tier, 12.0):
-                    log.info("snipe_rejected_far_future", market=m["polymarket_id"],
-                             hours=round(hours_remaining, 1), tier=tier)
-                    continue
-                prompt = build_snipe_prompt(m["question"], str(m["resolution_time"]), hours_remaining, m["yes_price"])
-                try:
-                    response = await self._ensemble._google.aio.models.generate_content(
-                        model="gemini-2.5-flash", contents=prompt)
-                    parsed = parse_snipe_response(response.text)
-                    if not parsed or not parsed["determined"] or parsed["confidence"] < self._min_confidence:
-                        log.info("snipe_rejected_llm", market=m["polymarket_id"],
-                                 tier=tier, parsed=parsed)
+            if tier in (1, 2, 3):
+                verified = False
+
+                # Try odds-based verification first (faster, cheaper, no LLM)
+                if self._odds_client and self._odds_verification_enabled:
+                    try:
+                        verified = await verify_snipe_via_odds(
+                            odds_client=self._odds_client,
+                            question=m["question"],
+                            side=side,
+                            min_consensus=self._odds_min_consensus,
+                        )
+                        if verified:
+                            log.info("snipe_verified_via_odds", market=m["polymarket_id"],
+                                     tier=tier, side=side)
+                    except Exception as e:
+                        log.error("snipe_odds_verify_error", error=str(e))
+
+                # Fall back to LLM if odds verification didn't confirm
+                if not verified and self._ensemble:
+                    tier_max_hours = {1: 12.0, 2: getattr(ctx.settings, "snipe_tier2_llm_max_hours", 48.0), 3: getattr(ctx.settings, "snipe_tier3_llm_max_hours", 120.0)}
+                    if hours_remaining > tier_max_hours.get(tier, 12.0):
+                        log.info("snipe_rejected_far_future", market=m["polymarket_id"],
+                                 hours=round(hours_remaining, 1), tier=tier)
                         continue
-                    if parsed["outcome"] == "NO" and side == "YES":
-                        log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
-                                 side=side, llm_outcome=parsed["outcome"])
+                    prompt = build_snipe_prompt(m["question"], str(m["resolution_time"]), hours_remaining, m["yes_price"])
+                    try:
+                        response = await self._ensemble._google.aio.models.generate_content(
+                            model="gemini-2.5-flash", contents=prompt)
+                        parsed = parse_snipe_response(response.text)
+                        if not parsed or not parsed["determined"] or parsed["confidence"] < self._min_confidence:
+                            log.info("snipe_rejected_llm", market=m["polymarket_id"],
+                                     tier=tier, parsed=parsed)
+                            continue
+                        if parsed["outcome"] == "NO" and side == "YES":
+                            log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
+                                     side=side, llm_outcome=parsed["outcome"])
+                            continue
+                        if parsed["outcome"] == "YES" and side == "NO":
+                            log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
+                                     side=side, llm_outcome=parsed["outcome"])
+                            continue
+                        verified = True
+                    except Exception as e:
+                        log.error("snipe_llm_error", error=str(e))
                         continue
-                    if parsed["outcome"] == "YES" and side == "NO":
-                        log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
-                                 side=side, llm_outcome=parsed["outcome"])
-                        continue
-                except Exception as e:
-                    log.error("snipe_llm_error", error=str(e))
+
+                if not verified:
+                    log.debug("snipe_not_verified", market=m["polymarket_id"], tier=tier)
                     continue
 
             async with ctx.portfolio_lock:
