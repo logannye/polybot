@@ -56,3 +56,16 @@ def compute_position_size(
     if size < min_trade_size:
         return 0.0
     return round(size, 2)
+
+
+def conviction_multiplier(
+    confirming_signals: int,
+    per_signal: float = 0.5,
+    max_multiplier: float = 3.0,
+) -> float:
+    """Compute a position size multiplier based on confirming signal count.
+
+    When multiple independent strategies agree on the same trade direction,
+    confidence is higher and position sizing should scale up.
+    """
+    return min(1.0 + confirming_signals * per_signal, max_multiplier)

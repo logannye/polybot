@@ -101,3 +101,23 @@ def test_extreme_price_taker_fee_much_lower():
     # edge = 0.03 - 0.0015 = 0.0285
     assert result.edge == pytest.approx(0.0285)
     assert result.side == "YES"
+
+
+from polybot.trading.kelly import conviction_multiplier
+
+
+class TestConvictionMultiplier:
+    def test_no_confirmations(self):
+        assert conviction_multiplier(0) == 1.0
+
+    def test_one_confirmation(self):
+        assert conviction_multiplier(1) == 1.5
+
+    def test_two_confirmations(self):
+        assert conviction_multiplier(2) == 2.0
+
+    def test_capped_at_max(self):
+        assert conviction_multiplier(5, max_multiplier=2.5) == 2.5
+
+    def test_custom_per_signal(self):
+        assert conviction_multiplier(1, per_signal=0.75) == 1.75
