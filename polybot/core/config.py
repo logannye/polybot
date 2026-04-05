@@ -197,6 +197,16 @@ class Settings(BaseSettings):
     mr_history_max_markets: int = 600        # max markets to scan per cycle
     mr_history_concurrency: int = 50         # max concurrent API requests
 
+    # Cross-venue arbitrage strategy
+    cv_enabled: bool = False
+    cv_interval_seconds: float = 300.0
+    cv_kelly_mult: float = 0.25
+    cv_max_single_pct: float = 0.15
+    cv_min_divergence: float = 0.03
+    cv_sports: str = "basketball_nba,icehockey_nhl,soccer_epl"
+    cv_cooldown_hours: float = 12.0
+    odds_api_key: str = ""
+
     # WebSocket streaming
     enable_websocket_streaming: bool = True
     ws_reconnect_max_delay: float = 30.0

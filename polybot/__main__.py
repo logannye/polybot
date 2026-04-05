@@ -22,6 +22,8 @@ from polybot.strategies.forecast import EnsembleForecastStrategy
 from polybot.strategies.market_maker import MarketMakerStrategy
 from polybot.strategies.mean_reversion import MeanReversionStrategy
 from polybot.markets.price_history import PriceHistoryScanner
+from polybot.analysis.odds_client import OddsClient
+from polybot.strategies.cross_venue import CrossVenueStrategy
 
 structlog.configure(
     processors=[
@@ -71,6 +73,9 @@ async def main():
     exists = await db.fetchval("SELECT COUNT(*) FROM system_state")
     if exists == 0:
         await db.execute("INSERT INTO system_state (bankroll) VALUES ($1)", settings.starting_bankroll)
+    await db.execute(
+        """INSERT INTO strategy_performance (strategy, total_trades, winning_trades, total_pnl, avg_edge, enabled)
+           VALUES ('cross_venue', 0, 0, 0, 0, true) ON CONFLICT (strategy) DO NOTHING""")
     scanner = PolymarketScanner(api_key=settings.polymarket_api_key)
     await scanner.start()
     researcher = BraveResearcher(api_key=settings.brave_api_key)
@@ -152,6 +157,14 @@ async def main():
             concurrency=getattr(settings, 'mr_history_concurrency', 50),
         )
         engine._price_history_scanner = price_history_scanner
+
+    if getattr(settings, 'cv_enabled', False) and getattr(settings, 'odds_api_key', ''):
+        odds_client = OddsClient(
+            api_key=settings.odds_api_key,
+            sports=getattr(settings, 'cv_sports', 'basketball_nba,icehockey_nhl').split(','))
+        await odds_client.start()
+        cv_strategy = CrossVenueStrategy(settings=settings, odds_client=odds_client)
+        engine.add_strategy(cv_strategy)
 
     app = create_app(db)
     dashboard_server = uvicorn.Server(
