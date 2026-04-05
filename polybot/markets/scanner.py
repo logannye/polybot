@@ -156,7 +156,7 @@ class PolymarketScanner:
     async def fetch_price_history(self, token_id: str, interval: str = "1h") -> list[float]:
         status, data = await self._get(
             f"{self._base_url}/prices-history",
-            {"token_id": token_id, "interval": interval, "fidelity": 60},
+            {"market": token_id, "interval": interval, "fidelity": 1},
         )
         if status != 200:
             return []
