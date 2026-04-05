@@ -1,5 +1,6 @@
 """Price history scanner — finds big moves in CLOB price history data."""
 
+import asyncio
 import structlog
 
 log = structlog.get_logger()
@@ -51,19 +52,46 @@ def detect_big_moves(
 
 
 class PriceHistoryScanner:
-    """Scans high-volume markets for recent big price moves via CLOB price history."""
+    """Scans high-volume markets for recent big price moves via CLOB price history.
+
+    Fetches price history in parallel using asyncio.gather with a concurrency
+    semaphore to avoid overwhelming the CLOB API.
+    """
 
     def __init__(
         self,
         scanner,
         min_volume: float = 5000.0,
         move_threshold: float = 0.05,
-        max_markets: int = 100,
+        max_markets: int = 500,
+        concurrency: int = 50,
     ):
         self._scanner = scanner
         self._min_volume = min_volume
         self._move_threshold = move_threshold
         self._max_markets = max_markets
+        self._semaphore = asyncio.Semaphore(concurrency)
+
+    async def _fetch_one(self, m: dict) -> dict | None:
+        """Fetch price history for one market and check for big moves."""
+        async with self._semaphore:
+            try:
+                prices = await self._scanner.fetch_price_history(
+                    m["yes_token_id"], interval="2h")
+                if not prices:
+                    return None
+                result = detect_big_moves(prices, threshold=self._move_threshold)
+                if result:
+                    return {
+                        "polymarket_id": m.get("polymarket_id", ""),
+                        "question": m.get("question", ""),
+                        "yes_price": m.get("yes_price", 0),
+                        **result,
+                    }
+            except Exception as e:
+                log.debug("price_history_scan_error",
+                          market=m.get("polymarket_id"), error=str(e))
+            return None
 
     async def scan_for_moves(self) -> list[dict]:
         """Scan top markets by volume for big recent price moves."""
@@ -79,25 +107,14 @@ class PriceHistoryScanner:
         candidates.sort(key=lambda m: m.get("volume_24h", 0), reverse=True)
         candidates = candidates[:self._max_markets]
 
-        moves = []
-        for m in candidates:
-            try:
-                prices = await self._scanner.fetch_price_history(
-                    m["yes_token_id"], interval="2h")
-                if not prices:
-                    continue
-                result = detect_big_moves(prices, threshold=self._move_threshold)
-                if result:
-                    moves.append({
-                        "polymarket_id": m.get("polymarket_id", ""),
-                        "question": m.get("question", ""),
-                        "yes_price": m.get("yes_price", 0),
-                        **result,
-                    })
-            except Exception as e:
-                log.debug("price_history_scan_error",
-                          market=m.get("polymarket_id"), error=str(e))
-                continue
+        if not candidates:
+            return []
+
+        results = await asyncio.gather(
+            *(self._fetch_one(m) for m in candidates),
+            return_exceptions=True)
+
+        moves = [r for r in results if isinstance(r, dict)]
 
         log.info("price_history_scan_complete",
                  scanned=len(candidates), moves_found=len(moves))

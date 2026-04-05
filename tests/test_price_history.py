@@ -110,3 +110,109 @@ async def test_scanner_handles_empty_history():
     moves = await phs.scan_for_moves()
 
     assert len(moves) == 0
+
+
+import asyncio
+
+
+@pytest.mark.asyncio
+async def test_scanner_fetches_in_parallel():
+    """Scanner should fetch multiple markets concurrently, not sequentially."""
+    call_times = []
+
+    async def mock_fetch(token_id, interval="1h"):
+        call_times.append(asyncio.get_event_loop().time())
+        await asyncio.sleep(0.01)
+        return [0.60] * 12 + [0.50, 0.50, 0.50]
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        f"mkt-{i}": {
+            "yes_price": 0.50, "volume_24h": 10000,
+            "yes_token_id": f"tok_{i}", "polymarket_id": f"mkt-{i}",
+            "question": f"Market {i}?",
+        }
+        for i in range(10)
+    }
+    scanner.fetch_price_history = mock_fetch
+
+    phs = PriceHistoryScanner(
+        scanner=scanner, min_volume=1000, move_threshold=0.05, max_markets=50,
+        concurrency=5)
+    moves = await phs.scan_for_moves()
+
+    assert len(moves) == 10
+    elapsed = call_times[-1] - call_times[0]
+    assert elapsed < 0.05
+
+
+@pytest.mark.asyncio
+async def test_scanner_respects_concurrency_limit():
+    """Scanner should not exceed the concurrency limit."""
+    max_concurrent = 0
+    current_concurrent = 0
+    lock = asyncio.Lock()
+
+    async def mock_fetch(token_id, interval="1h"):
+        nonlocal max_concurrent, current_concurrent
+        async with lock:
+            current_concurrent += 1
+            max_concurrent = max(max_concurrent, current_concurrent)
+        await asyncio.sleep(0.02)
+        async with lock:
+            current_concurrent -= 1
+        return [0.60] * 12 + [0.50, 0.50, 0.50]
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        f"mkt-{i}": {
+            "yes_price": 0.50, "volume_24h": 10000,
+            "yes_token_id": f"tok_{i}", "polymarket_id": f"mkt-{i}",
+            "question": f"Market {i}?",
+        }
+        for i in range(20)
+    }
+    scanner.fetch_price_history = mock_fetch
+
+    phs = PriceHistoryScanner(
+        scanner=scanner, min_volume=1000, move_threshold=0.05,
+        max_markets=50, concurrency=3)
+    await phs.scan_for_moves()
+
+    assert max_concurrent <= 3
+
+
+@pytest.mark.asyncio
+async def test_scanner_one_failure_doesnt_block_others():
+    """A single market failing should not prevent other markets from being scanned."""
+    call_count = 0
+
+    async def mock_fetch(token_id, interval="1h"):
+        nonlocal call_count
+        call_count += 1
+        if token_id == "tok_bad":
+            raise ConnectionError("API down")
+        return [0.60] * 12 + [0.50, 0.50, 0.50]
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-good": {
+            "yes_price": 0.50, "volume_24h": 10000,
+            "yes_token_id": "tok_good", "polymarket_id": "mkt-good",
+            "question": "Good?",
+        },
+        "mkt-bad": {
+            "yes_price": 0.50, "volume_24h": 20000,
+            "yes_token_id": "tok_bad", "polymarket_id": "mkt-bad",
+            "question": "Bad?",
+        },
+    }
+    scanner.fetch_price_history = mock_fetch
+
+    phs = PriceHistoryScanner(
+        scanner=scanner, min_volume=1000, move_threshold=0.05, max_markets=50)
+    moves = await phs.scan_for_moves()
+
+    assert call_count == 2
+    assert len(moves) == 1
+    assert moves[0]["polymarket_id"] == "mkt-good"
