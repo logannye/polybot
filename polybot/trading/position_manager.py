@@ -199,7 +199,9 @@ class ActivePositionManager:
                         log.info("mr_position_exit", trade_id=trade_id,
                                  reason=exit_reason, pnl=round(pnl, 4),
                                  market=pos["question"][:60])
-                    continue
+                # MR trades use custom TP/SL/time-stop above — skip generic
+                # early_exit which misinterprets tp_yes_price as ensemble prob
+                continue
 
             strategy = pos["strategy"]
             tp_threshold = learned_thresholds.get(strategy, {}).get(
