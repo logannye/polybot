@@ -183,15 +183,16 @@ class Settings(BaseSettings):
     # Mean reversion strategy
     mr_enabled: bool = False
     mr_interval_seconds: float = 120.0
-    mr_trigger_threshold: float = 0.05
+    mr_trigger_threshold: float = 0.10
     mr_reversion_fraction: float = 0.40
-    mr_kelly_mult: float = 0.15
-    mr_max_single_pct: float = 0.10
+    mr_kelly_mult: float = 0.35
+    mr_max_single_pct: float = 0.15
     mr_max_concurrent: int = 5
     mr_min_volume_24h: float = 2000.0
     mr_min_book_depth: float = 500.0
     mr_cooldown_hours: float = 6.0
     mr_max_hold_hours: float = 24.0
+    mr_min_expected_reversion: float = 0.04
 
     # WebSocket streaming
     enable_websocket_streaming: bool = True
