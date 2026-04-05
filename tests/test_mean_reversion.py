@@ -151,3 +151,19 @@ class TestSnapshotDetection:
         assert len(strategy._price_snapshots["m1"]) == 5
         # Should keep the most recent 5
         assert strategy._price_snapshots["m1"][-1][0] == pytest.approx(0.59)
+
+
+class TestMinExpectedReversion:
+    def test_reads_min_reversion_setting(self):
+        s = _make_settings()
+        s.mr_min_expected_reversion = 0.04
+        strategy = MeanReversionStrategy(s)
+        assert strategy._min_expected_reversion == 0.04
+
+    def test_defaults_to_zero_if_missing(self):
+        s = _make_settings()
+        # Don't set mr_min_expected_reversion — should default to 0.0
+        if hasattr(s, 'mr_min_expected_reversion'):
+            delattr(s, 'mr_min_expected_reversion')
+        strategy = MeanReversionStrategy(s)
+        assert strategy._min_expected_reversion == 0.0

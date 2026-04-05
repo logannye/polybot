@@ -31,6 +31,7 @@ class MeanReversionStrategy(Strategy):
         self._cooldown_hours = settings.mr_cooldown_hours
         self._max_hold_hours = settings.mr_max_hold_hours
         self._settings = settings
+        self._min_expected_reversion = getattr(settings, 'mr_min_expected_reversion', 0.0)
         # Sliding window of price snapshots (polymarket_id -> [(price, timestamp), ...])
         self._price_snapshots: dict[str, list[tuple[float, datetime]]] = {}
         self._snapshot_window: int = 5  # keep last N snapshots per market
@@ -151,6 +152,13 @@ class MeanReversionStrategy(Strategy):
             net_edge = expected_reversion  # maker = 0% fee
 
             if net_edge < 0.02:
+                continue
+
+            # Big-moves-only filter: reject if expected reversion is below minimum
+            if expected_reversion < self._min_expected_reversion:
+                log.debug("mr_rejected_small_reversion", market=pid,
+                          expected_reversion=round(expected_reversion, 4),
+                          min_required=self._min_expected_reversion)
                 continue
 
             # Position sizing
