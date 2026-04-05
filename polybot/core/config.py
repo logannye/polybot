@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     snipe_reentry_threshold: float = 0.03
     snipe_max_entries_per_market: int = 3
     snipe_max_market_exposure_pct: float = 0.30  # max cumulative exposure per market
+    snipe_odds_verification_enabled: bool = True
+    snipe_odds_min_consensus: float = 0.85
 
     # Arb bankroll gate
     arb_min_bankroll: float = 5.0
@@ -205,6 +207,9 @@ class Settings(BaseSettings):
     cv_min_divergence: float = 0.03
     cv_sports: str = "basketball_nba,icehockey_nhl,soccer_epl"
     cv_cooldown_hours: float = 12.0
+    conviction_stack_enabled: bool = True
+    conviction_stack_per_signal: float = 0.5
+    conviction_stack_max: float = 3.0
     odds_api_key: str = ""
 
     # WebSocket streaming

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from polybot.strategies.base import Strategy, TradingContext
 from polybot.trading.risk import PortfolioState, TradeProposal, bankroll_kelly_adjustment
-from polybot.trading.kelly import compute_position_size
+from polybot.trading.kelly import compute_position_size, conviction_multiplier
 from polybot.analysis.odds_client import find_divergences
 from polybot.notifications.email import format_trade_email
 
@@ -29,6 +29,9 @@ class CrossVenueStrategy(Strategy):
         self._odds_client = odds_client
         self._settings = settings
         self._traded_events: dict[str, datetime] = {}
+        self._conviction_enabled = getattr(settings, 'conviction_stack_enabled', False)
+        self._conviction_per_signal = getattr(settings, 'conviction_stack_per_signal', 0.5)
+        self._conviction_max = getattr(settings, 'conviction_stack_max', 3.0)
 
     async def run_once(self, ctx: TradingContext) -> None:
         enabled = await ctx.db.fetchval(
@@ -97,6 +100,24 @@ class CrossVenueStrategy(Strategy):
                     min_trade_size=ctx.settings.min_trade_size)
                 if size <= 0:
                     continue
+
+                # Conviction stacking: check if MR has a position on matching market
+                if self._conviction_enabled and size > 0 and matching_market:
+                    mr_confirms = await ctx.db.fetchval(
+                        """SELECT COUNT(*) FROM trades
+                           WHERE strategy = 'mean_reversion'
+                             AND status IN ('open', 'filled', 'dry_run')
+                             AND market_id IN (
+                                 SELECT id FROM markets WHERE polymarket_id = $1
+                             )""", pid)
+                    if mr_confirms and mr_confirms > 0:
+                        mult = conviction_multiplier(
+                            mr_confirms, self._conviction_per_signal, self._conviction_max)
+                        old_size = size
+                        size = min(size * mult, bankroll * self.max_single_pct)
+                        if size > old_size:
+                            log.info("cv_conviction_boost", market=pid,
+                                     multiplier=round(mult, 2), old_size=old_size, new_size=size)
 
                 portfolio = PortfolioState(
                     bankroll=bankroll,
