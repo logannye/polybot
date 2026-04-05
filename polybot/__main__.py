@@ -148,7 +148,8 @@ async def main():
             scanner=scanner,
             min_volume=settings.mr_min_volume_24h,
             move_threshold=settings.mr_trigger_threshold,
-            max_markets=100,
+            max_markets=getattr(settings, 'mr_history_max_markets', 500),
+            concurrency=getattr(settings, 'mr_history_concurrency', 50),
         )
         engine._price_history_scanner = price_history_scanner
 

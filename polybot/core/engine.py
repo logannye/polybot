@@ -53,7 +53,8 @@ class Engine:
             tasks.append(self._run_periodic(self._hourly_learning, 3600))
         tasks.append(self._run_periodic(self._cleanup_stale_arbs, 3600))
         if self._price_history_scanner:
-            tasks.append(self._run_periodic(self._scan_price_history, 600))
+            scan_interval = getattr(self._settings, 'mr_history_scan_interval', 180)
+            tasks.append(self._run_periodic(self._scan_price_history, scan_interval))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):

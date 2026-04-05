@@ -193,6 +193,9 @@ class Settings(BaseSettings):
     mr_cooldown_hours: float = 6.0
     mr_max_hold_hours: float = 24.0
     mr_min_expected_reversion: float = 0.04
+    mr_history_scan_interval: float = 180.0  # seconds between price history scans
+    mr_history_max_markets: int = 500        # max markets to scan per cycle
+    mr_history_concurrency: int = 50         # max concurrent API requests
 
     # WebSocket streaming
     enable_websocket_streaming: bool = True
