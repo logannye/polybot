@@ -98,12 +98,17 @@ class PoliticalStrategy(Strategy):
             log.debug("pol_no_markets_returned")
             return
 
-        political_markets = [
-            m for m in markets
-            if is_political_market(m.get("tags", []))
-            and m.get("book_depth", 0) >= self._min_liquidity
-            and m.get("hours_left", 0) > 24
-        ]
+        now = datetime.now(timezone.utc)
+        political_markets = []
+        for m in markets:
+            if not is_political_market(m.get("tags", [])):
+                continue
+            if m.get("book_depth", 0) < self._min_liquidity:
+                continue
+            hours_left = (m["resolution_time"] - now).total_seconds() / 3600
+            if hours_left <= 24:
+                continue
+            political_markets.append(m)
 
         log.info("pol_scan", total=len(markets), political=len(political_markets))
 

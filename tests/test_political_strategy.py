@@ -39,6 +39,7 @@ def _make_political_market(
     tags=None,
 ):
     """Return a market dict representing a liquid political market."""
+    from datetime import datetime, timezone, timedelta
     if tags is None:
         tags = ["politics", "trump-presidency"]
     return {
@@ -46,11 +47,10 @@ def _make_political_market(
         "question": question,
         "yes_price": yes_price,
         "book_depth": book_depth,
-        "hours_left": hours_left,
         "tags": tags,
         "category": "politics",
         "volume_24h": 200_000,
-        "resolution_time": None,
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=hours_left),
         "yes_token_id": "yes_tok_1",
         "no_token_id": "no_tok_1",
     }
