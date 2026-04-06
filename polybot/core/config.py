@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     forecast_consensus_margin: float = 0.05            # margin from market price to count as "agreeing"
     forecast_category_min_trades: int = 10             # min trades before filtering by category
     forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
+    forecast_enabled: bool = True
     forecast_category_filter_enabled: bool = True      # disable to skip category filtering
 
     # Learning system

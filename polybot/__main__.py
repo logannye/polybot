@@ -146,8 +146,9 @@ async def main():
             await _snipe_odds.start()
     engine.add_strategy(ResolutionSnipeStrategy(
         settings=settings, ensemble=ensemble, odds_client=_snipe_odds))
-    engine.add_strategy(EnsembleForecastStrategy(
-        settings=settings, ensemble=ensemble, researcher=researcher))
+    if getattr(settings, 'forecast_enabled', True):
+        engine.add_strategy(EnsembleForecastStrategy(
+            settings=settings, ensemble=ensemble, researcher=researcher))
 
     if settings.mm_enabled:
         mm_strategy = MarketMakerStrategy(
