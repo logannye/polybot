@@ -25,6 +25,7 @@ class CrossVenueStrategy(Strategy):
         self.kelly_multiplier = settings.cv_kelly_mult
         self.max_single_pct = settings.cv_max_single_pct
         self._min_divergence = settings.cv_min_divergence
+        self._min_implied_prob = settings.cv_min_implied_prob
         self._cooldown_hours = settings.cv_cooldown_hours
         self._odds_client = odds_client
         self._settings = settings
@@ -95,6 +96,11 @@ class CrossVenueStrategy(Strategy):
             side = div["side"]
             divergence = abs(div["divergence"])
             buy_price = matching_market["yes_price"] if side == "YES" else (1 - matching_market["yes_price"])
+
+            if buy_price < self._min_implied_prob:
+                log.debug("cv_penny_odds_skip", outcome=div["outcome_name"],
+                          buy_price=round(buy_price, 4), floor=self._min_implied_prob)
+                continue
 
             kelly_fraction = divergence / (1 - buy_price) if buy_price < 1.0 else 0.0
 

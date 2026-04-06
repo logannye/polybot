@@ -209,6 +209,7 @@ class Settings(BaseSettings):
     cv_kelly_mult: float = 0.25
     cv_max_single_pct: float = 0.15
     cv_min_divergence: float = 0.03
+    cv_min_implied_prob: float = 0.10   # skip outcomes below 10% implied
     cv_sports: str = "basketball_nba,icehockey_nhl,soccer_epl"
     cv_cooldown_hours: float = 12.0
     cv_max_days_to_resolution: float = 7.0

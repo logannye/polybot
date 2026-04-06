@@ -11,6 +11,7 @@ def _make_settings():
     s.cv_kelly_mult = 0.25
     s.cv_max_single_pct = 0.15
     s.cv_min_divergence = 0.03
+    s.cv_min_implied_prob = 0.10
     s.cv_cooldown_hours = 12.0
     s.cv_max_days_to_resolution = 7.0
     s.use_maker_orders = True
