@@ -190,12 +190,12 @@ class Settings(BaseSettings):
     mr_trigger_threshold: float = 0.10
     mr_reversion_fraction: float = 0.40
     mr_kelly_mult: float = 0.35
-    mr_max_single_pct: float = 0.15
+    mr_max_single_pct: float = 0.20
     mr_max_concurrent: int = 5
     mr_min_volume_24h: float = 2000.0
     mr_min_book_depth: float = 500.0
-    mr_cooldown_hours: float = 6.0
-    mr_max_hold_hours: float = 3.0
+    mr_cooldown_hours: float = 0.5
+    mr_max_hold_hours: float = 1.0
     mr_min_expected_reversion: float = 0.03
     mr_big_move_threshold: float = 0.15   # moves above this get kelly boost
     mr_big_move_kelly_boost: float = 1.3  # kelly multiplier for big moves
