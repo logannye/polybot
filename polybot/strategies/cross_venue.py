@@ -121,11 +121,19 @@ class CrossVenueStrategy(Strategy):
                             log.info("cv_conviction_boost", market=pid,
                                      multiplier=round(mult, 2), old_size=old_size, new_size=size)
 
+                open_trades = await ctx.db.fetch(
+                    """SELECT t.position_size_usd, m.category
+                       FROM trades t JOIN markets m ON t.market_id = m.id
+                       WHERE t.status IN ('open', 'filled', 'dry_run')""")
+                cat_deployed: dict[str, float] = {}
+                for t in open_trades:
+                    cat = t["category"]
+                    cat_deployed[cat] = cat_deployed.get(cat, 0.0) + float(t["position_size_usd"])
                 portfolio = PortfolioState(
                     bankroll=bankroll,
                     total_deployed=float(state_row["total_deployed"]),
                     daily_pnl=float(state_row["daily_pnl"]),
-                    open_count=0, category_deployed={},
+                    open_count=len(open_trades), category_deployed=cat_deployed,
                     circuit_breaker_until=state_row.get("circuit_breaker_until"))
                 proposal = TradeProposal(
                     size_usd=size,
