@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     snipe_min_net_edge: float = 0.02
 
     # Arb thresholds
+    arb_enabled: bool = True
     arb_min_net_edge: float = 0.02
     arb_fill_timeout_seconds: int = 30
     arb_max_net_edge: float = 0.20
