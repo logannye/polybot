@@ -52,9 +52,10 @@ class Settings(BaseSettings):
     snipe_min_net_edge: float = 0.02
 
     # Arb thresholds
-    arb_min_net_edge: float = 0.01
+    arb_min_net_edge: float = 0.02
     arb_fill_timeout_seconds: int = 30
     arb_max_net_edge: float = 0.20
+    arb_min_leg_liquidity: float = 5000.0   # min book depth per leg in exhaustive arb
 
     # Pre-scoring
     prescore_top_n: int = 5
@@ -105,7 +106,7 @@ class Settings(BaseSettings):
     snipe_odds_min_consensus: float = 0.85
 
     # Arb bankroll gate
-    arb_min_bankroll: float = 5.0
+    arb_min_bankroll: float = 50.0
     arb_max_hold_days: float = 3.0
 
     # Forecast time-stop (dynamic: scales with time-to-resolution)

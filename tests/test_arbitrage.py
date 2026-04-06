@@ -161,3 +161,128 @@ class TestArbDedup:
         assert "0x333" in strategy._seen_arbs
         # A new opp with any of these IDs should be blocked
         assert any(mid in strategy._seen_arbs for mid in ["0x222", "0x444"])
+
+
+# --- Event-based grouping ---
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+
+class TestArbUsesEventGroups:
+    """Verify ArbitrageStrategy uses fetch_event_groups (not fetch_grouped_markets)."""
+
+    def _make_strategy(self):
+        class FakeSettings:
+            arb_interval_seconds = 60
+            arb_kelly_multiplier = 0.20
+            arb_max_single_pct = 0.40
+            arb_min_bankroll = 50.0
+            arb_min_leg_liquidity = 0.0   # disable liquidity filter in unit test
+            arb_max_net_edge = 0.20
+            use_maker_orders = True
+            arb_max_concurrent = 8
+        return ArbitrageStrategy(FakeSettings())
+
+    def test_fetch_event_groups_called_not_grouped_markets(self):
+        """run_once() must call fetch_event_groups, not fetch_grouped_markets."""
+        strategy = self._make_strategy()
+
+        # Build an arb group: 3 markets summing to 0.90 (underpriced YES → arb)
+        arb_markets = [
+            {"polymarket_id": "ev_a", "yes_price": 0.30, "no_price": 0.72,
+             "book_depth": 10000.0, "category": "politics"},
+            {"polymarket_id": "ev_b", "yes_price": 0.35, "no_price": 0.67,
+             "book_depth": 10000.0, "category": "politics"},
+            {"polymarket_id": "ev_c", "yes_price": 0.25, "no_price": 0.77,
+             "book_depth": 10000.0, "category": "politics"},
+        ]
+
+        scanner = MagicMock()
+        scanner.fetch_markets = AsyncMock(return_value=arb_markets)
+        scanner.fetch_event_groups = MagicMock(return_value={"event-slug-1": arb_markets})
+        # fetch_grouped_markets should NOT be called
+        scanner.fetch_grouped_markets = MagicMock(side_effect=AssertionError(
+            "fetch_grouped_markets must not be called — use fetch_event_groups"))
+
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(side_effect=lambda q, *a: (
+            {"enabled": True} if "strategy_performance" in q else
+            {"bankroll": 300.0} if "system_state" in q else None
+        ))
+        db.fetchval = AsyncMock(return_value=0)
+        db.fetch = AsyncMock(return_value=[])
+
+        # Set up risk_manager to block execution (allowed=False) so we don't
+        # need to wire up the full executor chain — we only care that
+        # fetch_event_groups was called.
+        portfolio_state = MagicMock()
+        portfolio_state.bankroll = 300.0
+        portfolio_state.circuit_breaker_until = None
+        risk_manager = AsyncMock()
+        risk_manager.get_portfolio_state = AsyncMock(return_value=portfolio_state)
+        check_result = MagicMock()
+        check_result.allowed = False
+        check_result.reason = "test_block"
+        risk_manager.check = MagicMock(return_value=check_result)
+
+        settings = MagicMock()
+        settings.post_breaker_kelly_reduction = 0.50
+        settings.bankroll_survival_threshold = 50.0
+        settings.bankroll_growth_threshold = 500.0
+        settings.arb_max_net_edge = 0.20
+        settings.use_maker_orders = True
+
+        ctx = MagicMock()
+        ctx.scanner = scanner
+        ctx.db = db
+        ctx.executor = AsyncMock()
+        ctx.email_notifier = AsyncMock()
+        ctx.portfolio_lock = asyncio.Lock()
+        ctx.risk_manager = risk_manager
+        ctx.settings = settings
+
+        asyncio.run(strategy.run_once(ctx))
+
+        scanner.fetch_event_groups.assert_called_once_with(arb_markets)
+
+    def test_illiquid_legs_skipped(self):
+        """Groups where any leg has book_depth below arb_min_leg_liquidity are skipped."""
+        strategy = self._make_strategy()
+        # Override: use a real liquidity threshold
+        strategy._settings.arb_min_leg_liquidity = 5000.0
+
+        # One leg has insufficient depth
+        illiquid_markets = [
+            {"polymarket_id": "il_a", "yes_price": 0.30, "no_price": 0.72,
+             "book_depth": 100.0, "category": "politics"},   # too shallow
+            {"polymarket_id": "il_b", "yes_price": 0.35, "no_price": 0.67,
+             "book_depth": 10000.0, "category": "politics"},
+            {"polymarket_id": "il_c", "yes_price": 0.25, "no_price": 0.77,
+             "book_depth": 10000.0, "category": "politics"},
+        ]
+
+        scanner = MagicMock()
+        scanner.fetch_markets = AsyncMock(return_value=illiquid_markets)
+        scanner.fetch_event_groups = MagicMock(return_value={"event-slug-illiquid": illiquid_markets})
+        scanner.fetch_grouped_markets = MagicMock(side_effect=AssertionError("must not be called"))
+
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(side_effect=lambda q, *a: (
+            {"enabled": True} if "strategy_performance" in q else
+            {"bankroll": 300.0} if "system_state" in q else None
+        ))
+        db.fetchval = AsyncMock(return_value=0)
+        db.fetch = AsyncMock(return_value=[])
+
+        ctx = MagicMock()
+        ctx.scanner = scanner
+        ctx.db = db
+        ctx.executor = AsyncMock()
+        ctx.email_notifier = AsyncMock()
+        ctx.portfolio_lock = asyncio.Lock()
+
+        asyncio.run(strategy.run_once(ctx))
+
+        # Executor should never have been called — group was skipped
+        ctx.executor.place_multi_leg_order.assert_not_called()

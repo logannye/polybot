@@ -220,8 +220,13 @@ class ArbitrageStrategy(Strategy):
                 opportunities.append(opp)
 
         # 2. Exhaustive arb — check grouped (multi-outcome) markets
-        groups = scanner.fetch_grouped_markets(markets)
+        groups = scanner.fetch_event_groups(markets)
+        # Filter out groups with illiquid legs
+        arb_min_leg_liquidity = float(getattr(self._settings, "arb_min_leg_liquidity", 5000.0))
         for slug, group_markets in groups.items():
+            # Skip groups with any illiquid leg
+            if any(m.get("book_depth", 0) < arb_min_leg_liquidity for m in group_markets):
+                continue
             # Use category from first market in group for fee rate
             _cat = group_markets[0].get("category", "unknown") if group_markets else "unknown"
             opp = detect_exhaustive_arb(
