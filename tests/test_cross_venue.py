@@ -12,6 +12,7 @@ def _make_settings():
     s.cv_max_single_pct = 0.15
     s.cv_min_divergence = 0.03
     s.cv_cooldown_hours = 12.0
+    s.cv_max_days_to_resolution = 7.0
     s.use_maker_orders = True
     s.min_trade_size = 1.0
     s.post_breaker_kelly_reduction = 0.5
@@ -114,6 +115,52 @@ async def test_run_once_respects_max_concurrent_positions():
                "yes_token_id": "tok1", "no_token_id": "tok2"},
     }
     ctx.risk_manager = RiskManager()
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
+
+
+from datetime import datetime, timezone, timedelta
+
+
+@pytest.mark.asyncio
+async def test_run_once_skips_long_dated_market():
+    """Should skip markets resolving more than 7 days out."""
+    s = _make_settings()
+    s.cv_max_days_to_resolution = 7.0
+    odds_client = MagicMock()
+    odds_client.fetch_all_sports = AsyncMock(return_value=[
+        {"id": "evt1", "sport_key": "basketball_nba",
+         "home_team": "Lakers", "away_team": "Celtics",
+         "commence_time": "2026-04-06T00:00:00Z",
+         "bookmakers": [
+             {"key": "fanduel", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Los Angeles Lakers", "price": -200},
+                 {"name": "Boston Celtics", "price": +170}]}]},
+             {"key": "polymarket", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Los Angeles Lakers", "price": -110},
+                 {"name": "Boston Celtics", "price": -110}]}]},
+         ]}
+    ])
+
+    strategy = CrossVenueStrategy(settings=s, odds_client=odds_client)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(return_value=True)  # enabled
+    ctx.executor = AsyncMock()
+    ctx.settings = s
+    ctx.scanner = MagicMock()
+    # Market resolves 90 days from now — should be skipped
+    ctx.scanner.get_all_cached_prices.return_value = {
+        "m1": {"polymarket_id": "0xabc", "question": "Will the Los Angeles Lakers win?",
+               "yes_price": 0.45, "category": "sports", "book_depth": 5000,
+               "resolution_time": datetime.now(timezone.utc) + timedelta(days=90),
+               "volume_24h": 10000,
+               "yes_token_id": "tok1", "no_token_id": "tok2"},
+    }
     ctx.portfolio_lock = asyncio.Lock()
     ctx.email_notifier = AsyncMock()
 

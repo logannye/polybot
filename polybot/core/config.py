@@ -211,6 +211,7 @@ class Settings(BaseSettings):
     cv_min_divergence: float = 0.03
     cv_sports: str = "basketball_nba,icehockey_nhl,soccer_epl"
     cv_cooldown_hours: float = 12.0
+    cv_max_days_to_resolution: float = 7.0
     conviction_stack_enabled: bool = True
     conviction_stack_per_signal: float = 0.5
     conviction_stack_max: float = 3.0

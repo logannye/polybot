@@ -28,6 +28,7 @@ class CrossVenueStrategy(Strategy):
         self._cooldown_hours = settings.cv_cooldown_hours
         self._odds_client = odds_client
         self._settings = settings
+        self._max_days_to_resolution = getattr(settings, 'cv_max_days_to_resolution', 7.0)
         self._traded_events: dict[str, datetime] = {}
         self._conviction_enabled = getattr(settings, 'conviction_stack_enabled', False)
         self._conviction_per_signal = getattr(settings, 'conviction_stack_per_signal', 0.5)
@@ -74,6 +75,22 @@ class CrossVenueStrategy(Strategy):
             if not matching_market:
                 log.debug("cv_no_matching_market", outcome=div["outcome_name"])
                 continue
+
+            # Skip long-dated markets — don't lock capital for months
+            res_time = matching_market.get("resolution_time")
+            if res_time is not None:
+                if isinstance(res_time, str):
+                    from datetime import datetime as _dt
+                    try:
+                        res_time = _dt.fromisoformat(res_time.replace("Z", "+00:00"))
+                    except (ValueError, TypeError):
+                        res_time = None
+                if res_time is not None:
+                    days_to_resolution = (res_time - now).total_seconds() / 86400
+                    if days_to_resolution > self._max_days_to_resolution:
+                        log.debug("cv_too_long_dated", outcome=div["outcome_name"],
+                                  days=round(days_to_resolution, 1))
+                        continue
 
             side = div["side"]
             divergence = abs(div["divergence"])
