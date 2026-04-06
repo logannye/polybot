@@ -8,6 +8,10 @@ log = structlog.get_logger()
 CLOB_BASE_URL = "https://clob.polymarket.com"
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 
+# Recognized category tags (order matters: first match wins)
+CATEGORY_TAGS = {"politics", "geopolitics", "crypto", "sports", "finance",
+                 "business", "tech", "culture", "weather", "world"}
+
 
 def parse_gamma_market(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Parse a market from the Gamma API (active-only, server-side filtered)."""
@@ -44,10 +48,28 @@ def parse_gamma_market(raw: dict[str, Any]) -> dict[str, Any] | None:
     except (ValueError, TypeError):
         return None
 
+    # Extract event tags (deduplicated, lowercase slugs)
+    tags: list[str] = []
+    seen_tags: set[str] = set()
+    for event in raw.get("events", []):
+        for tag in event.get("tags", []):
+            slug = tag.get("slug", "").lower().strip()
+            if slug and slug not in seen_tags:
+                tags.append(slug)
+                seen_tags.add(slug)
+
+    # Derive category from tags (first recognized tag wins)
+    derived_category = "unknown"
+    for t in tags:
+        if t in CATEGORY_TAGS:
+            derived_category = t
+            break
+
     return {
         "polymarket_id": raw.get("conditionId", ""),
         "question": raw.get("question", ""),
-        "category": raw.get("category") or raw.get("slug", "unknown") or "unknown",
+        "category": derived_category if derived_category != "unknown" else (raw.get("category") or raw.get("slug", "unknown") or "unknown"),
+        "tags": tags,
         "resolution_time": end_date,
         "yes_price": p0,
         "no_price": p1,
