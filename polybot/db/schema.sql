@@ -70,8 +70,12 @@ INSERT INTO model_performance (model_name, trust_weight) VALUES
 ON CONFLICT (model_name) DO NOTHING;
 
 -- v2: Strategy column on trades
-ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy TEXT
-    CHECK (strategy IN ('arbitrage', 'snipe', 'forecast')) NOT NULL DEFAULT 'forecast';
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'forecast';
+
+-- v2.5: Expand strategy CHECK for all strategies
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_strategy_check;
+ALTER TABLE trades ADD CONSTRAINT trades_strategy_check
+    CHECK (strategy IN ('arbitrage', 'snipe', 'forecast', 'market_maker', 'mean_reversion', 'cross_venue'));
 
 -- v2: Strategy performance tracking
 CREATE TABLE IF NOT EXISTS strategy_performance (
