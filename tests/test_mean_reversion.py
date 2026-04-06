@@ -1,8 +1,10 @@
+import asyncio
 import pytest
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from polybot.strategies.mean_reversion import MeanReversionStrategy
+from polybot.trading.risk import RiskManager
 
 
 def _make_settings():
@@ -167,3 +169,63 @@ class TestMinExpectedReversion:
             delattr(s, 'mr_min_expected_reversion')
         strategy = MeanReversionStrategy(s)
         assert strategy._min_expected_reversion == 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_once_respects_max_concurrent_positions():
+    """Should reject trades when open_count >= max_concurrent (12)."""
+    s = _make_settings()
+    s.mr_max_concurrent = 5           # MR-specific cap (not reached in this test)
+    s.use_maker_orders = True
+    s.min_trade_size = 1.0
+    s.post_breaker_kelly_reduction = 0.5
+    s.bankroll_survival_threshold = 50.0
+    s.bankroll_growth_threshold = 500.0
+    s.mr_min_expected_reversion = 0.0
+    s.conviction_stack_enabled = False
+    s.conviction_stack_per_signal = 0.5
+    s.conviction_stack_max = 3.0
+
+    strategy = MeanReversionStrategy(s)
+
+    # Pre-populate a snapshot so a candidate is detected (price dropped 10%)
+    now = datetime.now(timezone.utc)
+    strategy._price_snapshots["m1"] = [(0.60, now - timedelta(minutes=5))]
+
+    # Market whose current price dropped from 0.60 to 0.50 (10% drop > 5% trigger)
+    market = _make_market("m1", price=0.50, volume=5000.0, depth=1000.0)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(side_effect=[
+        True,   # strategy enabled check
+        0,      # mr_open count (below MR-specific cap, so we proceed to candidate loop)
+        0,      # cooldown check (no recent MR trades on this market)
+        0,      # existing position check (no open MR position on this market)
+        1,      # market upsert (only reached before fix; after fix risk rejects first)
+        1,      # analysis insert (only reached before fix)
+    ])
+    ctx.db.fetchrow = AsyncMock(side_effect=[
+        # system_state row (first call, before candidate loop)
+        {"bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+         "circuit_breaker_until": None},
+        # fresh system_state row (inside portfolio_lock)
+        {"bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+         "post_breaker_until": None, "circuit_breaker_until": None},
+    ])
+    ctx.scanner = MagicMock()
+    ctx.scanner.fetch_markets = AsyncMock(return_value=[market])
+
+    # Return 12 open trades — enough to hit RiskManager.max_concurrent (default 12)
+    ctx.db.fetch = AsyncMock(
+        return_value=[{"position_size_usd": 10, "category": "politics"}] * 12
+    )
+
+    ctx.executor = AsyncMock()
+    ctx.settings = s
+    ctx.risk_manager = RiskManager()  # default max_concurrent=12
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
