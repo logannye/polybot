@@ -324,3 +324,84 @@ async def test_init_reads_settings_with_defaults():
     assert strategy._min_edge == 0.04
     assert strategy._min_liquidity == 50_000
     assert strategy._max_positions == 5
+
+
+@pytest.mark.asyncio
+async def test_llm_confirmation_blocks_disagreeing_trade():
+    """LLM quick_screen disagreeing with calibration direction should block the trade."""
+    s = _make_settings()
+    # yes_price=0.70 gives ~5.2% edge with slope 1.31; set confirm threshold below that
+    s.pol_llm_confirm_edge = 0.05
+    market = _make_political_market(yes_price=0.70, tags=["politics"])
+
+    ensemble = AsyncMock()
+    # Calibration says YES (true_prob ~0.752 > yes_price 0.70).
+    # LLM returns 0.60 < 0.70 → disagrees with YES direction.
+    ensemble.quick_screen = AsyncMock(return_value=0.60)
+
+    ctx = _make_ctx(s, markets=[market])
+    strategy = PoliticalStrategy(settings=s, ensemble=ensemble)
+
+    await strategy.run_once(ctx)
+
+    ensemble.quick_screen.assert_called_once()
+    ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_llm_confirmation_allows_agreeing_trade():
+    """LLM quick_screen agreeing with calibration direction should allow the trade."""
+    s = _make_settings()
+    # yes_price=0.70 gives ~5.2% edge with slope 1.31; set confirm threshold below that
+    s.pol_llm_confirm_edge = 0.05
+    market = _make_political_market(yes_price=0.70, tags=["politics"])
+
+    ensemble = AsyncMock()
+    # Calibration says YES (true_prob ~0.752 > yes_price 0.70).
+    # LLM returns 0.80 > 0.70 → agrees with YES direction.
+    ensemble.quick_screen = AsyncMock(return_value=0.80)
+
+    ctx = _make_ctx(s, markets=[market])
+    strategy = PoliticalStrategy(settings=s, ensemble=ensemble)
+
+    await strategy.run_once(ctx)
+
+    ensemble.quick_screen.assert_called_once()
+    ctx.executor.place_order.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_llm_when_below_confirm_threshold():
+    """Market with edge below pol_llm_confirm_edge should skip LLM and still trade."""
+    s = _make_settings()
+    # yes_price=0.70 gives ~5.2% edge; set confirm threshold above that to skip LLM
+    s.pol_llm_confirm_edge = 0.06
+
+    ensemble = AsyncMock()
+    ensemble.quick_screen = AsyncMock(return_value=0.65)
+
+    market = _make_political_market(yes_price=0.70, tags=["politics"])
+    ctx = _make_ctx(s, markets=[market])
+    strategy = PoliticalStrategy(settings=s, ensemble=ensemble)
+
+    await strategy.run_once(ctx)
+
+    # Edge (~5.2%) is below 6% confirm threshold → no LLM call, but trade proceeds
+    ensemble.quick_screen.assert_not_called()
+    ctx.executor.place_order.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_llm_when_ensemble_is_none():
+    """PoliticalStrategy with ensemble=None should trade high-edge markets without LLM check."""
+    s = _make_settings()
+    # yes_price=0.70 gives ~11% edge, above threshold — but no ensemble
+    market = _make_political_market(yes_price=0.70, tags=["politics"])
+
+    ctx = _make_ctx(s, markets=[market])
+    strategy = PoliticalStrategy(settings=s, ensemble=None)
+
+    await strategy.run_once(ctx)
+
+    # No ensemble means no LLM call, trade should proceed normally
+    ctx.executor.place_order.assert_called_once()

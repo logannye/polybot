@@ -44,6 +44,7 @@ class PoliticalStrategy(Strategy):
         self._min_edge = getattr(settings, "pol_min_edge", 0.04)
         self._min_liquidity = getattr(settings, "pol_min_liquidity", 50_000)
         self._max_positions = getattr(settings, "pol_max_positions", 5)
+        self._llm_confirm_edge = float(getattr(settings, "pol_llm_confirm_edge", 0.10))
         self._settings = settings
         self._ensemble = ensemble
 
@@ -184,6 +185,29 @@ class PoliticalStrategy(Strategy):
         market_price = opp["market_price"]
         edge = opp["edge"]
         slope = opp["slope"]
+        side = opp["side"]
+
+        # Optional LLM confirmation for high-edge trades
+        if self._ensemble and edge >= self._llm_confirm_edge:
+            try:
+                quick_prob = await self._ensemble.quick_screen(
+                    market["question"], market["yes_price"],
+                    market["resolution_time"].isoformat() if hasattr(market["resolution_time"], "isoformat") else str(market["resolution_time"]))
+                if quick_prob is not None:
+                    # Does LLM agree with our calibration direction?
+                    llm_agrees = (side == "YES" and quick_prob > market["yes_price"]) or \
+                                 (side == "NO" and quick_prob < market["yes_price"])
+                    if not llm_agrees:
+                        log.info("pol_llm_disagrees", market=market.get("polymarket_id"),
+                                 side=side, calibration_edge=round(edge, 4),
+                                 llm_prob=round(quick_prob, 4),
+                                 market_price=market["yes_price"])
+                        return
+                    log.info("pol_llm_confirms", market=market.get("polymarket_id"),
+                             side=side, llm_prob=round(quick_prob, 4))
+            except Exception as e:
+                log.warning("pol_llm_error", market=market.get("polymarket_id"), error=str(e))
+                # Continue without LLM confirmation on error
 
         # 1. Kelly computation (maker orders → fee=0.0)
         kelly_result = compute_kelly(true_prob, market_price, fee_per_dollar=0.0)
@@ -221,7 +245,6 @@ class PoliticalStrategy(Strategy):
             return
 
         pid = market.get("polymarket_id", "")
-        side = kelly_result.side
 
         # 4. Risk check (inside portfolio lock)
         async with ctx.portfolio_lock:
