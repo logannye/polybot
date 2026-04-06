@@ -166,3 +166,46 @@ async def test_run_once_skips_long_dated_market():
 
     await strategy.run_once(ctx)
     ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_once_skips_penny_odds():
+    """Should skip divergences where buy_price < cv_min_implied_prob (default 0.10)."""
+    s = _make_settings()
+    s.cv_min_implied_prob = 0.10  # 10% floor
+    odds_client = MagicMock()
+    # Consensus says 5%, Polymarket says 1.5% — 3.5% divergence but penny odds
+    odds_client.fetch_all_sports = AsyncMock(return_value=[
+        {"id": "evt1", "sport_key": "basketball_nba",
+         "home_team": "Lakers", "away_team": "Celtics",
+         "commence_time": "2026-04-06T00:00:00Z",
+         "bookmakers": [
+             {"key": "fanduel", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Los Angeles Lakers", "price": 1900},
+                 {"name": "Boston Celtics", "price": -5000}]}]},
+             {"key": "polymarket", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Los Angeles Lakers", "price": 5566},
+                 {"name": "Boston Celtics", "price": -10000}]}]},
+         ]}
+    ])
+
+    strategy = CrossVenueStrategy(settings=s, odds_client=odds_client)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(return_value=True)  # enabled
+    ctx.executor = AsyncMock()
+    ctx.settings = s
+    ctx.scanner = MagicMock()
+    ctx.scanner.get_all_cached_prices.return_value = {
+        "m1": {"polymarket_id": "0xabc", "question": "Will the Los Angeles Lakers win?",
+               "yes_price": 0.015, "category": "sports", "book_depth": 5000,
+               "resolution_time": datetime.now(timezone.utc) + timedelta(days=3),
+               "volume_24h": 10000,
+               "yes_token_id": "tok1", "no_token_id": "tok2"},
+    }
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
