@@ -232,6 +232,54 @@ class ActivePositionManager:
                 # early_exit which misinterprets tp_yes_price as ensemble prob
                 continue
 
+            # Political strategy: hold to resolution.
+            # The edge is structural calibration bias, not timing-dependent.
+            # Only take-profit and stop-loss apply — skip early-exit (edge erosion).
+            if pos["strategy"] == "political":
+                if should_take_profit(side, entry_price, current_yes_price,
+                                      self._take_profit):
+                    exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                    if self._portfolio_lock:
+                        async with self._portfolio_lock:
+                            pnl = await self._executor.exit_position(
+                                trade_id=trade_id, exit_price=exit_price,
+                                exit_reason="take_profit")
+                    else:
+                        pnl = await self._executor.exit_position(
+                            trade_id=trade_id, exit_price=exit_price,
+                            exit_reason="take_profit")
+                    if pnl is not None:
+                        exits_triggered += 1
+                        log.info("pol_take_profit", trade_id=trade_id, pnl=round(pnl, 4))
+                        await self._email.send(
+                            f"[POLYBOT] Political position take-profit",
+                            f"<p><b>Market:</b> {pos['question']}</p>"
+                            f"<p><b>Side:</b> {side} | Entry: ${entry_price:.4f} | "
+                            f"Exit: ${exit_price:.4f}</p>"
+                            f"<p><b>P&L:</b> ${pnl:+.2f}</p>")
+                elif should_cut_loss(side, entry_price, current_yes_price,
+                                     self._stop_loss):
+                    exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                    if self._portfolio_lock:
+                        async with self._portfolio_lock:
+                            pnl = await self._executor.exit_position(
+                                trade_id=trade_id, exit_price=exit_price,
+                                exit_reason="stop_loss")
+                    else:
+                        pnl = await self._executor.exit_position(
+                            trade_id=trade_id, exit_price=exit_price,
+                            exit_reason="stop_loss")
+                    if pnl is not None:
+                        exits_triggered += 1
+                        log.info("pol_stop_loss", trade_id=trade_id, pnl=round(pnl, 4))
+                        await self._email.send(
+                            f"[POLYBOT] Political position stop-loss",
+                            f"<p><b>Market:</b> {pos['question']}</p>"
+                            f"<p><b>Side:</b> {side} | Entry: ${entry_price:.4f} | "
+                            f"Exit: ${exit_price:.4f}</p>"
+                            f"<p><b>P&L:</b> ${pnl:+.2f}</p>")
+                continue  # Skip early-exit — hold to resolution
+
             strategy = pos["strategy"]
             tp_threshold = learned_thresholds.get(strategy, {}).get(
                 "take_profit_threshold", self._take_profit)

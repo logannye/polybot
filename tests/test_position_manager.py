@@ -880,3 +880,125 @@ async def test_snipe_time_stop_48h():
 
     executor.exit_position.assert_called_once_with(
         trade_id=55, exit_price=0.96, exit_reason="time_stop")
+
+
+@pytest.mark.asyncio
+async def test_political_trades_skip_early_exit():
+    """Political trade open 12h, -5% underwater, 30 days to resolution — must NOT close.
+
+    The edge is structural calibration bias, not timing-dependent, so early-exit
+    (edge erosion) and time-stops must be bypassed. Only TP and SL are allowed.
+    """
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    opened_12h_ago = datetime.now(timezone.utc) - timedelta(hours=12)
+    resolves_30d = datetime.now(timezone.utc) + timedelta(days=30)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 200, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "political", "status": "dry_run",
+        "polymarket_id": "mkt-pol-hold", "question": "Will candidate X win?",
+        "ensemble_probability": 0.30,  # low ensemble — would trigger early_exit generically
+        "opened_at": opened_12h_ago,
+        "resolution_time": resolves_30d,
+        "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    # -5% from entry: 0.50 → 0.475; well within stop-loss threshold (25%)
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-pol-hold": {"yes_price": 0.475, "no_price": 0.525},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    # No early-exit, no time-stop — hold to resolution
+    executor.exit_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_political_trades_still_stop_loss():
+    """Political trade that breaches the stop-loss threshold must still be closed."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 201, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "political", "status": "dry_run",
+        "polymarket_id": "mkt-pol-sl", "question": "Will candidate Y win?",
+        "ensemble_probability": 0.65,
+        "opened_at": datetime.now(timezone.utc) - timedelta(days=5),
+        "resolution_time": datetime.now(timezone.utc) + timedelta(days=25),
+        "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=-3.00)
+
+    scanner = MagicMock()
+    # -30% from entry: 0.50 → 0.35; exceeds 25% stop-loss threshold
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-pol-sl": {"yes_price": 0.35, "no_price": 0.65},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=201, exit_price=0.35, exit_reason="stop_loss")
+
+
+@pytest.mark.asyncio
+async def test_political_trades_still_take_profit():
+    """Political trade that hits the take-profit threshold must still be closed."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 202, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "political", "status": "dry_run",
+        "polymarket_id": "mkt-pol-tp", "question": "Will candidate Z win?",
+        "ensemble_probability": 0.65,
+        "opened_at": datetime.now(timezone.utc) - timedelta(days=2),
+        "resolution_time": datetime.now(timezone.utc) + timedelta(days=28),
+        "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=2.50)
+
+    scanner = MagicMock()
+    # +25% from entry: 0.50 → 0.625; exceeds 20% take-profit threshold
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-pol-tp": {"yes_price": 0.625, "no_price": 0.375},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=202, exit_price=0.625, exit_reason="take_profit")
