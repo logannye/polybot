@@ -364,13 +364,15 @@ async def test_check_positions_no_time_stop_for_snipe():
     settings.forecast_time_stop_fraction = 0.10
     settings.forecast_time_stop_max_minutes = 480.0
     settings.forecast_time_stop_min_resolution_hours = 48.0
+    settings.snipe_max_hold_hours = 48.0
 
     mgr = ActivePositionManager(
         db=db, executor=executor, scanner=scanner,
         email_notifier=AsyncMock(), settings=settings)
     await mgr.check_positions()
 
-    # Snipe at 0.95 → 0.96 is only 1% gain, below 30% TP. No exit should fire.
+    # Snipe at 0.95 → 0.96 is only 1% gain, below 30% TP.
+    # 3h hold is well under the 48h snipe time-stop limit. No exit should fire.
     executor.exit_position.assert_not_called()
 
 
@@ -837,3 +839,44 @@ async def test_mr_time_stop_3h():
 
     executor.exit_position.assert_called_once_with(
         trade_id=42, exit_price=0.49, exit_reason="time_stop")
+
+
+@pytest.mark.asyncio
+async def test_snipe_time_stop_48h():
+    """Snipe position held >48h should trigger time_stop exit."""
+    import json
+
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 55, "side": "NO", "entry_price": 0.96, "shares": 100.0,
+        "position_size_usd": 107.50, "strategy": "snipe", "status": "dry_run",
+        "polymarket_id": "mkt-snipe-stale", "question": "Stale snipe?",
+        "ensemble_probability": None, "resolution_time": None,
+        "opened_at": datetime.now(timezone.utc) - timedelta(hours=49),
+        "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=-0.50)
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-snipe-stale": {"yes_price": 0.04, "no_price": 0.96},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.snipe_max_hold_hours = 48.0
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=55, exit_price=0.96, exit_reason="time_stop")

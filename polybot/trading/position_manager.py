@@ -52,6 +52,7 @@ class ActivePositionManager:
         self._forecast_time_stop_min_resolution_hours = getattr(
             settings, 'forecast_time_stop_min_resolution_hours', 48.0)
         self._portfolio_lock = portfolio_lock
+        self._snipe_max_hold_hours = getattr(settings, 'snipe_max_hold_hours', 48.0)
 
     async def check_positions(self):
         # Load per-strategy learned thresholds (adaptive TP/SL)
@@ -151,6 +152,34 @@ class ActivePositionManager:
                                     f"(limit: {effective_stop:.0f}min) | "
                                     f"P&L: ${pnl:+.2f}</p>")
                             continue
+
+            # Snipe time-stop: free capital from stale positions
+            if pos["strategy"] == "snipe" and pos.get("opened_at") is not None:
+                hold_hours = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 3600
+                if hold_hours > self._snipe_max_hold_hours:
+                    exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                    if self._portfolio_lock:
+                        async with self._portfolio_lock:
+                            pnl = await self._executor.exit_position(
+                                trade_id=trade_id, exit_price=exit_price,
+                                exit_reason="time_stop")
+                    else:
+                        pnl = await self._executor.exit_position(
+                            trade_id=trade_id, exit_price=exit_price,
+                            exit_reason="time_stop")
+                    if pnl is not None:
+                        exits_triggered += 1
+                        log.info("snipe_time_stop", trade_id=trade_id,
+                                 hold_hours=round(hold_hours, 1),
+                                 pnl=round(pnl, 4),
+                                 market=pos["question"][:60])
+                        await self._email.send(
+                            f"[POLYBOT] Snipe time-stopped ({hold_hours:.0f}h)",
+                            f"<p><b>Market:</b> {pos['question']}</p>"
+                            f"<p><b>Held:</b> {hold_hours:.0f}h (limit: "
+                            f"{self._snipe_max_hold_hours:.0f}h) | "
+                            f"P&L: ${pnl:+.2f}</p>")
+                    continue
 
             exit_reason = None
 
