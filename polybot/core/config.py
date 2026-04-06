@@ -185,7 +185,7 @@ class Settings(BaseSettings):
     # Mean reversion strategy
     mr_enabled: bool = False
     mr_interval_seconds: float = 120.0
-    mr_trigger_threshold: float = 0.075
+    mr_trigger_threshold: float = 0.10
     mr_reversion_fraction: float = 0.40
     mr_kelly_mult: float = 0.35
     mr_max_single_pct: float = 0.15
@@ -193,8 +193,10 @@ class Settings(BaseSettings):
     mr_min_volume_24h: float = 2000.0
     mr_min_book_depth: float = 500.0
     mr_cooldown_hours: float = 6.0
-    mr_max_hold_hours: float = 24.0
+    mr_max_hold_hours: float = 3.0
     mr_min_expected_reversion: float = 0.03
+    mr_big_move_threshold: float = 0.15   # moves above this get kelly boost
+    mr_big_move_kelly_boost: float = 1.3  # kelly multiplier for big moves
     mr_history_scan_interval: float = 180.0  # seconds between price history scans
     mr_history_max_markets: int = 600        # max markets to scan per cycle
     mr_history_concurrency: int = 50         # max concurrent API requests

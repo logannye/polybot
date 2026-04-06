@@ -229,3 +229,66 @@ async def test_run_once_respects_max_concurrent_positions():
 
     await strategy.run_once(ctx)
     ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_big_move_kelly_boost():
+    """Moves >15% should get a Kelly boost, producing larger positions."""
+    s = _make_settings()
+    s.use_maker_orders = True
+    s.min_trade_size = 1.0
+    s.post_breaker_kelly_reduction = 0.5
+    s.bankroll_survival_threshold = 50.0
+    s.bankroll_growth_threshold = 500.0
+    s.mr_min_expected_reversion = 0.0
+    s.conviction_stack_enabled = False
+    s.conviction_stack_per_signal = 0.5
+    s.conviction_stack_max = 3.0
+    s.mr_trigger_threshold = 0.10
+    s.mr_kelly_mult = 0.30           # unboosted: ~$24, boosted 1.3x: ~$31
+    s.mr_max_single_pct = 0.10
+    s.mr_big_move_threshold = 0.15
+    s.mr_big_move_kelly_boost = 1.3
+
+    strategy = MeanReversionStrategy(s)
+
+    now = datetime.now(timezone.utc)
+    # 20% move (above big_move_threshold of 15%)
+    strategy._price_snapshots["m1"] = [(0.30, now - timedelta(minutes=5))]
+    market = _make_market("m1", price=0.50, volume=5000.0, depth=5000.0)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(side_effect=[
+        True,   # strategy enabled
+        0,      # mr_open count
+        0,      # cooldown
+        0,      # existing position
+        1,      # market upsert
+        1,      # analysis insert
+    ])
+    ctx.db.fetchrow = AsyncMock(side_effect=[
+        {"bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+         "circuit_breaker_until": None},
+        {"bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+         "post_breaker_until": None, "circuit_breaker_until": None},
+    ])
+    ctx.db.fetch = AsyncMock(return_value=[])  # no open trades
+    ctx.executor = AsyncMock()
+    ctx.executor.place_order = AsyncMock(return_value=True)
+    ctx.settings = s
+    ctx.risk_manager = RiskManager()
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+    ctx.scanner = MagicMock()
+    ctx.scanner.fetch_markets = AsyncMock(return_value=[market])
+
+    await strategy.run_once(ctx)
+
+    ctx.executor.place_order.assert_called_once()
+    call_kwargs = ctx.executor.place_order.call_args
+    size_usd = call_kwargs.kwargs.get("size_usd") or call_kwargs[1].get("size_usd")
+    # With 20% move, kelly boost of 1.3x should produce a larger position
+    # than the ~$20 base sizing. Exact value depends on Kelly math, but
+    # must be > $25 (boosted) rather than ~$20 (unboosted).
+    assert size_usd > 25.0, f"Expected boosted size > $25, got ${size_usd:.2f}"

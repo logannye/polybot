@@ -32,6 +32,10 @@ class MeanReversionStrategy(Strategy):
         self._max_hold_hours = settings.mr_max_hold_hours
         self._settings = settings
         self._min_expected_reversion = getattr(settings, 'mr_min_expected_reversion', 0.0)
+        _bmt = getattr(settings, 'mr_big_move_threshold', 0.15)
+        self._big_move_threshold = float(_bmt) if isinstance(_bmt, (int, float)) else 0.15
+        _bmk = getattr(settings, 'mr_big_move_kelly_boost', 1.3)
+        self._big_move_kelly_boost = float(_bmk) if isinstance(_bmk, (int, float)) else 1.3
         self._conviction_enabled = getattr(settings, 'conviction_stack_enabled', False)
         self._conviction_per_signal = getattr(settings, 'conviction_stack_per_signal', 0.5)
         self._conviction_max = getattr(settings, 'conviction_stack_max', 3.0)
@@ -193,6 +197,9 @@ class MeanReversionStrategy(Strategy):
                     growth_threshold=ctx.settings.bankroll_growth_threshold,
                 )
                 kelly_fraction = net_edge / (1 - buy_price) if buy_price < 1.0 else 0.0
+                # Tiered Kelly boost: bigger moves get more aggressive sizing
+                if abs(move) >= self._big_move_threshold:
+                    kelly_adj *= self._big_move_kelly_boost
                 size = compute_position_size(
                     bankroll=bankroll, kelly_fraction=kelly_fraction,
                     kelly_mult=kelly_adj, confidence_mult=1.0,

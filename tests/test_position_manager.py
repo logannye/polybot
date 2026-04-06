@@ -793,3 +793,47 @@ async def test_mr_custom_tp_still_fires():
 
     executor.exit_position.assert_called_once_with(
         trade_id=102, exit_price=0.306, exit_reason="take_profit")
+
+
+@pytest.mark.asyncio
+async def test_mr_time_stop_3h():
+    """MR position held >3h should trigger time_stop exit."""
+    import json
+
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)  # no learned params
+    db.fetch = AsyncMock(return_value=[{
+        "id": 42, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 30.0, "strategy": "mean_reversion", "status": "dry_run",
+        "polymarket_id": "mkt-mr", "question": "MR time stop test?",
+        "ensemble_probability": 0.55, "resolution_time": None,
+        "opened_at": datetime.now(timezone.utc) - timedelta(hours=3, minutes=5),
+        "kelly_inputs": json.dumps({
+            "move": 0.15, "old_price": 0.35, "trigger_price": 0.50,
+            "expected_reversion": 0.06, "tp_yes_price": 0.56,
+            "sl_yes_price": 0.46, "max_hold_hours": 3.0,
+        }),
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=-1.50)
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-mr": {"yes_price": 0.49, "no_price": 0.51},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=42, exit_price=0.49, exit_reason="time_stop")
