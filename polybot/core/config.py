@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     snipe_reentry_threshold: float = 0.03
     snipe_max_entries_per_market: int = 3
     snipe_max_market_exposure_pct: float = 0.30  # max cumulative exposure per market
-    snipe_max_hold_hours: float = 48.0
+    snipe_max_hold_hours: float = 6.0
     snipe_odds_verification_enabled: bool = True
     snipe_odds_min_consensus: float = 0.85
 
