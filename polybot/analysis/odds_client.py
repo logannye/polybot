@@ -179,6 +179,8 @@ class OddsClient:
         for sport in self._sports:
             events = await self.fetch_odds(sport)
             all_events.extend(events)
+        log.info("odds_fetch_cycle_complete", sports=len(self._sports),
+                 events=len(all_events), credits_remaining=self._credits_remaining)
         return all_events
 
     @property

@@ -205,7 +205,7 @@ class Settings(BaseSettings):
 
     # Cross-venue arbitrage strategy
     cv_enabled: bool = False
-    cv_interval_seconds: float = 300.0
+    cv_interval_seconds: float = 1800.0
     cv_kelly_mult: float = 0.25
     cv_max_single_pct: float = 0.15
     cv_min_divergence: float = 0.03
