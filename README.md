@@ -13,7 +13,7 @@ Built for micro-scale bankrolls ($100-500). The calibration edge is structural a
 
 ## How it works
 
-Two active strategies run at independent frequencies within a single async process:
+Three active strategies run at independent frequencies within a single async process:
 
 ### Strategy 1: Resolution Sniping (every 60s)
 
@@ -44,9 +44,19 @@ The strategy applies no LLM calls. The edge is structural, not predictive.
 
 **Hold to resolution** — No time-stop. The edge is structural and does not decay with time, so positions are held until the market resolves.
 
+### Strategy 3: Combinatorial Arbitrage (every 45s)
+
+Detects mathematically provable mispricings in multi-outcome event groups. When N mutually exclusive outcomes should sum to 1.0 but don't, the strategy buys all underpriced outcomes (or sells all overpriced ones) for near-risk-free profit.
+
+**Event-based grouping** — Markets are grouped by their parent event via the Gamma `/events` endpoint, finding ~400+ valid exhaustive groups (e.g., "NHL Hart Trophy Winner" with 118 markets, "2028 Democratic Nominee" with 44 markets). This replaces the old slug-based grouping which found only 3 groups.
+
+**Detection** — `detect_exhaustive_arb()` validates that a group is mutually exclusive + collectively exhaustive (probability sum in 0.85-1.15, same resolution time, common question prefix), then checks both sides: buy all YESes if sum < 1.0, buy all NOs if sum > 1.0.
+
+**Sizing**: Kelly based on net edge, max 40% bankroll per arb, min 2% net edge threshold. Per-leg minimum liquidity of $5K.
+
 ### Disabled strategies
 
-The following strategies exist in the codebase but are currently disabled: **Ensemble Forecast** (LLM-based multi-model probability estimation), **Market Making** (two-sided quoting for spread capture and maker rebates), **Mean Reversion** (contrarian entry after price overreactions), **Cross-Venue Arbitrage** (Polymarket vs. sportsbook consensus), and **Arbitrage Scanner** (related-market mispricing detection). They can be re-enabled via their respective `_ENABLED` environment variables, but the current focus is on the two strategies with the clearest, most defensible edge.
+The following strategies exist in the codebase but are currently disabled: **Ensemble Forecast** (LLM-based multi-model probability estimation), **Market Making** (two-sided quoting for spread capture and maker rebates), **Mean Reversion** (contrarian entry after price overreactions), and **Cross-Venue Arbitrage** (Polymarket vs. sportsbook consensus). They can be re-enabled via their respective `_ENABLED` environment variables.
 
 ## Architecture
 
@@ -78,12 +88,12 @@ polybot/
 
 Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
-| Rule | Snipe | Political Calibration |
-|------|-------|----------------------|
-| Kelly multiplier | 0.50x (+ tiered edge scaling) | 0.40x |
-| Max single position | 25% | 20% |
-| Max per market (cumulative) | 30% | 1 position |
-| Max concurrent (strategy) | — | 5 |
+| Rule | Snipe | Political Calibration | Combinatorial Arb |
+|------|-------|----------------------|-------------------|
+| Kelly multiplier | 0.50x (+ tiered edge scaling) | 0.40x | 0.20x |
+| Max single position | 25% | 20% | 40% |
+| Max per market (cumulative) | 30% | 1 position | 1 per group |
+| Max concurrent (strategy) | — | 5 | 8 |
 
 | Rule | Default |
 |------|---------|
