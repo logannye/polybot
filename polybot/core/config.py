@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     forecast_consensus_margin: float = 0.05            # margin from market price to count as "agreeing"
     forecast_category_min_trades: int = 10             # min trades before filtering by category
     forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
-    forecast_enabled: bool = True
+    forecast_enabled: bool = False
     forecast_category_filter_enabled: bool = True      # disable to skip category filtering
 
     # Learning system
@@ -217,6 +217,16 @@ class Settings(BaseSettings):
     conviction_stack_per_signal: float = 0.5
     conviction_stack_max: float = 3.0
     odds_api_key: str = ""
+
+    # Political calibration strategy
+    pol_enabled: bool = True
+    pol_interval_seconds: float = 600.0        # 10 min scan cycle
+    pol_kelly_mult: float = 0.40               # aggressive — high-conviction calibration edge
+    pol_max_single_pct: float = 0.20           # up to 20% bankroll per position
+    pol_min_edge: float = 0.04                 # min 4% calibration-adjusted edge
+    pol_min_liquidity: float = 50000.0         # only liquid markets
+    pol_llm_confirm_edge: float = 0.10         # use LLM to confirm edges above 10% (future)
+    pol_max_positions: int = 5                 # max concurrent political positions
 
     # WebSocket streaming
     enable_websocket_streaming: bool = True
