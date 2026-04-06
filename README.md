@@ -1,8 +1,8 @@
 # Polybot
 
-Fully autonomous AI trading bot for [Polymarket](https://polymarket.com). Uses a multi-strategy architecture — resolution sniping, ensemble forecasting, market making, mean reversion, and cross-venue arbitrage — to find and exploit edge in binary outcome markets. The system learns from every resolved trade, adapting model weights, category preferences, and sizing parameters over time.
+Fully autonomous AI trading bot for [Polymarket](https://polymarket.com). Focused on two complementary edges: resolution sniping for capital recycling on near-certain outcomes, and political calibration — exploiting an academically-validated systematic bias in political prediction markets where prices are compressed toward 0.50 relative to true probabilities.
 
-Built for micro-scale bankrolls ($100-500) targeting aggressive compounding through near-certain edge (resolution sniping), analytical edge (ensemble forecasting), passive income (market making spread capture + maker rebates), contrarian edge (mean reversion after overreactions), and cross-venue edge (sportsbook consensus vs Polymarket divergence).
+Built for micro-scale bankrolls ($100-500). The calibration edge is structural and does not require predicting outcomes — it requires only that political market prices reflect the known logit-space compression (slope 1.31) documented in academic calibration research.
 
 ## Who is this for?
 
@@ -13,7 +13,7 @@ Built for micro-scale bankrolls ($100-500) targeting aggressive compounding thro
 
 ## How it works
 
-Six concurrent strategies run at independent frequencies within a single async process:
+Two active strategies run at independent frequencies within a single async process:
 
 ### Strategy 1: Resolution Sniping (every 60s)
 
@@ -28,79 +28,25 @@ Sizing: Tier-dependent Kelly — T0: 0.50x (full snipe kelly), T1: 0.43x, T2: 0.
 
 **Per-market cooldown**: After exiting a market, re-entry is blocked for 1 hour unless price moves 3%+ (capturing second-leg convergence). Capped at 2 entries per market per 24h, with a cumulative exposure cap of 30% of bankroll per market across all open snipe positions.
 
-### Strategy 2: Ensemble Forecast (every 5 min)
+### Strategy 2: Political Calibration (every 10 min)
 
-The full analysis pipeline with a cost-efficient tiered funnel:
+Exploits a documented calibration bias in political prediction markets. Academic research shows political market prices are systematically compressed toward 0.50 — the calibration slope is 1.31 in logit space, meaning a 70-cent contract corresponds to a true probability of ~75%, and a 20-cent underdog corresponds to ~14% (the market overprices longshots and underprices favorites).
 
-```
-~200-500 active markets
-    |
-    v  Filter (no LLM) — resolution time, liquidity, price range
-~30-60 markets
-    |
-    v  Pre-score (no LLM) — rank by quant signals + book depth + category history
-~5 markets
-    |
-    v  Quick screen (single Gemini Flash) — discard if <7% edge
-~2-3 markets
-    |
-    v  Full ensemble (Claude Haiku + GPT-5.4-mini + Gemini 3 Flash) — 3-model blind analysis + web research
-~0-2 trades
-```
+The strategy applies no LLM calls. The edge is structural, not predictive.
 
-Three models estimate probability **blind** — the market price is intentionally withheld to prevent anchoring bias. Estimates are aggregated using confidence-weighted averaging with trust weights that evolve based on each model's historical Brier score.
+**Market selection** — Filters to political and geopolitical markets using event tags from the Gamma API `/events` endpoint: `politics`, `geopolitics`, `global-elections`, `world`, and related tags. Non-political markets are excluded.
 
-Sizing: Quarter-Kelly (0.20x) with confidence modulation. Market-efficiency shrinkage of 45% blends ensemble probability toward the market price to counteract LLM overconfidence.
+**Calibration correction** — `analysis/calibration.py` applies a logit-space correction using slope 1.31. For each market, it computes the calibration-adjusted true probability and compares it to the market price.
 
-**Market loss blacklist**: After 2 stop-losses on the same market within 12 hours, the market is blacklisted — preventing repeated losing entries on the same thesis.
+**Entry signal** — Buys the side (YES or NO) where the calibration-adjusted probability exceeds the market price by 4%+. Both sides are evaluated; the higher-edge side wins.
 
-**Ensemble consensus**: Requires 2+ of 3 models to agree on direction (at least 5% from market price) before placing a trade. Prevents one outlier model from dragging the ensemble into a bad position.
+**Sizing**: Half-Kelly (0.40x), max 20% of bankroll per position, max 5 concurrent political positions.
 
-**Category filtering**: Markets in categories with negative average P&L (after 10+ trades) are automatically excluded from the forecast funnel.
+**Hold to resolution** — No time-stop. The edge is structural and does not decay with time, so positions are held until the market resolves.
 
-**Time-stop**: Forecast trades are automatically exited if held past a dynamic time limit that scales with time-to-resolution — `max(90min floor, 15% of hours-to-resolution)`, capped at 8 hours. Only fires on flat or losing positions — profitable trades fall through to the normal take-profit/stop-loss checks.
+### Disabled strategies
 
-### Strategy 3: Market Making (every 5s, opt-in)
-
-Posts two-sided quotes on selected markets to earn spread capture, maker rebates, and liquidity rewards. Supports dry-run simulation mode — simulates fills when market price crosses quote prices, tracking P&L without placing real orders.
-
-- **Market selection** — Scores markets by volume (≥$5K/day), book depth (≥$1K), resolution time (≥7 days out), and price range (0.10-0.90 for 3x two-sided reward bonus). Re-evaluates every 5 minutes, maintains 3-8 active markets.
-- **Zero-fee quoting** — All orders use `post_only=True`, guaranteeing maker status (0% fees). Base spread of 150 bps (1.5% total), tightened toward reward thresholds when eligible. Earns 20-25% of taker fees as maker rebates.
-- **Fill simulation** — In dry-run mode, fills are checked at the start of each cycle by comparing the latest scanner price against quotes placed in the previous cycle. This gives the market a full cycle to move, avoiding the false-negative of checking same-cycle prices.
-- **Inventory skew** — Linear skew proportional to net delta: when long YES, widens the ask and tightens the bid to encourage rebalancing. Hard limit of $50 net exposure per market.
-- **Heartbeat** — Sends heartbeat every 5s (Polymarket cancels all orders if no heartbeat within 10s).
-- **Volatility circuit breaker** — If any market moves >15% in 15 minutes, all quotes in that market are cancelled and it's blacklisted for 1 hour.
-
-Revenue sources: spread capture + maker rebates (20-25% of taker fees, daily) + liquidity rewards (quadratic scoring, daily) + holding rewards (4% APY).
-
-### Strategy 4: Mean Reversion (every 2 min, opt-in)
-
-Detects markets where price has moved >7.5% over a sliding window and takes a contrarian position betting on partial reversion. Markets tend to overreact to news — this strategy captures the correction. The "Big Moves Only" filter ensures only high-edge moves are traded — production data shows 71% win rate on 7.5%+ moves vs 32% on smaller moves.
-
-- **Sliding window detection** — Maintains a sliding window of the last 5 price snapshots per market (~10 minutes at 2-min intervals). Compares current price against the min and max over the window, catching gradual moves that single-snapshot comparison would miss.
-- **Price history scanner** — Every 3 minutes, fetches 2-hour price history (via CLOB API) for the top 600 high-volume markets in parallel (asyncio.gather with 50-concurrent semaphore). Detects big moves the sliding window missed and injects them as synthetic snapshots.
-- **Contrarian entry** — Price spiked UP from recent low → buy NO (bet on reversion down). Price dropped from recent high → buy YES (bet on reversion up).
-- **Edge estimation** — Expected edge = move magnitude × reversion fraction (default 40%). Only triggers on moves >7.5% with minimum expected reversion >3%.
-- **Custom exit targets** — Take-profit when 40% of the move reverts; stop-loss if price extends 25% further in the overreaction direction; time-stop at 24 hours.
-- **Cooldown** — 6h per-market cooldown prevents chasing the same overreaction.
-- **Conviction stacking** — When cross-venue arbitrage has a concurrent position on the same market, position size is boosted 1.5x (two independent signals agreeing = higher confidence).
-
-Sizing: Kelly (0.35x), max 15% bankroll per position, max 5 concurrent mean-reversion positions.
-
-### Strategy 5: Cross-Venue Arbitrage (every 5 min, opt-in)
-
-Compares Polymarket prices against sportsbook consensus from The Odds API (FanDuel, DraftKings, BetMGM, and others). When Polymarket diverges by >3% from the sportsbook consensus, enters a trade toward the sportsbook price. The edge is structural — traditional sportsbooks have 100-1000x more liquidity and more sophisticated pricing models.
-
-- **Multi-book consensus** — Averages devigged implied probabilities across 5+ major sportsbooks for a robust "true probability" estimate.
-- **Polymarket included** — The Odds API includes Polymarket as a bookmaker in its `us_ex` region, so event matching between venues is handled upstream.
-- **Sports coverage** — NBA, NHL, EPL, Champions League (configurable via `CV_SPORTS`).
-- **Conviction stacking** — When mean reversion also has a position on the same market, position size is boosted 1.5x.
-
-Sizing: Quarter-Kelly (0.25x), max 15% bankroll per position, 12h per-event cooldown.
-
-### Strategy 6: Arbitrage Scanner (every 45s, disabled)
-
-Detects mathematically provable mispricings between related markets. Currently disabled — the exhaustive group detection logic has been hardened with a 3-check validation heuristic (probability sum within 0.85-1.15, same resolution time within 1h, common question prefix ≥40%) to prevent false positives from cosmetic API groupings. Will be re-enabled once bankroll grows past the $2K gate.
+The following strategies exist in the codebase but are currently disabled: **Ensemble Forecast** (LLM-based multi-model probability estimation), **Market Making** (two-sided quoting for spread capture and maker rebates), **Mean Reversion** (contrarian entry after price overreactions), **Cross-Venue Arbitrage** (Polymarket vs. sportsbook consensus), and **Arbitrage Scanner** (related-market mispricing detection). They can be re-enabled via their respective `_ENABLED` environment variables, but the current focus is on the two strategies with the clearest, most defensible edge.
 
 ## Architecture
 
@@ -109,9 +55,9 @@ Single Python async process (`asyncio`). Each strategy runs as an independent co
 ```
 polybot/
 ├── core/           # Engine orchestrator, configuration
-├── strategies/     # Strategy framework + snipe, forecast, market_maker, mean_reversion, cross_venue, arbitrage
+├── strategies/     # Strategy framework + snipe, political, forecast, market_maker, mean_reversion, cross_venue, arbitrage
 ├── markets/        # Polymarket API client (Gamma + CLOB), filters, WebSocket hub, price history scanner
-├── analysis/       # LLM ensemble, quant signals, web research, pre-scoring, odds client
+├── analysis/       # LLM ensemble, quant signals, web research, pre-scoring, odds client, calibration
 ├── trading/        # Kelly sizing, risk management, order execution, CLOB gateway, fees, inventory, quotes
 ├── learning/       # Brier calibration, category tracking, self-assessment, per-trade learning
 ├── notifications/  # Email alerts (Resend) — trade events, daily reports
@@ -132,12 +78,12 @@ polybot/
 
 Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
-| Rule | Snipe | Forecast | Market Maker | Mean Reversion | Cross-Venue |
-|------|-------|----------|-------------|----------------|-------------|
-| Kelly multiplier | 0.50x (+ tiered edge scaling) | 0.20x | 0.15x | 0.35x | 0.25x |
-| Max single position | 25% | 15% | 10% | 15% | 15% |
-| Max per market (cumulative) | 30% | 1 position | `mm_max_inventory` ($50) | 1 position | 1 per event |
-| Max concurrent (strategy) | — | — | 8 markets | 5 | — |
+| Rule | Snipe | Political Calibration |
+|------|-------|----------------------|
+| Kelly multiplier | 0.50x (+ tiered edge scaling) | 0.40x |
+| Max single position | 25% | 20% |
+| Max per market (cumulative) | 30% | 1 position |
+| Max concurrent (strategy) | — | 5 |
 
 | Rule | Default |
 |------|---------|
@@ -158,17 +104,17 @@ Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
 **Edge skepticism**: Large edges (>7%) are progressively discounted — a 30%+ claimed edge gets only 30% of normal sizing, since extreme edges are more likely LLM miscalibration than genuine alpha.
 
-## LLM ensemble
+## LLM usage
 
-Three models run concurrently for full forecast analysis:
+**Political Calibration uses no LLMs.** The edge is structural — derived from the known logit-space calibration slope (1.31) applied to market prices — not from predicting outcomes. No model calls are made in the political strategy's hot path.
+
+**Resolution Sniping** uses LLMs only for tier verification when sportsbook odds data is unavailable:
 
 | Model | Role | Cost (in/out per MTok) |
 |-------|------|-----------------------|
-| Claude Haiku 4.5 | Calibrated probability estimates | $0.80 / $4.00 |
-| GPT-5.4-mini | Broad knowledge, strong reasoning | $0.75 / $4.50 |
-| Gemini 3 Flash | Fast screening + diverse training data | $0.50 / $3.00 |
+| Gemini 3 Flash | Tier 1/2/3 snipe verification fallback | $0.50 / $3.00 |
 
-Gemini 3 Flash also serves as the screening model for resolution sniping and the pre-ensemble quick screen gate. Snipe candidates use tier-appropriate LLM guards: Tier 1 candidates >12h and Tier 2 candidates >48h are rejected without an LLM call. Total LLM costs ~$2-3/day.
+Snipe candidates use tier-appropriate LLM guards: Tier 1 candidates >12h and Tier 2 candidates >48h are rejected without an LLM call. Sportsbook consensus (instant, free) is always tried first. Total LLM costs are minimal — well under $1/day with the two-strategy focus.
 
 ## Adaptive learning
 
@@ -300,18 +246,20 @@ KELLY_MULT=0.25
 EDGE_THRESHOLD=0.07
 SCAN_INTERVAL_SECONDS=300
 
-# Market Making (opt-in, supports dry-run simulation)
-MM_ENABLED=false
-MM_QUOTE_SIZE_USD=10.0
-MM_MAX_MARKETS=8
+# Political Calibration Strategy (active)
+POL_ENABLED=true
+POL_KELLY_MULT=0.40           # Half-Kelly
+POL_MAX_POSITION_PCT=0.20     # Max 20% of bankroll per position
+POL_MAX_CONCURRENT=5          # Max concurrent political positions
+POL_MIN_EDGE=0.04             # Min calibration-adjusted edge to trade (4%)
+POL_SCAN_INTERVAL_SECONDS=600 # 10-minute scan cycle
 
-# Mean Reversion (opt-in)
-MR_ENABLED=false
-MR_TRIGGER_THRESHOLD=0.075
-
-# Cross-Venue Arbitrage (opt-in, requires The Odds API key)
-CV_ENABLED=false
-ODDS_API_KEY=                 # Free at https://the-odds-api.com/
+# Disabled strategies (can be re-enabled individually)
+MM_ENABLED=false              # Market Making
+MR_ENABLED=false              # Mean Reversion
+CV_ENABLED=false              # Cross-Venue Arbitrage
+FORECAST_ENABLED=false        # Ensemble Forecast
+ODDS_API_KEY=                 # Required for CV_ENABLED (https://the-odds-api.com/)
 ```
 
 ### Database setup
@@ -413,18 +361,16 @@ uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 
 ## Key design decisions
 
-- **Multi-strategy architecture** — Six strategies run at different frequencies (5s/60s/2min/5min/5min/45s) because different edge types have different time sensitivities. A single loop would bottleneck market making behind slow LLM calls.
+- **Focus beats diversification on Polymarket** — At micro-scale bankrolls, spreading across six strategies dilutes attention and capital without proportional edge gain. The two active strategies (snipe + political) have clearly defensible, structurally-grounded edges. The disabled strategies are preserved for future re-evaluation when bankroll and evidence warrant it.
+- **Structural edge over predictive edge** — Political Calibration requires no outcome prediction. It exploits a documented, academically-validated calibration bias (logit slope 1.31) that exists regardless of which way a market resolves. This makes the edge more durable and less dependent on model quality.
 - **Anti-anchoring** — LLMs never see the market price when estimating probability. This prevents them from simply parroting the market consensus.
 - **Category-aware fee model** — Edge calculations use Polymarket's actual fee formula (`feeRate * p * (1-p)`) with per-category rates, not a flat 2%. All orders default to `post_only=True` (maker status, 0% fees). This dramatically improves edge accuracy at extreme prices where the old flat rate overestimated fees by 10x.
-- **Strategy-specific Kelly** — Full Kelly for mathematically certain arb (0.80x), half for near-certain snipes (0.50x), quarter for uncertain forecasts and cross-venue (0.25x), third for mean reversion (0.35x). This maximizes compounding on the highest-confidence trades.
-- **Conviction stacking** — When multiple independent strategies agree on the same market direction, position size is boosted by 1.5x per confirming signal (capped at 3.0x). Two uncorrelated signals pointing the same way means higher confidence → larger bet.
-- **Cross-venue price discovery** — The Odds API provides sportsbook consensus from FanDuel, DraftKings, BetMGM, and others. When Polymarket diverges from the deep-liquidity sportsbook consensus, the bot trades toward the sportsbook price — a structural edge backed by markets with 100-1000x more volume.
-- **Dual snipe verification** — Snipe candidates are verified via sportsbook consensus first (instant, free, >85% threshold), falling back to LLM (Gemini Flash) only when odds data isn't available. This makes snipe viable for sports markets without expensive LLM calls.
-- **Tiered LLM funnel** — Most markets are eliminated before any LLM is called. The few that pass get a $0.001 Gemini Flash screen before the $0.15 full ensemble. This cuts LLM costs from ~$10/day to ~$1-2/day.
-- **Portfolio lock, not process lock** — Strategies only hold the asyncio.Lock during the 5ms DB read-check-write window, not during analysis. This means all three strategies analyze markets concurrently.
+- **Strategy-specific Kelly** — Half-Kelly for near-certain snipes (0.50x, tiered), Half-Kelly for structural calibration trades (0.40x). Calibration trades get more aggressive sizing than old forecast (0.20x) because the edge source is structural rather than probabilistic model output.
+- **Dual snipe verification** — Snipe candidates are verified via sportsbook consensus first (instant, free, >85% threshold), falling back to LLM (Gemini Flash) only when odds data isn't available. This keeps snipe viable for sports markets without expensive LLM calls.
+- **Portfolio lock, not process lock** — Strategies only hold the asyncio.Lock during the 5ms DB read-check-write window, not during analysis. This means strategies analyze markets concurrently.
 - **Single process** — At $100-500 bankroll, the bottleneck is edge detection quality, not execution speed. A single async process is the right complexity level.
-- **Market making as a revenue stream** — While the directional strategies (arb, snipe, forecast, cross-venue) capture edge from mispricings, market making earns from spread capture, maker rebates, and liquidity rewards — independent of directional accuracy. This provides stable daily income that compounds bankroll for the other strategies.
-- **WebSocket price streaming** — A central `PriceStreamHub` subscribes to real-time price updates for all monitored tokens, enabling sub-second reaction times for position management and market-making quote adjustments.
+- **Event-tag market categorization** — Political markets are identified via event tags from the Gamma API `/events` endpoint (`politics`, `geopolitics`, `global-elections`, `world`, etc.), not by keyword matching on market titles. This is more reliable and future-proof as Polymarket's tagging is maintained by the platform.
+- **WebSocket price streaming** — A central `PriceStreamHub` subscribes to real-time price updates for all monitored tokens, enabling sub-second reaction times for position management.
 
 ## Disclaimer
 
