@@ -106,6 +106,36 @@ async def test_hourly_kelly_edge_adjust_skips_null_edge():
 
 
 @pytest.mark.asyncio
+async def test_hourly_kelly_edge_adjust_null_exit_price_filtered():
+    """Calibration query filters NULL exit_price; float(None) TypeError must not occur."""
+    engine = make_engine()
+    engine._db.fetchrow = AsyncMock(return_value={
+        "bankroll": 1000.0, "kelly_mult": 0.25, "edge_threshold": 0.05,
+    })
+    # Build 20 resolved rows with valid (non-NULL) outcome values — simulating the
+    # post-fix behaviour where AND t.exit_price IS NOT NULL keeps NULLs out.
+    valid_resolved = [
+        {"ensemble_probability": 0.6 + i * 0.01, "outcome": 1.0}
+        for i in range(20)
+    ]
+    engine._db.fetch = AsyncMock(side_effect=[
+        [{"pnl": 2.0}, {"pnl": -1.0}],   # trades for drawdown
+        [{"edge": 0.07, "pnl": 1.5}],     # edge_trades for bucketing
+        valid_resolved,                    # resolved — all have non-NULL outcome
+    ])
+    engine._db.execute = AsyncMock()
+
+    # Should complete without TypeError — previously float(None) would have raised here
+    await engine._hourly_kelly_edge_adjust()
+
+    # The final UPDATE must have been called (kelly + edge written back)
+    calls = [str(c) for c in engine._db.execute.call_args_list]
+    assert any("kelly_mult" in c for c in calls), (
+        "Expected UPDATE system_state SET kelly_mult to be called"
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_strategy_disables_after_consecutive_errors(monkeypatch):
     # Patch asyncio.sleep to be instant during backoff
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())

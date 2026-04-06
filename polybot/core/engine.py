@@ -386,7 +386,8 @@ class Engine:
             """SELECT a.ensemble_probability, t.exit_price as outcome
                FROM trades t JOIN analyses a ON t.analysis_id = a.id
                WHERE t.status IN ('closed', 'dry_run_resolved')
-                 AND t.closed_at > NOW() - INTERVAL '30 days'""")
+                 AND t.closed_at > NOW() - INTERVAL '30 days'
+                 AND t.exit_price IS NOT NULL""")
         if len(resolved) >= 20:
             import json
             from polybot.learning.calibration import compute_calibration_correction
