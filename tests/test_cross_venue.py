@@ -210,3 +210,59 @@ async def test_run_once_skips_penny_odds():
 
     await strategy.run_once(ctx)
     ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_once_trades_mid_range_divergence():
+    """Should place a trade when divergence is real and buy_price >= cv_min_implied_prob."""
+    s = _make_settings()
+    s.cv_min_implied_prob = 0.10
+    odds_client = MagicMock()
+    # FanDuel ~54% Nuggets, Polymarket ~47% Nuggets — ~7% divergence, mid-range price
+    odds_client.fetch_all_sports = AsyncMock(return_value=[
+        {"id": "evt2", "sport_key": "basketball_nba",
+         "home_team": "Denver Nuggets", "away_team": "Phoenix Suns",
+         "commence_time": "2026-04-06T00:00:00Z",
+         "bookmakers": [
+             {"key": "fanduel", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Denver Nuggets", "price": -130},
+                 {"name": "Phoenix Suns", "price": 110}]}]},
+             {"key": "polymarket", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Denver Nuggets", "price": 110},
+                 {"name": "Phoenix Suns", "price": -130}]}]},
+         ]}
+    ])
+
+    strategy = CrossVenueStrategy(settings=s, odds_client=odds_client)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(side_effect=[
+        True,   # enabled check
+        1,      # market upsert RETURNING id
+        1,      # analysis insert RETURNING id
+    ])
+    ctx.db.fetchrow = AsyncMock(return_value={
+        "bankroll": 500.0, "total_deployed": 50.0, "daily_pnl": 0.0,
+        "post_breaker_until": None, "circuit_breaker_until": None,
+    })
+    ctx.db.fetch = AsyncMock(return_value=[
+        {"position_size_usd": 10, "category": "sports"},
+    ])
+    ctx.executor = AsyncMock()
+    ctx.executor.place_order = AsyncMock(return_value={"order_id": "test123"})
+    ctx.settings = s
+    ctx.risk_manager = RiskManager()
+    ctx.scanner = MagicMock()
+    ctx.scanner.get_all_cached_prices.return_value = {
+        "m1": {"polymarket_id": "0xdef", "question": "Will the Denver Nuggets win?",
+               "yes_price": 0.45, "category": "sports", "book_depth": 5000,
+               "resolution_time": datetime.now(timezone.utc) + timedelta(days=2),
+               "volume_24h": 50000,
+               "yes_token_id": "tok3", "no_token_id": "tok4"},
+    }
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_called_once()
