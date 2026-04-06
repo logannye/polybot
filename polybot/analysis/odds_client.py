@@ -175,6 +175,11 @@ class OddsClient:
 
     async def fetch_all_sports(self) -> list[dict]:
         """Fetch odds for all configured sports."""
+        if (self._credits_remaining is not None
+                and self._credits_remaining <= self._credit_reserve):
+            log.info("odds_credits_exhausted", credits_remaining=self._credits_remaining,
+                     credit_reserve=self._credit_reserve)
+            return []
         all_events = []
         for sport in self._sports:
             events = await self.fetch_odds(sport)

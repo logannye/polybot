@@ -187,3 +187,16 @@ class TestOddsClientCreditGuard:
 
         assert result == []
         client._session.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_all_sports_short_circuits_on_zero_credits(self):
+        """When credits are already 0, fetch_all_sports should return [] immediately."""
+        client = OddsClient(api_key="test-key", sports=["nba", "nhl", "epl"])
+        client._session = MagicMock()
+        client._credits_remaining = 0
+
+        with patch.object(client, 'fetch_odds', new_callable=AsyncMock) as mock_fetch:
+            result = await client.fetch_all_sports()
+
+        assert result == []
+        mock_fetch.assert_not_called()  # should short-circuit before calling fetch_odds
