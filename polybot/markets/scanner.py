@@ -160,8 +160,63 @@ class PolymarketScanner:
                 break
             offset += 100
         self._price_cache = {m["polymarket_id"]: m for m in markets}
+
+        # Enrich markets with event tags (the /markets endpoint doesn't include them)
+        await self._enrich_event_tags(markets)
+
         log.info("scanner_fetched", count=len(markets), source="gamma")
         return markets
+
+    async def _enrich_event_tags(self, markets: list[dict[str, Any]]) -> None:
+        """Fetch events and attach their tags to markets by conditionId.
+
+        The Gamma /markets endpoint returns events without tags.
+        The /events endpoint includes tags. We fetch events in bulk
+        and build a conditionId→tags lookup to enrich the market data.
+        """
+        cid_to_tags: dict[str, list[str]] = {}
+        offset = 0
+        while offset < 5000:
+            status, data = await self._get(
+                f"{GAMMA_BASE_URL}/events",
+                {"limit": 100, "offset": offset, "active": "true", "closed": "false"})
+            if status != 200 or not data:
+                break
+            for event in data:
+                tags_raw = event.get("tags", [])
+                seen: set[str] = set()
+                tag_slugs: list[str] = []
+                for t in tags_raw:
+                    slug = t.get("slug", "").lower().strip()
+                    if slug and slug not in seen:
+                        tag_slugs.append(slug)
+                        seen.add(slug)
+                # Map each child market's conditionId to these tags
+                for child in event.get("markets", []):
+                    cid = child.get("conditionId", "")
+                    if cid:
+                        cid_to_tags[cid] = tag_slugs
+            if len(data) < 100:
+                break
+            offset += 100
+
+        # Apply tags to cached markets
+        enriched = 0
+        for m in markets:
+            tags = cid_to_tags.get(m["polymarket_id"], [])
+            if tags:
+                m["tags"] = tags
+                enriched += 1
+                # Re-derive category from tags
+                for t in tags:
+                    if t in CATEGORY_TAGS:
+                        m["category"] = t
+                        break
+            # Update price cache too
+            if m["polymarket_id"] in self._price_cache:
+                self._price_cache[m["polymarket_id"]] = m
+        if enriched:
+            log.info("event_tags_enriched", markets=enriched, events=len(cid_to_tags))
 
     def get_cached_price(self, polymarket_id: str) -> dict | None:
         return self._price_cache.get(polymarket_id)

@@ -109,7 +109,7 @@ def test_v2_strategy_settings_defaults():
     assert s.min_trade_size == 1.0
     # v5 10x: new strategies
     assert s.mm_enabled is False  # disabled — no real edge at $500 scale
-    assert s.mr_enabled is True
+    assert s.mr_enabled is False  # disabled — not a home-run strategy
     assert s.snipe_cooldown_hours == 1.0     # v5 10x: 4.0 → 1.0
     assert s.snipe_max_entries_per_market == 4  # raised from 2 for convergence
     assert s.snipe_max_market_exposure_pct == 0.30
