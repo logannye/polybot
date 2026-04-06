@@ -111,7 +111,7 @@ def test_v2_strategy_settings_defaults():
     assert s.mm_enabled is True
     assert s.mr_enabled is True
     assert s.snipe_cooldown_hours == 1.0     # v5 10x: 4.0 → 1.0
-    assert s.snipe_max_entries_per_market == 2  # v5 10x: 3 → 2
+    assert s.snipe_max_entries_per_market == 4  # raised from 2 for convergence
     assert s.snipe_max_market_exposure_pct == 0.30
     assert not hasattr(s, "twilio_account_sid")
     assert not hasattr(s, "alert_phone")
@@ -134,6 +134,6 @@ def test_v2_bankroll_tier_settings():
         os.environ[k] = v
     s = Settings()
     assert s.bankroll_survival_threshold == 50.0
-    assert s.bankroll_growth_threshold == 500.0
+    assert s.bankroll_growth_threshold == 1000.0  # raised to stay aggressive during compounding
     assert s.post_breaker_cooldown_hours == 24
     assert s.post_breaker_kelly_reduction == 0.50
