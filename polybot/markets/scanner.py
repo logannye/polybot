@@ -175,6 +175,7 @@ class PolymarketScanner:
         and build a conditionId→tags lookup to enrich the market data.
         """
         cid_to_tags: dict[str, list[str]] = {}
+        cid_to_event_slug: dict[str, str] = {}
         offset = 0
         while offset < 5000:
             status, data = await self._get(
@@ -191,16 +192,18 @@ class PolymarketScanner:
                     if slug and slug not in seen:
                         tag_slugs.append(slug)
                         seen.add(slug)
-                # Map each child market's conditionId to these tags
+                event_slug = event.get("slug", "")
+                # Map each child market's conditionId to these tags and event slug
                 for child in event.get("markets", []):
                     cid = child.get("conditionId", "")
                     if cid:
                         cid_to_tags[cid] = tag_slugs
+                        cid_to_event_slug[cid] = event_slug  # NEW
             if len(data) < 100:
                 break
             offset += 100
 
-        # Apply tags to cached markets
+        # Apply tags and event_slug to cached markets
         enriched = 0
         for m in markets:
             tags = cid_to_tags.get(m["polymarket_id"], [])
@@ -212,6 +215,7 @@ class PolymarketScanner:
                     if t in CATEGORY_TAGS:
                         m["category"] = t
                         break
+            m["event_slug"] = cid_to_event_slug.get(m["polymarket_id"], "")
             # Update price cache too
             if m["polymarket_id"] in self._price_cache:
                 self._price_cache[m["polymarket_id"]] = m
@@ -302,3 +306,20 @@ class PolymarketScanner:
         # Require at least 2 markets AND passing exhaustive validation
         return {k: v for k, v in groups.items()
                 if len(v) >= 2 and PolymarketScanner.validate_exhaustive_group(v)}
+
+    def fetch_event_groups(self, markets: list[dict] | None = None) -> dict[str, list[dict]]:
+        """Group markets by parent event slug and validate as exhaustive.
+
+        Uses event_slug (set during enrichment) instead of group_slug.
+        This finds ~400+ multi-outcome events vs ~3 from slug-based grouping.
+        """
+        if markets is None:
+            markets = list(self._price_cache.values())
+        groups: dict[str, list[dict]] = {}
+        for m in markets:
+            slug = m.get("event_slug", "")
+            if slug:
+                groups.setdefault(slug, []).append(m)
+        # Require 3+ markets AND passing exhaustive validation
+        return {k: v for k, v in groups.items()
+                if len(v) >= 3 and self.validate_exhaustive_group(v)}

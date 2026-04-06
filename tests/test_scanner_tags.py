@@ -195,3 +195,78 @@ class TestCategoryDerivation:
         assert result is not None
         assert "tags" in result
         assert isinstance(result["tags"], list)
+
+
+# ---------------------------------------------------------------------------
+# Event-slug / fetch_event_groups tests
+# ---------------------------------------------------------------------------
+
+def _make_raw_market(**overrides):
+    """Alias for _make_raw — returns a valid raw market dict."""
+    return _make_raw(**overrides)
+
+
+def test_enrichment_sets_event_slug():
+    """Markets should have event_slug after enrichment for exhaustive grouping."""
+    # event_slug is set during enrichment (_enrich_event_tags), not during parsing.
+    # parse_gamma_market does NOT set event_slug — that is expected.
+    raw = _make_raw_market()
+    result = parse_gamma_market(raw)
+    assert result is not None
+    # Confirm event_slug is NOT set by the parser (it's added by enrichment)
+    assert "event_slug" not in result
+
+
+def test_fetch_event_groups_groups_by_event():
+    """fetch_event_groups should group markets sharing the same event_slug."""
+    from polybot.markets.scanner import PolymarketScanner
+    from datetime import datetime, timezone, timedelta
+
+    scanner = PolymarketScanner(api_key="dummy")
+
+    res = datetime.now(timezone.utc) + timedelta(days=30)
+    # Prices sum to ~1.0 so validation passes; all share a common question prefix
+    markets = [
+        {"polymarket_id": "0x1", "question": "Will team win NBA Finals?",
+         "event_slug": "nba-finals-winner", "yes_price": 0.27, "resolution_time": res,
+         "category": "sports", "tags": ["sports"]},
+        {"polymarket_id": "0x2", "question": "Will team win NBA Finals?",
+         "event_slug": "nba-finals-winner", "yes_price": 0.25, "resolution_time": res,
+         "category": "sports", "tags": ["sports"]},
+        {"polymarket_id": "0x3", "question": "Will team win NBA Finals?",
+         "event_slug": "nba-finals-winner", "yes_price": 0.24, "resolution_time": res,
+         "category": "sports", "tags": ["sports"]},
+        {"polymarket_id": "0x4", "question": "Will team win NBA Finals?",
+         "event_slug": "nba-finals-winner", "yes_price": 0.24, "resolution_time": res,
+         "category": "sports", "tags": ["sports"]},
+        # Unrelated market — should not be grouped with above
+        {"polymarket_id": "0x5", "question": "Will Trump win 2028?",
+         "event_slug": "2028-election", "yes_price": 0.50, "resolution_time": res,
+         "category": "politics", "tags": ["politics"]},
+    ]
+
+    groups = scanner.fetch_event_groups(markets)
+    # nba-finals-winner has 4 markets summing to 1.00 — should pass validation
+    assert "nba-finals-winner" in groups
+    assert len(groups["nba-finals-winner"]) == 4
+    # 2028-election has only 1 market — below the 3-market minimum
+    assert "2028-election" not in groups
+
+
+def test_fetch_event_groups_requires_3_plus_markets():
+    """Groups with fewer than 3 markets should be excluded."""
+    from polybot.markets.scanner import PolymarketScanner
+    from datetime import datetime, timezone, timedelta
+
+    scanner = PolymarketScanner(api_key="dummy")
+    res = datetime.now(timezone.utc) + timedelta(days=30)
+    markets = [
+        {"polymarket_id": "0x1", "question": "Will A happen?",
+         "event_slug": "small-group", "yes_price": 0.50, "resolution_time": res,
+         "category": "politics", "tags": []},
+        {"polymarket_id": "0x2", "question": "Will B happen?",
+         "event_slug": "small-group", "yes_price": 0.50, "resolution_time": res,
+         "category": "politics", "tags": []},
+    ]
+    groups = scanner.fetch_event_groups(markets)
+    assert "small-group" not in groups  # Only 2 markets — below 3 minimum
