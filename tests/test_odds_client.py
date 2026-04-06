@@ -1,5 +1,8 @@
 import pytest
+import aiohttp
+from unittest.mock import AsyncMock, MagicMock, patch
 from polybot.analysis.odds_client import (
+    OddsClient,
     american_to_prob, devig, compute_consensus,
     find_polymarket_prices, find_divergences,
 )
@@ -157,3 +160,30 @@ class TestFindDivergences:
         }]
         divs = find_divergences(events, min_divergence=0.03)
         assert len(divs) == 0
+
+
+class TestOddsClientCreditGuard:
+    @pytest.mark.asyncio
+    async def test_fetch_odds_stops_when_credits_exhausted(self):
+        """When credits_remaining == 0, fetch_odds returns [] without HTTP call."""
+        client = OddsClient(api_key="test-key")
+        client._session = MagicMock()  # session is set so the session check passes
+        client._credits_remaining = 0
+
+        result = await client.fetch_odds("basketball_nba")
+
+        assert result == []
+        # Verify no HTTP request was made
+        client._session.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fetch_odds_stops_below_reserve(self):
+        """When credits_remaining (5) is below credit_reserve (10), returns [] without HTTP call."""
+        client = OddsClient(api_key="test-key", credit_reserve=10)
+        client._session = MagicMock()
+        client._credits_remaining = 5
+
+        result = await client.fetch_odds("basketball_nba")
+
+        assert result == []
+        client._session.get.assert_not_called()

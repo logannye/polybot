@@ -119,11 +119,13 @@ class OddsClient:
 
     BASE_URL = "https://api.the-odds-api.com/v4"
 
-    def __init__(self, api_key: str, sports: list[str] | None = None):
+    def __init__(self, api_key: str, sports: list[str] | None = None,
+                 credit_reserve: int = 10):
         self._api_key = api_key
         self._sports = sports or DEFAULT_SPORTS
         self._session: aiohttp.ClientSession | None = None
         self._credits_remaining: int | None = None
+        self._credit_reserve = credit_reserve
 
     async def start(self):
         self._session = aiohttp.ClientSession()
@@ -135,6 +137,12 @@ class OddsClient:
     async def fetch_odds(self, sport_key: str) -> list[dict]:
         """Fetch odds for a sport. Costs 2 credits (1 market × 2 regions)."""
         if not self._session or not self._api_key:
+            return []
+
+        if (self._credits_remaining is not None
+                and self._credits_remaining <= self._credit_reserve):
+            log.warning("odds_api_credits_low", credits_remaining=self._credits_remaining,
+                        credit_reserve=self._credit_reserve)
             return []
 
         url = f"{self.BASE_URL}/sports/{sport_key}/odds/"
