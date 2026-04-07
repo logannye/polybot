@@ -200,3 +200,25 @@ class TestOddsClientCreditGuard:
 
         assert result == []
         mock_fetch.assert_not_called()  # should short-circuit before calling fetch_odds
+
+
+class TestOddsClientCreditsExhausted:
+    def test_exhausted_when_zero(self):
+        client = OddsClient(api_key="test", sports=[])
+        client._credits_remaining = 0
+        assert client.credits_exhausted is True
+
+    def test_exhausted_when_at_reserve(self):
+        client = OddsClient(api_key="test", sports=[], credit_reserve=10)
+        client._credits_remaining = 10
+        assert client.credits_exhausted is True
+
+    def test_not_exhausted_when_above_reserve(self):
+        client = OddsClient(api_key="test", sports=[], credit_reserve=10)
+        client._credits_remaining = 50
+        assert client.credits_exhausted is False
+
+    def test_not_exhausted_when_unknown(self):
+        """Before any API call, credits_remaining is None — should not be treated as exhausted."""
+        client = OddsClient(api_key="test", sports=[])
+        assert client.credits_exhausted is False

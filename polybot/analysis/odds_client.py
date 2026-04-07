@@ -139,8 +139,7 @@ class OddsClient:
         if not self._session or not self._api_key:
             return []
 
-        if (self._credits_remaining is not None
-                and self._credits_remaining <= self._credit_reserve):
+        if self.credits_exhausted:
             log.warning("odds_api_credits_low", credits_remaining=self._credits_remaining,
                         credit_reserve=self._credit_reserve)
             return []
@@ -175,8 +174,7 @@ class OddsClient:
 
     async def fetch_all_sports(self) -> list[dict]:
         """Fetch odds for all configured sports."""
-        if (self._credits_remaining is not None
-                and self._credits_remaining <= self._credit_reserve):
+        if self.credits_exhausted:
             log.info("odds_credits_exhausted", credits_remaining=self._credits_remaining,
                      credit_reserve=self._credit_reserve)
             return []
@@ -191,3 +189,9 @@ class OddsClient:
     @property
     def credits_remaining(self) -> int | None:
         return self._credits_remaining
+
+    @property
+    def credits_exhausted(self) -> bool:
+        """True when credits are known to be at or below the reserve threshold."""
+        return (self._credits_remaining is not None
+                and self._credits_remaining <= self._credit_reserve)
