@@ -1,7 +1,7 @@
 """Tests for ESPN scoreboard client — parse_espn_scoreboard()."""
 
 import pytest
-from polybot.analysis.espn_client import parse_espn_scoreboard
+from polybot.analysis.espn_client import parse_espn_scoreboard, SPORT_URLS
 
 
 def _make_competitor(home_away: str, display_name: str, abbreviation: str, score: str) -> dict:
@@ -240,3 +240,18 @@ class TestParseEspnScoreboardIncludesFinal:
         """Missing events key returns empty list without error."""
         games = parse_espn_scoreboard({}, "nhl")
         assert games == []
+
+
+class TestSportURLs:
+    def test_original_sports_present(self):
+        assert "mlb" in SPORT_URLS
+        assert "nba" in SPORT_URLS
+        assert "nhl" in SPORT_URLS
+
+    def test_ncaab_present(self):
+        assert "ncaab" in SPORT_URLS
+        assert "college-basketball" in SPORT_URLS["ncaab"]
+
+    def test_soccer_leagues_present(self):
+        for league in ["ucl", "epl", "laliga", "bundesliga", "mls"]:
+            assert league in SPORT_URLS, f"{league} missing from SPORT_URLS"

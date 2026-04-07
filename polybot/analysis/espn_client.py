@@ -9,6 +9,12 @@ SPORT_URLS: dict[str, str] = {
     "mlb": "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
     "nba": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
     "nhl": "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard",
+    "ncaab": "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard",
+    "ucl": "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard",
+    "epl": "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard",
+    "laliga": "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard",
+    "bundesliga": "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard",
+    "mls": "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard",
 }
 
 # ESPN status names that should be included (non-scheduled)
