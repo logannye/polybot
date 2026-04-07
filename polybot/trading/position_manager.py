@@ -45,6 +45,8 @@ class ActivePositionManager:
         self._email = email_notifier
         self._take_profit = settings.take_profit_threshold
         self._stop_loss = settings.stop_loss_threshold
+        _fsl = getattr(settings, 'forecast_stop_loss_threshold', None)
+        self._forecast_stop_loss = float(_fsl) if isinstance(_fsl, (int, float)) else self._stop_loss
         self._early_exit_edge = settings.early_exit_edge
         self._forecast_time_stop_floor = getattr(settings, 'forecast_time_stop_minutes', 20.0)
         self._forecast_time_stop_fraction = getattr(settings, 'forecast_time_stop_fraction', 0.10)
@@ -283,8 +285,9 @@ class ActivePositionManager:
             strategy = pos["strategy"]
             tp_threshold = learned_thresholds.get(strategy, {}).get(
                 "take_profit_threshold", self._take_profit)
+            base_sl = self._forecast_stop_loss if strategy == "forecast" else self._stop_loss
             sl_threshold = learned_thresholds.get(strategy, {}).get(
-                "stop_loss_threshold", self._stop_loss)
+                "stop_loss_threshold", base_sl)
 
             if should_take_profit(side, entry_price, current_yes_price,
                                    tp_threshold):

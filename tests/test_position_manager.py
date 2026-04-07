@@ -1002,3 +1002,54 @@ async def test_political_trades_still_take_profit():
 
     executor.exit_position.assert_called_once_with(
         trade_id=202, exit_price=0.625, exit_reason="take_profit")
+
+
+class TestPerStrategyStopLoss:
+    def test_forecast_uses_tighter_stop(self):
+        """Forecast should use its own stop-loss threshold (0.10), not global (0.15)."""
+        assert should_cut_loss("YES", 0.50, 0.44, threshold=0.10) is True
+        assert should_cut_loss("YES", 0.50, 0.44, threshold=0.15) is False
+
+    def test_non_forecast_uses_global_stop(self):
+        """Non-forecast strategies should still use the global threshold."""
+        assert should_cut_loss("YES", 0.50, 0.40, threshold=0.15) is True
+
+
+@pytest.mark.asyncio
+async def test_forecast_position_uses_forecast_stop_loss():
+    """Forecast positions should use forecast_stop_loss_threshold from settings."""
+    db = AsyncMock()
+    db.fetch = AsyncMock(return_value=[{
+        "id": 1, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
+        "polymarket_id": "mkt-1", "question": "Test market?",
+        "ensemble_probability": 0.65,
+        "resolution_time": None, "opened_at": None, "kelly_inputs": None,
+    }])
+    db.fetchval = AsyncMock(return_value=None)
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=-1.20)
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-1": {"yes_price": 0.44}
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.15
+    settings.forecast_stop_loss_threshold = 0.10
+    settings.early_exit_edge = 0.02
+    settings.forecast_time_stop_minutes = 90.0
+    settings.forecast_time_stop_fraction = 0.15
+    settings.forecast_time_stop_max_minutes = 480.0
+    settings.forecast_time_stop_min_resolution_hours = 48.0
+    settings.snipe_max_hold_hours = 6.0
+
+    pm = ActivePositionManager(db, executor, scanner, AsyncMock(), settings)
+    await pm.check_positions()
+
+    executor.exit_position.assert_called_once()
+    call_kwargs = executor.exit_position.call_args[1]
+    assert call_kwargs["exit_reason"] == "stop_loss"

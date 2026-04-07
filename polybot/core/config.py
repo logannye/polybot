@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     # Active position management
     take_profit_threshold: float = 0.20
     stop_loss_threshold: float = 0.15
+    forecast_stop_loss_threshold: float = 0.10  # tighter stop for forecast (data: avg loss was -35% at 0.15)
     position_check_interval: int = 60
 
     # Snipe tier 2/3 LLM guard
