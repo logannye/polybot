@@ -1,4 +1,4 @@
-"""Win probability model for NBA, MLB, and NHL games.
+"""Win probability model for NBA, MLB, NHL, NCAAB, and soccer games.
 
 Pure functions mapping score lead + game clock position to win probability.
 Uses empirical scaling coefficients derived from historical sports data.
@@ -12,6 +12,13 @@ TOTAL_PERIODS: dict[str, int] = {
     "nba": 4,
     "mlb": 9,
     "nhl": 3,
+    "ncaab": 2,
+    "soccer": 2,
+    "ucl": 2,
+    "epl": 2,
+    "laliga": 2,
+    "bundesliga": 2,
+    "mls": 2,
 }
 
 
@@ -37,7 +44,7 @@ def compute_win_probability(
     """
     sport_key = sport.lower()
 
-    if sport_key not in ("nba", "mlb", "nhl"):
+    if sport_key not in _SPORT_MODELS:
         return None
 
     if completed:
@@ -50,12 +57,7 @@ def compute_win_probability(
 
     game_progress = min(period / total_periods, 1.0)
 
-    if sport_key == "nba":
-        return _nba_win_prob(lead, game_progress)
-    elif sport_key == "mlb":
-        return _mlb_win_prob(lead, game_progress)
-    else:  # nhl
-        return _nhl_win_prob(lead, game_progress)
+    return _SPORT_MODELS[sport_key](lead, game_progress)
 
 
 def _nba_win_prob(lead: int, game_progress: float) -> float:
@@ -102,3 +104,35 @@ def _nhl_win_prob(lead: int, game_progress: float) -> float:
     per_goal = 0.10 + 0.17 * game_progress
     prob = 0.5 + sign * abs_lead * per_goal
     return max(0.01, min(0.99, prob))
+
+
+def _ncaab_win_prob(lead: int, game_progress: float) -> float:
+    """NCAAB: similar to NBA but 2 halves, higher variance."""
+    sign = 1 if lead >= 0 else -1
+    abs_lead = abs(lead)
+    per_point = 0.008 + 0.022 * game_progress
+    prob = 0.5 + sign * abs_lead * per_point
+    return max(0.01, min(0.99, prob))
+
+
+def _soccer_win_prob(lead: int, game_progress: float) -> float:
+    """Soccer: goals are rare and decisive. Each goal worth 15-30%."""
+    sign = 1 if lead >= 0 else -1
+    abs_lead = abs(lead)
+    per_goal = 0.15 + 0.15 * game_progress
+    prob = 0.5 + sign * abs_lead * per_goal
+    return max(0.01, min(0.99, prob))
+
+
+_SPORT_MODELS = {
+    "nba": _nba_win_prob,
+    "mlb": _mlb_win_prob,
+    "nhl": _nhl_win_prob,
+    "ncaab": _ncaab_win_prob,
+    "soccer": _soccer_win_prob,
+    "ucl": _soccer_win_prob,
+    "epl": _soccer_win_prob,
+    "laliga": _soccer_win_prob,
+    "bundesliga": _soccer_win_prob,
+    "mls": _soccer_win_prob,
+}

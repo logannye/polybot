@@ -50,6 +50,38 @@ class TestNHLWinProbability:
         assert 0.75 <= wp <= 0.92
 
 
+class TestNCAABWinProbability:
+    def test_blowout_second_half(self):
+        wp = compute_win_probability(sport="ncaab", lead=20, period=2, total_periods=2)
+        assert wp >= 0.97
+
+    def test_close_game_second_half(self):
+        wp = compute_win_probability(sport="ncaab", lead=3, period=2, total_periods=2)
+        assert 0.55 <= wp <= 0.75
+
+    def test_halftime_lead(self):
+        wp = compute_win_probability(sport="ncaab", lead=10, period=1, total_periods=2)
+        assert 0.65 <= wp <= 0.85
+
+
+class TestSoccerWinProbability:
+    def test_two_goal_lead_second_half(self):
+        wp = compute_win_probability(sport="soccer", lead=2, period=2, total_periods=2)
+        assert wp >= 0.90
+
+    def test_one_goal_lead_second_half(self):
+        wp = compute_win_probability(sport="soccer", lead=1, period=2, total_periods=2)
+        assert 0.65 <= wp <= 0.85
+
+    def test_one_goal_lead_first_half(self):
+        wp = compute_win_probability(sport="soccer", lead=1, period=1, total_periods=2)
+        assert 0.55 <= wp <= 0.75
+
+    def test_tied_game(self):
+        wp = compute_win_probability(sport="soccer", lead=0, period=1, total_periods=2)
+        assert 0.45 <= wp <= 0.55
+
+
 class TestEdgeCases:
     def test_completed_game_winner(self):
         wp = compute_win_probability(sport="nba", lead=10, period=4, total_periods=4, completed=True)
