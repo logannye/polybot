@@ -72,6 +72,9 @@ async def _run_bot_tasks(engine_fn, dashboard_fn, shutdown_event: asyncio.Event)
 async def main():
     settings = Settings()
     log.info("polybot_starting", bankroll=settings.starting_bankroll)
+    odds_client = None
+    espn_client = None
+    _snipe_odds = None
     db = Database(settings.database_url)
     await db.connect()
     exists = await db.fetchval("SELECT COUNT(*) FROM system_state")
@@ -140,7 +143,6 @@ async def main():
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
-    _snipe_odds = None
     if getattr(settings, 'snipe_odds_verification_enabled', False) and getattr(settings, 'odds_api_key', ''):
         if 'odds_client' in dir():
             _snipe_odds = odds_client
@@ -228,8 +230,12 @@ async def main():
                                 for t in open_trades])
         except Exception:
             pass
-        await scanner.close()
-        await researcher.close()
+        for client in [scanner, researcher, odds_client, _snipe_odds, espn_client]:
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
         await db.close()
         log.info("polybot_shutdown_complete")
 
