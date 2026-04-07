@@ -75,7 +75,8 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'fore
 -- v2.5: Expand strategy CHECK for all strategies
 ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_strategy_check;
 ALTER TABLE trades ADD CONSTRAINT trades_strategy_check
-    CHECK (strategy IN ('arbitrage', 'snipe', 'forecast', 'market_maker', 'mean_reversion', 'cross_venue', 'political', 'news_catalyst', 'live_game'));
+    CHECK (strategy IN ('arbitrage', 'snipe', 'forecast', 'market_maker', 'mean_reversion', 'cross_venue', 'political', 'news_catalyst', 'live_game'))
+    NOT VALID;
 
 -- v2: Strategy performance tracking
 CREATE TABLE IF NOT EXISTS strategy_performance (
@@ -116,12 +117,14 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS clob_order_id TEXT;
 ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_status_check;
 ALTER TABLE trades ADD CONSTRAINT trades_status_check
     CHECK (status IN ('open', 'filled', 'partial', 'cancelled', 'closed',
-                      'dry_run', 'dry_run_resolved'));
+                      'dry_run', 'dry_run_resolved'))
+    NOT VALID;
 
 -- v2.3: Expand exit_reason for time-stop and arb TTL exits
 ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_exit_reason_check;
 ALTER TABLE trades ADD CONSTRAINT trades_exit_reason_check
-    CHECK (exit_reason IN ('resolution', 'early_exit', 'stop_loss', 'take_profit', 'time_stop', 'arb_ttl_expired'));
+    CHECK (exit_reason IN ('resolution', 'early_exit', 'stop_loss', 'take_profit', 'time_stop', 'arb_ttl_expired'))
+    NOT VALID;
 
 -- v2.4: Learning system — per-strategy learned parameters
 ALTER TABLE strategy_performance ADD COLUMN IF NOT EXISTS learned_params JSONB NOT NULL DEFAULT '{}';

@@ -20,7 +20,8 @@ class Database:
     async def _apply_schema(self) -> None:
         schema = SCHEMA_PATH.read_text()
         async with self._pool.acquire() as conn:
-            await conn.execute(schema)
+            async with conn.transaction():
+                await conn.execute(schema)
 
     async def close(self) -> None:
         if self._pool:
