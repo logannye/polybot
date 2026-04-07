@@ -143,23 +143,37 @@ class PolymarketScanner:
 
     async def fetch_markets(self) -> list[dict[str, Any]]:
         """Fetch active markets via Gamma API (server-side filtering, ~3000 markets)."""
+        if self._session is None or self._session.closed:
+            log.warning("scanner_session_recreated")
+            if self._session is not None:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+            self._session = aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {self._api_key}",
+                         "User-Agent": "polybot/2.1"})
         markets = []
         offset = 0
-        while offset < 5000:  # safety cap
-            status, data = await self._get(
-                f"{GAMMA_BASE_URL}/markets",
-                {"limit": 100, "offset": offset, "active": "true", "closed": "false"})
-            if status != 200 or not data:
-                if status != 200:
-                    log.error("gamma_api_error", status=status)
-                break
-            for raw in data:
-                parsed = parse_gamma_market(raw)
-                if parsed:
-                    markets.append(parsed)
-            if len(data) < 100:
-                break
-            offset += 100
+        try:
+            while offset < 5000:  # safety cap
+                status, data = await self._get(
+                    f"{GAMMA_BASE_URL}/markets",
+                    {"limit": 100, "offset": offset, "active": "true", "closed": "false"})
+                if status != 200 or not data:
+                    if status != 200:
+                        log.error("gamma_api_error", status=status)
+                    break
+                for raw in data:
+                    parsed = parse_gamma_market(raw)
+                    if parsed:
+                        markets.append(parsed)
+                if len(data) < 100:
+                    break
+                offset += 100
+        except aiohttp.ClientError as e:
+            log.error("scanner_client_error", error=str(e))
+            return []
         self._price_cache = {m["polymarket_id"]: m for m in markets}
 
         # Enrich markets with event tags (the /markets endpoint doesn't include them)
@@ -178,31 +192,35 @@ class PolymarketScanner:
         cid_to_tags: dict[str, list[str]] = {}
         cid_to_event_slug: dict[str, str] = {}
         offset = 0
-        while offset < 5000:
-            status, data = await self._get(
-                f"{GAMMA_BASE_URL}/events",
-                {"limit": 100, "offset": offset, "active": "true", "closed": "false"})
-            if status != 200 or not data:
-                break
-            for event in data:
-                tags_raw = event.get("tags", [])
-                seen: set[str] = set()
-                tag_slugs: list[str] = []
-                for t in tags_raw:
-                    slug = t.get("slug", "").lower().strip()
-                    if slug and slug not in seen:
-                        tag_slugs.append(slug)
-                        seen.add(slug)
-                event_slug = event.get("slug", "")
-                # Map each child market's conditionId to these tags and event slug
-                for child in event.get("markets", []):
-                    cid = child.get("conditionId", "")
-                    if cid:
-                        cid_to_tags[cid] = tag_slugs
-                        cid_to_event_slug[cid] = event_slug  # NEW
-            if len(data) < 100:
-                break
-            offset += 100
+        try:
+            while offset < 5000:
+                status, data = await self._get(
+                    f"{GAMMA_BASE_URL}/events",
+                    {"limit": 100, "offset": offset, "active": "true", "closed": "false"})
+                if status != 200 or not data:
+                    break
+                for event in data:
+                    tags_raw = event.get("tags", [])
+                    seen: set[str] = set()
+                    tag_slugs: list[str] = []
+                    for t in tags_raw:
+                        slug = t.get("slug", "").lower().strip()
+                        if slug and slug not in seen:
+                            tag_slugs.append(slug)
+                            seen.add(slug)
+                    event_slug = event.get("slug", "")
+                    # Map each child market's conditionId to these tags and event slug
+                    for child in event.get("markets", []):
+                        cid = child.get("conditionId", "")
+                        if cid:
+                            cid_to_tags[cid] = tag_slugs
+                            cid_to_event_slug[cid] = event_slug  # NEW
+                if len(data) < 100:
+                    break
+                offset += 100
+        except aiohttp.ClientError as e:
+            log.warning("scanner_enrich_client_error", error=str(e))
+            # Markets list is intact, just won't have tags enriched
 
         # Apply tags and event_slug to cached markets
         enriched = 0

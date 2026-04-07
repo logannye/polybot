@@ -1,5 +1,6 @@
+import aiohttp
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone, timedelta
 from polybot.markets.scanner import PolymarketScanner, parse_market_response, parse_gamma_market
 
@@ -54,6 +55,7 @@ class TestPolymarketScanner:
             "active": True, "closed": False, "slug": "test-market",
         }]
         mock_session = AsyncMock()
+        mock_session.closed = False
         mock_resp = AsyncMock()
         mock_resp.json = AsyncMock(return_value=gamma_response)
         mock_resp.status = 200
@@ -197,3 +199,49 @@ class TestPolymarketScanner:
         result = parse_market_response(raw)
         assert result is not None
         assert result["group_slug"] == "my-group"
+
+    @pytest.mark.asyncio
+    async def test_fetch_markets_returns_empty_on_client_connector_error(self, scanner):
+        """DNS failure (ClientConnectorError) should return [] not propagate."""
+        mock_session = MagicMock()
+        mock_session.closed = False
+        mock_session.get = MagicMock(side_effect=aiohttp.ClientConnectorError(
+            connection_key=MagicMock(), os_error=OSError("DNS resolution failed")))
+        scanner._session = mock_session
+        markets = await scanner.fetch_markets()
+        assert markets == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_markets_recreates_closed_session(self, scanner):
+        """If session is closed, fetch_markets should recreate it before fetching."""
+        gamma_response = [{
+            "conditionId": "0x222", "question": "Recreated session market?",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["0.60", "0.40"]',
+            "clobTokenIds": '["t3", "t4"]',
+            "endDate": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+            "volume24hr": 8000.0, "liquidityNum": 4000.0,
+            "active": True, "closed": False, "slug": "recreated-session-market",
+        }]
+        # Set up a closed session that should be replaced
+        closed_session = MagicMock()
+        closed_session.closed = True
+        scanner._session = closed_session
+
+        mock_resp = AsyncMock()
+        mock_resp.json = AsyncMock(return_value=gamma_response)
+        mock_resp.status = 200
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        new_mock_session = MagicMock()
+        new_mock_session.closed = False
+        new_mock_session.get = MagicMock(return_value=mock_resp)
+
+        with patch("polybot.markets.scanner.aiohttp.ClientSession", return_value=new_mock_session):
+            markets = await scanner.fetch_markets()
+
+        # Session should have been recreated (old closed session replaced)
+        assert scanner._session is new_mock_session
+        assert len(markets) == 1
+        assert markets[0]["polymarket_id"] == "0x222"
