@@ -136,6 +136,87 @@ def match_game_to_market(game: dict, price_cache: dict[str, dict]) -> dict | Non
     return None
 
 
+def match_game_to_all_markets(game: dict, price_cache: dict[str, dict]) -> list[dict]:
+    """Match an ESPN game to ALL related Polymarket markets (moneyline, spread, O/U).
+
+    Parameters
+    ----------
+    game : dict
+        ESPN game dict with ``home_team``, ``away_team``, etc.
+    price_cache : dict[str, dict]
+        Polymarket price cache from ``scanner.get_all_cached_prices()``.
+
+    Returns
+    -------
+    list[dict]
+        List of matched market dicts (same shape as ``match_game_to_market`` output).
+        Empty list if no matches found.
+    """
+    home_team = game.get("home_team", "")
+    away_team = game.get("away_team", "")
+
+    if not home_team or not away_team:
+        return []
+
+    matches = []
+
+    for pid, market in price_cache.items():
+        question = market.get("question", "")
+        q_lower = question.lower()
+
+        home_match = _team_matches_question(home_team, q_lower)
+        away_match = _team_matches_question(away_team, q_lower)
+
+        # Derivative markets (spread / o/u): require at least ONE team
+        is_derivative = "spread:" in q_lower or "o/u" in q_lower
+        if is_derivative:
+            if not home_match and not away_match:
+                continue
+        else:
+            # Moneyline: require BOTH teams
+            if not home_match or not away_match:
+                continue
+
+        # Parse outcomes to determine which outcome is home vs away
+        outcomes = _parse_outcomes(market.get("outcomes"))
+
+        home_outcome = None
+        away_outcome = None
+
+        if len(outcomes) >= 2:
+            for outcome in outcomes:
+                outcome_lower = outcome.lower()
+                if _team_matches_question(home_team, outcome_lower):
+                    home_outcome = outcome
+                elif _team_matches_question(away_team, outcome_lower):
+                    away_outcome = outcome
+
+        # If outcomes didn't resolve cleanly, fall back to positional assignment
+        if home_outcome is None or away_outcome is None:
+            if len(outcomes) >= 2:
+                home_outcome = outcomes[0]
+                away_outcome = outcomes[1]
+            else:
+                home_outcome = "YES"
+                away_outcome = "NO"
+
+        matches.append({
+            "polymarket_id": pid,
+            "question": question,
+            "yes_price": market.get("yes_price", 0.0),
+            "yes_token_id": market.get("yes_token_id", ""),
+            "no_token_id": market.get("no_token_id", ""),
+            "home_outcome": home_outcome,
+            "away_outcome": away_outcome,
+            "book_depth": market.get("book_depth", 0.0),
+            "volume_24h": market.get("volume_24h", 0.0),
+            "category": market.get("category", "unknown"),
+            "resolution_time": market.get("resolution_time"),
+        })
+
+    return matches
+
+
 def compute_game_edge(win_prob: float, polymarket_price: float) -> dict:
     """Compare ESPN-derived win probability to Polymarket YES price.
 
@@ -234,188 +315,194 @@ class LiveGameCloserStrategy(Strategy):
             if dominant_wp < self._min_win_prob:
                 continue
 
-            # 5c. Match to Polymarket market
-            matched = match_game_to_market(game, price_cache)
-            if matched is None:
+            # 5c. Match to all related Polymarket markets
+            all_matched = match_game_to_all_markets(game, price_cache)
+            if not all_matched:
                 continue
 
-            # 5d. Skip if book depth too shallow
-            if matched["book_depth"] < self._min_book_depth:
-                log.debug("lg_low_depth", espn_id=espn_id,
-                          depth=matched["book_depth"], min=self._min_book_depth)
-                continue
-
-            # 5e. Determine YES/NO mapping
-            #     We need to know: does YES = home team winning?
-            #     The first outcome corresponds to YES token.
-            outcomes = _parse_outcomes(
-                ctx.scanner.get_cached_price(matched["polymarket_id"]).get("outcomes")
-                if ctx.scanner.get_cached_price(matched["polymarket_id"]) else None
-            )
-            # Determine if YES token corresponds to home team
-            yes_is_home = True  # default assumption
-            if outcomes and len(outcomes) >= 2:
-                home_tokens = _build_search_tokens(game["home_team"])
-                away_tokens = _build_search_tokens(game["away_team"])
-                first_outcome_lower = outcomes[0].lower()
-                # Check if first outcome (YES side) matches away team
-                for token in away_tokens:
-                    if token in first_outcome_lower:
-                        yes_is_home = False
-                        break
-
-            # Map win probability to the correct Polymarket side
-            if yes_is_home:
-                wp_for_yes = home_wp
-            else:
-                wp_for_yes = 1 - home_wp
-
-            # 5f. Compute edge
-            edge_info = compute_game_edge(wp_for_yes, matched["yes_price"])
-            if edge_info["edge"] < self._min_edge:
-                continue
-
-            log.info("lg_opportunity",
-                     espn_id=espn_id,
-                     game=game.get("short_name", ""),
-                     sport=sport,
-                     home_wp=round(home_wp, 3),
-                     polymarket_price=matched["yes_price"],
-                     side=edge_info["side"],
-                     edge=round(edge_info["edge"], 4),
-                     market=matched["polymarket_id"])
-
-            # 5h. Trade execution inside portfolio lock
-            async with ctx.portfolio_lock:
-                state_row = await ctx.db.fetchrow(
-                    "SELECT * FROM system_state WHERE id = 1")
-                if not state_row:
+            for matched in all_matched:
+                # Market-level dedup: skip already-traded ESPN+market combos
+                trade_key = f"{espn_id}:{matched['polymarket_id']}"
+                if trade_key in self._traded_games:
                     continue
 
-                bankroll = float(state_row["bankroll"])
-                kelly_adj = bankroll_kelly_adjustment(
-                    bankroll=bankroll,
-                    base_kelly=self.kelly_multiplier,
-                    post_breaker_until=state_row.get("post_breaker_until"),
-                )
-
-                kelly_fraction = (
-                    edge_info["edge"] / (1 - edge_info["buy_price"])
-                    if edge_info["buy_price"] < 1.0 else 0.0
-                )
-                size = compute_position_size(
-                    bankroll=bankroll,
-                    kelly_fraction=kelly_fraction,
-                    kelly_mult=kelly_adj,
-                    confidence_mult=1.0,
-                    max_single_pct=self.max_single_pct,
-                    min_trade_size=getattr(ctx.settings, "min_trade_size", 1.0),
-                )
-                if size <= 0:
+                # 5d. Skip if book depth too shallow
+                if matched["book_depth"] < self._min_book_depth:
+                    log.debug("lg_low_depth", espn_id=espn_id,
+                              depth=matched["book_depth"], min=self._min_book_depth)
                     continue
 
-                portfolio = PortfolioState(
-                    bankroll=bankroll,
-                    total_deployed=float(state_row["total_deployed"]),
-                    daily_pnl=float(state_row["daily_pnl"]),
-                    open_count=(open_lg_count or 0),
-                    category_deployed={},
-                    circuit_breaker_until=state_row.get("circuit_breaker_until"),
+                # 5e. Determine YES/NO mapping
+                #     We need to know: does YES = home team winning?
+                #     The first outcome corresponds to YES token.
+                outcomes = _parse_outcomes(
+                    ctx.scanner.get_cached_price(matched["polymarket_id"]).get("outcomes")
+                    if ctx.scanner.get_cached_price(matched["polymarket_id"]) else None
                 )
-                proposal = TradeProposal(
-                    size_usd=size,
-                    category=matched.get("category", "unknown"),
-                    book_depth=matched.get("book_depth", 1000.0),
-                )
-                risk_result = ctx.risk_manager.check(
-                    portfolio, proposal, max_single_pct=self.max_single_pct)
-                if not risk_result.allowed:
-                    log.info("lg_rejected_risk", espn_id=espn_id,
-                             reason=risk_result.reason)
+                # Determine if YES token corresponds to home team
+                yes_is_home = True  # default assumption
+                if outcomes and len(outcomes) >= 2:
+                    home_tokens = _build_search_tokens(game["home_team"])
+                    away_tokens = _build_search_tokens(game["away_team"])
+                    first_outcome_lower = outcomes[0].lower()
+                    # Check if first outcome (YES side) matches away team
+                    for token in away_tokens:
+                        if token in first_outcome_lower:
+                            yes_is_home = False
+                            break
+
+                # Map win probability to the correct Polymarket side
+                if yes_is_home:
+                    wp_for_yes = home_wp
+                else:
+                    wp_for_yes = 1 - home_wp
+
+                # 5f. Compute edge
+                edge_info = compute_game_edge(wp_for_yes, matched["yes_price"])
+                if edge_info["edge"] < self._min_edge:
                     continue
 
-                # Upsert market record
-                market_id = await ctx.db.fetchval(
-                    """INSERT INTO markets (polymarket_id, question, category,
-                           resolution_time, current_price, volume_24h, book_depth)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)
-                       ON CONFLICT (polymarket_id) DO UPDATE SET
-                           current_price=$5, volume_24h=$6, book_depth=$7,
-                           last_updated=NOW()
-                       RETURNING id""",
-                    matched["polymarket_id"], matched["question"],
-                    matched.get("category", "unknown"),
-                    matched.get("resolution_time"), matched["yes_price"],
-                    matched.get("volume_24h"), matched.get("book_depth"),
+                log.info("lg_opportunity",
+                         espn_id=espn_id,
+                         game=game.get("short_name", ""),
+                         sport=sport,
+                         home_wp=round(home_wp, 3),
+                         polymarket_price=matched["yes_price"],
+                         side=edge_info["side"],
+                         edge=round(edge_info["edge"], 4),
+                         market=matched["polymarket_id"])
+
+                # 5h. Trade execution inside portfolio lock
+                async with ctx.portfolio_lock:
+                    state_row = await ctx.db.fetchrow(
+                        "SELECT * FROM system_state WHERE id = 1")
+                    if not state_row:
+                        continue
+
+                    bankroll = float(state_row["bankroll"])
+                    kelly_adj = bankroll_kelly_adjustment(
+                        bankroll=bankroll,
+                        base_kelly=self.kelly_multiplier,
+                        post_breaker_until=state_row.get("post_breaker_until"),
+                    )
+
+                    kelly_fraction = (
+                        edge_info["edge"] / (1 - edge_info["buy_price"])
+                        if edge_info["buy_price"] < 1.0 else 0.0
+                    )
+                    size = compute_position_size(
+                        bankroll=bankroll,
+                        kelly_fraction=kelly_fraction,
+                        kelly_mult=kelly_adj,
+                        confidence_mult=1.0,
+                        max_single_pct=self.max_single_pct,
+                        min_trade_size=getattr(ctx.settings, "min_trade_size", 1.0),
+                    )
+                    if size <= 0:
+                        continue
+
+                    portfolio = PortfolioState(
+                        bankroll=bankroll,
+                        total_deployed=float(state_row["total_deployed"]),
+                        daily_pnl=float(state_row["daily_pnl"]),
+                        open_count=(open_lg_count or 0),
+                        category_deployed={},
+                        circuit_breaker_until=state_row.get("circuit_breaker_until"),
+                    )
+                    proposal = TradeProposal(
+                        size_usd=size,
+                        category=matched.get("category", "unknown"),
+                        book_depth=matched.get("book_depth", 1000.0),
+                    )
+                    risk_result = ctx.risk_manager.check(
+                        portfolio, proposal, max_single_pct=self.max_single_pct)
+                    if not risk_result.allowed:
+                        log.info("lg_rejected_risk", espn_id=espn_id,
+                                 reason=risk_result.reason)
+                        continue
+
+                    # Upsert market record
+                    market_id = await ctx.db.fetchval(
+                        """INSERT INTO markets (polymarket_id, question, category,
+                               resolution_time, current_price, volume_24h, book_depth)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7)
+                           ON CONFLICT (polymarket_id) DO UPDATE SET
+                               current_price=$5, volume_24h=$6, book_depth=$7,
+                               last_updated=NOW()
+                           RETURNING id""",
+                        matched["polymarket_id"], matched["question"],
+                        matched.get("category", "unknown"),
+                        matched.get("resolution_time"), matched["yes_price"],
+                        matched.get("volume_24h"), matched.get("book_depth"),
+                    )
+
+                    # Insert analysis record
+                    kelly_inputs = {
+                        "win_prob": round(wp_for_yes, 4),
+                        "polymarket_price": matched["yes_price"],
+                        "edge": round(edge_info["edge"], 4),
+                        "kelly_fraction": round(kelly_fraction, 4),
+                        "kelly_adj": round(kelly_adj, 4),
+                    }
+                    quant_signals = {
+                        "sport": sport,
+                        "home_team": game.get("home_team", ""),
+                        "away_team": game.get("away_team", ""),
+                        "home_score": game.get("home_score", 0),
+                        "away_score": game.get("away_score", 0),
+                        "period": period,
+                        "home_wp": round(home_wp, 4),
+                        "dominant_wp": round(dominant_wp, 4),
+                    }
+                    analysis_id = await ctx.db.fetchval(
+                        """INSERT INTO analyses (market_id, model_estimates,
+                               ensemble_probability, ensemble_stdev,
+                               quant_signals, edge)
+                           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
+                        market_id, json.dumps(kelly_inputs), wp_for_yes, 0.0,
+                        json.dumps(quant_signals), edge_info["edge"],
+                    )
+
+                    # Place order
+                    token_id = (
+                        matched["yes_token_id"]
+                        if edge_info["side"] == "YES"
+                        else matched["no_token_id"]
+                    )
+                    result = await ctx.executor.place_order(
+                        token_id=token_id,
+                        side=edge_info["side"],
+                        size_usd=size,
+                        price=edge_info["buy_price"],
+                        market_id=market_id,
+                        analysis_id=analysis_id,
+                        strategy=self.name,
+                    )
+                    if not result:
+                        continue
+
+                # Mark market as traded (outside lock)
+                self._traded_games.add(trade_key)
+
+                log.info("lg_trade_placed",
+                         espn_id=espn_id,
+                         game=game.get("short_name", ""),
+                         side=edge_info["side"],
+                         price=edge_info["buy_price"],
+                         edge=round(edge_info["edge"], 4),
+                         size=size,
+                         market=matched["polymarket_id"])
+
+                await ctx.email_notifier.send(
+                    f"[POLYBOT] Live game trade: {game.get('short_name', '')}",
+                    format_trade_email(
+                        event="executed",
+                        market=matched["question"],
+                        side=edge_info["side"],
+                        size=size,
+                        price=edge_info["buy_price"],
+                        edge=edge_info["edge"],
+                    ),
                 )
-
-                # Insert analysis record
-                kelly_inputs = {
-                    "win_prob": round(wp_for_yes, 4),
-                    "polymarket_price": matched["yes_price"],
-                    "edge": round(edge_info["edge"], 4),
-                    "kelly_fraction": round(kelly_fraction, 4),
-                    "kelly_adj": round(kelly_adj, 4),
-                }
-                quant_signals = {
-                    "sport": sport,
-                    "home_team": game.get("home_team", ""),
-                    "away_team": game.get("away_team", ""),
-                    "home_score": game.get("home_score", 0),
-                    "away_score": game.get("away_score", 0),
-                    "period": period,
-                    "home_wp": round(home_wp, 4),
-                    "dominant_wp": round(dominant_wp, 4),
-                }
-                analysis_id = await ctx.db.fetchval(
-                    """INSERT INTO analyses (market_id, model_estimates,
-                           ensemble_probability, ensemble_stdev,
-                           quant_signals, edge)
-                       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-                    market_id, json.dumps(kelly_inputs), wp_for_yes, 0.0,
-                    json.dumps(quant_signals), edge_info["edge"],
-                )
-
-                # Place order
-                token_id = (
-                    matched["yes_token_id"]
-                    if edge_info["side"] == "YES"
-                    else matched["no_token_id"]
-                )
-                result = await ctx.executor.place_order(
-                    token_id=token_id,
-                    side=edge_info["side"],
-                    size_usd=size,
-                    price=edge_info["buy_price"],
-                    market_id=market_id,
-                    analysis_id=analysis_id,
-                    strategy=self.name,
-                )
-                if not result:
-                    continue
-
-            # Mark game as traded (outside lock)
-            self._traded_games.add(espn_id)
-
-            log.info("lg_trade_placed",
-                     espn_id=espn_id,
-                     game=game.get("short_name", ""),
-                     side=edge_info["side"],
-                     price=edge_info["buy_price"],
-                     edge=round(edge_info["edge"], 4),
-                     size=size,
-                     market=matched["polymarket_id"])
-
-            await ctx.email_notifier.send(
-                f"[POLYBOT] Live game trade: {game.get('short_name', '')}",
-                format_trade_email(
-                    event="executed",
-                    market=matched["question"],
-                    side=edge_info["side"],
-                    size=size,
-                    price=edge_info["buy_price"],
-                    edge=edge_info["edge"],
-                ),
-            )
 
         log.info("lg_cycle_complete", games_checked=len(games))

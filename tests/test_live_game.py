@@ -5,6 +5,7 @@ import pytest
 
 from polybot.strategies.live_game import (
     match_game_to_market,
+    match_game_to_all_markets,
     compute_game_edge,
     _build_search_tokens,
     _parse_outcomes,
@@ -261,3 +262,52 @@ class TestComputeGameEdge:
         assert result["side"] == "NO"
         assert abs(result["edge"] - 0.35) < 1e-9
         assert abs(result["buy_price"] - 0.60) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# match_game_to_all_markets
+# ---------------------------------------------------------------------------
+
+class TestMatchGameToAllMarkets:
+    def test_match_finds_moneyline_and_spread(self):
+        """Should find both the moneyline and spread markets for the same game."""
+        game = {
+            "home_team": "Memphis Grizzlies",
+            "away_team": "Cleveland Cavaliers",
+            "sport": "nba",
+        }
+        price_cache = {
+            "0xabc": {
+                "polymarket_id": "0xabc",
+                "question": "Cavaliers vs. Grizzlies",
+                "outcomes": '["Cavaliers", "Grizzlies"]',
+                "yes_price": 0.87,
+                "yes_token_id": "tok1", "no_token_id": "tok2",
+                "book_depth": 50000, "volume_24h": 1000000,
+                "category": "sports",
+            },
+            "0xdef": {
+                "polymarket_id": "0xdef",
+                "question": "Spread: Cavaliers (-13.5)",
+                "outcomes": '["Cavaliers -13.5", "Grizzlies +13.5"]',
+                "yes_price": 0.55,
+                "yes_token_id": "tok3", "no_token_id": "tok4",
+                "book_depth": 30000, "volume_24h": 500000,
+                "category": "sports",
+            },
+            "0xzzz": {
+                "polymarket_id": "0xzzz",
+                "question": "Will Trump win 2028?",
+                "yes_price": 0.30,
+            },
+        }
+        matches = match_game_to_all_markets(game, price_cache)
+        assert len(matches) == 2
+        pids = {m["polymarket_id"] for m in matches}
+        assert "0xabc" in pids
+        assert "0xdef" in pids
+
+    def test_match_all_returns_empty_on_no_match(self):
+        game = {"home_team": "Boston Celtics", "away_team": "Miami Heat", "sport": "nba"}
+        matches = match_game_to_all_markets(game, {"0x1": {"question": "unrelated", "polymarket_id": "0x1"}})
+        assert matches == []
