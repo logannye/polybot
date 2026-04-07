@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 import aiohttp
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -167,26 +168,30 @@ class TestOddsClientCreditGuard:
     async def test_fetch_odds_stops_when_credits_exhausted(self):
         """When credits_remaining == 0, fetch_odds returns [] without HTTP call."""
         client = OddsClient(api_key="test-key")
-        client._session = MagicMock()  # session is set so the session check passes
+        mock_session = MagicMock()
+        mock_session.closed = False  # session is open so recreation is skipped
+        client._session = mock_session
         client._credits_remaining = 0
 
         result = await client.fetch_odds("basketball_nba")
 
         assert result == []
         # Verify no HTTP request was made
-        client._session.get.assert_not_called()
+        mock_session.get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fetch_odds_stops_below_reserve(self):
         """When credits_remaining (5) is below credit_reserve (10), returns [] without HTTP call."""
         client = OddsClient(api_key="test-key", credit_reserve=10)
-        client._session = MagicMock()
+        mock_session = MagicMock()
+        mock_session.closed = False  # session is open so recreation is skipped
+        client._session = mock_session
         client._credits_remaining = 5
 
         result = await client.fetch_odds("basketball_nba")
 
         assert result == []
-        client._session.get.assert_not_called()
+        mock_session.get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_fetch_all_sports_short_circuits_on_zero_credits(self):
@@ -200,6 +205,55 @@ class TestOddsClientCreditGuard:
 
         assert result == []
         mock_fetch.assert_not_called()  # should short-circuit before calling fetch_odds
+
+
+class TestOddsClientSessionRecovery:
+    @pytest.mark.asyncio
+    async def test_odds_client_recreates_closed_session(self):
+        """When the session is closed, fetch_odds should recreate it and use the new one."""
+        client = OddsClient(api_key="test-key")
+        old_session = MagicMock()
+        old_session.closed = True
+        client._session = old_session
+
+        new_session = MagicMock()
+        # Make the new session's get() return a valid async context manager
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.headers = {}
+        mock_resp.json = AsyncMock(return_value=[])
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        new_session.get = MagicMock(return_value=mock_resp)
+
+        with patch("aiohttp.ClientSession", return_value=new_session):
+            await client.fetch_odds("basketball_nba")
+
+        # The old closed session must not be used
+        old_session.get.assert_not_called()
+        # The new session must have been used
+        new_session.get.assert_called_once()
+        assert client._session is new_session
+
+
+class TestOddsClientFetchAllTimeout:
+    @pytest.mark.asyncio
+    async def test_fetch_all_sports_has_overall_timeout(self):
+        """fetch_all_sports must complete within ~31s even if individual fetches hang."""
+        client = OddsClient(api_key="test-key", sports=["sport_a", "sport_b", "sport_c"],
+                            fetch_timeout=0.1)
+        client._session = MagicMock()
+        client._session.closed = False
+
+        async def slow_fetch(sport_key: str) -> list:
+            await asyncio.sleep(60)  # would hang forever without overall timeout
+            return []
+
+        with patch.object(client, "fetch_odds", side_effect=slow_fetch):
+            result = await client.fetch_all_sports()
+
+        # Should return whatever was collected before the timeout (empty here)
+        assert isinstance(result, list)
 
 
 class TestOddsClientCreditsExhausted:

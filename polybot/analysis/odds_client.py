@@ -1,5 +1,6 @@
 """Client for The Odds API — fetches sportsbook odds for cross-venue comparison."""
 
+import asyncio
 import aiohttp
 import structlog
 
@@ -120,12 +121,13 @@ class OddsClient:
     BASE_URL = "https://api.the-odds-api.com/v4"
 
     def __init__(self, api_key: str, sports: list[str] | None = None,
-                 credit_reserve: int = 10):
+                 credit_reserve: int = 10, fetch_timeout: float = 30.0):
         self._api_key = api_key
         self._sports = sports or DEFAULT_SPORTS
         self._session: aiohttp.ClientSession | None = None
         self._credits_remaining: int | None = None
         self._credit_reserve = credit_reserve
+        self._fetch_timeout = fetch_timeout
 
     async def start(self):
         self._session = aiohttp.ClientSession()
@@ -133,11 +135,17 @@ class OddsClient:
     async def close(self):
         if self._session:
             await self._session.close()
+            self._session = None
 
     async def fetch_odds(self, sport_key: str) -> list[dict]:
         """Fetch odds for a sport. Costs 2 credits (1 market × 2 regions)."""
-        if not self._session or not self._api_key:
+        if not self._api_key:
             return []
+
+        # Recreate session if closed or missing
+        if self._session is None or self._session.closed:
+            log.warning("odds_session_recreated")
+            self._session = aiohttp.ClientSession()
 
         if self.credits_exhausted:
             log.warning("odds_api_credits_low", credits_remaining=self._credits_remaining,
@@ -178,10 +186,19 @@ class OddsClient:
             log.info("odds_credits_exhausted", credits_remaining=self._credits_remaining,
                      credit_reserve=self._credit_reserve)
             return []
+
         all_events = []
-        for sport in self._sports:
-            events = await self.fetch_odds(sport)
-            all_events.extend(events)
+        try:
+            async with asyncio.timeout(self._fetch_timeout):
+                for sport in self._sports:
+                    events = await self.fetch_odds(sport)
+                    all_events.extend(events)
+        except TimeoutError:
+            log.error("odds_fetch_all_timeout", sports=len(self._sports),
+                      events_so_far=len(all_events))
+            # Return whatever we got before timeout
+            return all_events
+
         log.info("odds_fetch_cycle_complete", sports=len(self._sports),
                  events=len(all_events), credits_remaining=self._credits_remaining)
         return all_events
