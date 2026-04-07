@@ -230,6 +230,17 @@ class Settings(BaseSettings):
     pol_llm_confirm_edge: float = 0.10         # use LLM to confirm edges above 10% (future)
     pol_max_positions: int = 5                 # max concurrent political positions
 
+    # Live Game Closer strategy
+    lg_enabled: bool = True
+    lg_interval_seconds: float = 30.0          # poll ESPN every 30s
+    lg_kelly_mult: float = 0.50                # aggressive — high-confidence plays
+    lg_max_single_pct: float = 0.25            # up to 25% bankroll per game
+    lg_min_edge: float = 0.04                  # min 4% edge (WP vs Polymarket price)
+    lg_min_win_prob: float = 0.85              # only trade when WP >= 85%
+    lg_min_book_depth: float = 10000.0         # min $10K liquidity
+    lg_max_concurrent: int = 6                 # max concurrent live game positions
+    lg_sports: str = "mlb,nba,nhl"             # sports to monitor
+
     # WebSocket streaming
     enable_websocket_streaming: bool = True
     ws_reconnect_max_delay: float = 30.0

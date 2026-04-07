@@ -75,7 +75,7 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'fore
 -- v2.5: Expand strategy CHECK for all strategies
 ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_strategy_check;
 ALTER TABLE trades ADD CONSTRAINT trades_strategy_check
-    CHECK (strategy IN ('arbitrage', 'snipe', 'forecast', 'market_maker', 'mean_reversion', 'cross_venue', 'political', 'news_catalyst'));
+    CHECK (strategy IN ('arbitrage', 'snipe', 'forecast', 'market_maker', 'mean_reversion', 'cross_venue', 'political', 'news_catalyst', 'live_game'));
 
 -- v2: Strategy performance tracking
 CREATE TABLE IF NOT EXISTS strategy_performance (
@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS strategy_performance (
 INSERT INTO strategy_performance (strategy) VALUES
     ('arbitrage'), ('snipe'), ('forecast')
 ON CONFLICT (strategy) DO NOTHING;
+
+INSERT INTO strategy_performance (strategy) VALUES ('live_game') ON CONFLICT DO NOTHING;
 
 -- v2: Market relationships for arbitrage detection
 CREATE TABLE IF NOT EXISTS market_relationships (

@@ -26,6 +26,8 @@ from polybot.analysis.odds_client import OddsClient
 from polybot.strategies.cross_venue import CrossVenueStrategy
 from polybot.strategies.political import PoliticalStrategy
 from polybot.strategies.arbitrage import ArbitrageStrategy
+from polybot.strategies.live_game import LiveGameCloserStrategy
+from polybot.analysis.espn_client import ESPNClient
 
 structlog.configure(
     processors=[
@@ -188,6 +190,13 @@ async def main():
         await db.execute(
             """INSERT INTO strategy_performance (strategy, total_trades, winning_trades, total_pnl, avg_edge, enabled)
                VALUES ('political', 0, 0, 0, 0, true) ON CONFLICT (strategy) DO NOTHING""")
+
+    if getattr(settings, 'lg_enabled', False):
+        espn_client = ESPNClient(
+            sports=getattr(settings, 'lg_sports', 'mlb,nba,nhl').split(','))
+        await espn_client.start()
+        lg_strategy = LiveGameCloserStrategy(settings=settings, espn_client=espn_client)
+        engine.add_strategy(lg_strategy)
 
     app = create_app(db)
     dashboard_server = uvicorn.Server(
