@@ -13,7 +13,7 @@ Built for micro-scale bankrolls ($100-500). The calibration edge is structural a
 
 ## How it works
 
-Three active strategies run at independent frequencies within a single async process:
+Four active strategies run at independent frequencies within a single async process:
 
 ### Strategy 1: Resolution Sniping (every 60s)
 
@@ -44,9 +44,25 @@ The strategy applies no LLM calls. The edge is structural, not predictive.
 
 **Hold to resolution** — No time-stop. The edge is structural and does not decay with time, so positions are held until the market resolves.
 
-### Strategy 3: Combinatorial Arbitrage (every 45s)
+### Strategy 3: Live Game Closer (every 30s)
 
-Detects mathematically provable mispricings in multi-outcome event groups. When N mutually exclusive outcomes should sum to 1.0 but don't, the strategy buys all underpriced outcomes (or sells all overpriced ones) for near-risk-free profit.
+Monitors live sports games via ESPN's free scoreboard API and trades on Polymarket when a game is effectively decided but the market price hasn't caught up. This is the primary profit engine — asymmetric bets on near-certain outcomes across 15-40 games per day.
+
+**Score feed** — Polls ESPN scoreboards every 30 seconds across 9 leagues: MLB, NBA, NHL, NCAAB, UCL, EPL, La Liga, Bundesliga, and MLS. No API key required. Each poll returns live scores, game status, period/inning, and clock.
+
+**Win probability model** — Pure-function empirical models map score + game clock to win probability. Sport-specific: NBA/NCAAB (per-point scaling by quarter), MLB (per-run scaling by inning, late-weighted), NHL (per-goal), Soccer (per-goal, 15-30% each). Conservative by design — better to miss trades than overestimate certainty.
+
+**Market matching** — Matches each ESPN game to ALL related Polymarket markets by team name: moneyline ("Cavaliers vs. Grizzlies"), spread ("Spread: Cavaliers (-13.5)"), and over/under ("O/U 231.5"). A single blowout can trigger trades on 3 separate markets.
+
+**Entry signal** — Buys the winning side when: win probability ≥ 85%, Polymarket price undervalues the outcome by ≥ 4% edge, and book depth ≥ $10K.
+
+**Sizing**: Half-Kelly (0.50x), max 25% of bankroll per position, max 6 concurrent live game positions.
+
+**Hold to resolution** — Games end within 1-4 hours. Positions close automatically when the market resolves.
+
+### Strategy 4: Combinatorial Arbitrage (every 45s)
+
+Detects mathematically provable mispricings in multi-outcome event groups. When N mutually exclusive outcomes should sum to 1.0 but don't, the strategy buys all underpriced outcomes (or sells all overpriced ones) for near-risk-free profit. Per-opportunity cap enforcement accounts for leg count (a 9-market exhaustive arb creates 9 positions).
 
 **Event-based grouping** — Markets are grouped by their parent event via the Gamma `/events` endpoint, finding ~400+ valid exhaustive groups (e.g., "NHL Hart Trophy Winner" with 118 markets, "2028 Democratic Nominee" with 44 markets). This replaces the old slug-based grouping which found only 3 groups.
 
@@ -56,7 +72,7 @@ Detects mathematically provable mispricings in multi-outcome event groups. When 
 
 ### Disabled strategies
 
-The following strategies exist in the codebase but are currently disabled: **Ensemble Forecast** (LLM-based multi-model probability estimation), **Market Making** (two-sided quoting for spread capture and maker rebates), **Mean Reversion** (contrarian entry after price overreactions), and **Cross-Venue Arbitrage** (Polymarket vs. sportsbook consensus). They can be re-enabled via their respective `_ENABLED` environment variables.
+The following strategies exist in the codebase but are currently disabled: **Ensemble Forecast** (LLM-based multi-model probability estimation), **Market Making** (two-sided quoting for spread capture and maker rebates), **Mean Reversion** (contrarian entry after price overreactions), and **Cross-Venue Arbitrage** (Polymarket vs. sportsbook consensus — Odds API credits exhausted). They can be re-enabled via their respective `_ENABLED` environment variables.
 
 ## Architecture
 
@@ -65,7 +81,7 @@ Single Python async process (`asyncio`). Each strategy runs as an independent co
 ```
 polybot/
 ├── core/           # Engine orchestrator, configuration
-├── strategies/     # Strategy framework + snipe, political, forecast, market_maker, mean_reversion, cross_venue, arbitrage
+├── strategies/     # Strategy framework + snipe, political, live_game, forecast, market_maker, mean_reversion, cross_venue, arbitrage
 ├── markets/        # Polymarket API client (Gamma + CLOB), filters, WebSocket hub, price history scanner
 ├── analysis/       # LLM ensemble, quant signals, web research, pre-scoring, odds client, calibration
 ├── trading/        # Kelly sizing, risk management, order execution, CLOB gateway, fees, inventory, quotes
@@ -88,12 +104,12 @@ polybot/
 
 Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
-| Rule | Snipe | Political Calibration | Combinatorial Arb |
-|------|-------|----------------------|-------------------|
-| Kelly multiplier | 0.50x (+ tiered edge scaling) | 0.40x | 0.20x |
-| Max single position | 25% | 20% | 40% |
-| Max per market (cumulative) | 30% | 1 position | 1 per group |
-| Max concurrent (strategy) | — | 5 | 8 |
+| Rule | Snipe | Political Calibration | Live Game Closer | Combinatorial Arb |
+|------|-------|----------------------|-----------------|-------------------|
+| Kelly multiplier | 0.50x (+ tiered edge scaling) | 0.40x | 0.50x | 0.20x |
+| Max single position | 25% | 20% | 25% | 40% |
+| Max per market (cumulative) | 30% | 1 position | 1 per game+market | 1 per group |
+| Max concurrent (strategy) | — | 5 | 6 | 8 |
 
 | Rule | Default |
 |------|---------|
@@ -116,7 +132,7 @@ Strategy-aware risk management with aggressive sizing for high-certainty trades:
 
 ## LLM usage
 
-**Political Calibration uses no LLMs.** The edge is structural — derived from the known logit-space calibration slope (1.31) applied to market prices — not from predicting outcomes. No model calls are made in the political strategy's hot path.
+**Political Calibration and Live Game Closer use no LLMs.** Political edge is structural — derived from the known logit-space calibration slope (1.31). Live Game Closer edge is data-driven — derived from real-time ESPN scores + empirical win probability models. No model calls are made in either strategy's hot path.
 
 **Resolution Sniping** uses LLMs only for tier verification when sportsbook odds data is unavailable:
 
@@ -264,6 +280,16 @@ POL_MAX_CONCURRENT=5          # Max concurrent political positions
 POL_MIN_EDGE=0.04             # Min calibration-adjusted edge to trade (4%)
 POL_SCAN_INTERVAL_SECONDS=600 # 10-minute scan cycle
 
+# Live Game Closer Strategy (active)
+LG_ENABLED=true
+LG_INTERVAL_SECONDS=30        # Poll ESPN every 30s
+LG_KELLY_MULT=0.50            # Aggressive — high-confidence plays
+LG_MAX_SINGLE_PCT=0.25        # Max 25% of bankroll per game
+LG_MIN_EDGE=0.04              # Min 4% edge (WP vs Polymarket price)
+LG_MIN_WIN_PROB=0.85           # Only trade when WP >= 85%
+LG_MAX_CONCURRENT=6           # Max concurrent live game positions
+LG_SPORTS=mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls
+
 # Disabled strategies (can be re-enabled individually)
 MM_ENABLED=false              # Market Making
 MR_ENABLED=false              # Mean Reversion
@@ -356,10 +382,11 @@ Or manually: `ssh polybot@vps "cd /opt/polybot && git pull && uv sync && sudo sy
 | Item | Cost |
 |------|------|
 | VPS (1 vCPU, 1GB RAM) | $5-7 |
-| LLM API calls (tiered funnel, ~$1-2/day) | $30-60 |
+| LLM API calls (snipe verification only, ~$0.50-1/day) | $15-30 |
+| ESPN scoreboard API | Free |
 | Resend email | Free tier |
 | Brave Search API | $3 |
-| **Total** | **~$38-70/mo** |
+| **Total** | **~$23-40/mo** |
 
 ## Testing
 
@@ -371,8 +398,9 @@ uv run pytest tests/test_arbitrage.py -v                   # Run specific module
 
 ## Key design decisions
 
-- **Focus beats diversification on Polymarket** — At micro-scale bankrolls, spreading across six strategies dilutes attention and capital without proportional edge gain. The two active strategies (snipe + political) have clearly defensible, structurally-grounded edges. The disabled strategies are preserved for future re-evaluation when bankroll and evidence warrant it.
-- **Structural edge over predictive edge** — Political Calibration requires no outcome prediction. It exploits a documented, academically-validated calibration bias (logit slope 1.31) that exists regardless of which way a market resolves. This makes the edge more durable and less dependent on model quality.
+- **Concentrate on asymmetric, high-conviction edges** — Four active strategies, each with a structurally defensible edge source: snipe (price convergence near resolution), political calibration (documented academic bias), live game closer (real-time score data vs stale prices), and combinatorial arb (mathematical mispricing). No strategies rely on predicting outcomes — they exploit information or structural advantages.
+- **Live sports as the primary profit engine** — Individual game markets have $1M-$6M daily volume and resolve within hours. By monitoring 9 leagues via ESPN (MLB, NBA, NHL, NCAAB, UCL, EPL, La Liga, Bundesliga, MLS), matching to moneyline + spread + O/U markets per game, and entering during blowouts, the bot targets 5-15 high-confidence trades per day with 85-99% win probability.
+- **Structural edge over predictive edge** — Political Calibration and Live Game Closer require no outcome prediction. Political exploits a documented calibration bias (logit slope 1.31). Live Game exploits the lag between real-world scores (ESPN, updated in seconds) and Polymarket prices (updated by retail traders, often minutes behind).
 - **Anti-anchoring** — LLMs never see the market price when estimating probability. This prevents them from simply parroting the market consensus.
 - **Category-aware fee model** — Edge calculations use Polymarket's actual fee formula (`feeRate * p * (1-p)`) with per-category rates, not a flat 2%. All orders default to `post_only=True` (maker status, 0% fees). This dramatically improves edge accuracy at extreme prices where the old flat rate overestimated fees by 10x.
 - **Strategy-specific Kelly** — Half-Kelly for near-certain snipes (0.50x, tiered), Half-Kelly for structural calibration trades (0.40x). Calibration trades get more aggressive sizing than old forecast (0.20x) because the edge source is structural rather than probabilistic model output.
