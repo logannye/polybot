@@ -239,7 +239,7 @@ class Settings(BaseSettings):
     lg_min_win_prob: float = 0.85              # only trade when WP >= 85%
     lg_min_book_depth: float = 10000.0         # min $10K liquidity
     lg_max_concurrent: int = 6                 # max concurrent live game positions
-    lg_sports: str = "mlb,nba,nhl"             # sports to monitor
+    lg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
 
     # WebSocket streaming
     enable_websocket_streaming: bool = True
