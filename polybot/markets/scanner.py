@@ -75,6 +75,7 @@ def parse_gamma_market(raw: dict[str, Any]) -> dict[str, Any] | None:
         "no_price": p1,
         "yes_token_id": token_ids[0],
         "no_token_id": token_ids[1],
+        "outcomes": outcomes,
         "volume_24h": float(raw.get("volume24hr", 0) or 0),
         "book_depth": float(raw.get("liquidityNum", 0) or 0),
         "group_slug": raw.get("groupItemTitle") or raw.get("slug"),
