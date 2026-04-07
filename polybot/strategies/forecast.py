@@ -339,6 +339,19 @@ class EnsembleForecastStrategy(Strategy):
             log.debug("low_edge", market=candidate.polymarket_id, edge=kelly_result.edge)
             return
 
+        # YES-side entry price filter: data shows low-prob YES bets win;
+        # higher-priced YES entries have worse stop-loss outcomes
+        _yes_max_entry = getattr(self._settings, 'forecast_yes_max_entry', 1.0)
+        _no_min_entry = getattr(self._settings, 'forecast_no_min_entry', 0.0)
+        if kelly_result.side == "YES" and candidate.current_price > _yes_max_entry:
+            log.info("forecast_yes_entry_filtered", market=candidate.polymarket_id,
+                     price=candidate.current_price, max_entry=_yes_max_entry)
+            return
+        if kelly_result.side == "NO" and candidate.current_price < _no_min_entry:
+            log.info("forecast_no_entry_filtered", market=candidate.polymarket_id,
+                     price=candidate.current_price, min_entry=_no_min_entry)
+            return
+
         # 8b. Confidence modulation
         conf_mult = ctx.risk_manager.confidence_multiplier(
             stdev=ensemble_result.stdev,

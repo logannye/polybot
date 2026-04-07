@@ -124,6 +124,8 @@ class Settings(BaseSettings):
     forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
     forecast_enabled: bool = False
     forecast_category_filter_enabled: bool = True      # disable to skip category filtering
+    forecast_yes_max_entry: float = 0.15       # only enter YES below this price (data: winners avg 0.098)
+    forecast_no_min_entry: float = 0.60        # only enter NO above this yes_price (mid-range filter)
 
     # Learning system
     enable_proxy_trust_learning: bool = True

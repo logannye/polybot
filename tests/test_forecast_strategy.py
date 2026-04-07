@@ -42,6 +42,8 @@ async def test_forecast_dedup_blocks_existing_trade():
     settings.post_breaker_kelly_reduction = 0.50
     settings.bankroll_survival_threshold = 50.0
     settings.bankroll_growth_threshold = 500.0
+    settings.forecast_yes_max_entry = 1.0  # permissive — don't filter in this test
+    settings.forecast_no_min_entry = 0.0   # permissive — don't filter in this test
 
     strategy = EnsembleForecastStrategy(
         settings=settings, ensemble=MagicMock(), researcher=MagicMock())
@@ -167,6 +169,191 @@ def test_calibration_lookup_empty():
 def test_calibration_lookup_none():
     """None corrections should return 0.0."""
     assert _lookup_calibration_correction(0.5, None) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_forecast_yes_entry_filter_blocks_above_threshold():
+    """YES trade with current_price > forecast_yes_max_entry should be filtered out."""
+    from polybot.markets.filters import MarketCandidate
+    from polybot.analysis.quant import QuantSignals
+    from datetime import datetime, timezone, timedelta
+
+    settings = MagicMock()
+    settings.forecast_interval_seconds = 300
+    settings.forecast_kelly_mult = 0.25
+    settings.forecast_max_single_pct = 0.15
+    settings.use_maker_orders = True
+    settings.max_positions_per_market = 1
+    settings.min_trade_size = 1.0
+    settings.forecast_yes_max_entry = 0.15
+    settings.forecast_no_min_entry = 0.60
+    settings.forecast_category_filter_enabled = False
+    settings.quant_weights = {
+        "line_movement": 0.30, "volume_spike": 0.25,
+        "book_imbalance": 0.20, "spread": 0.15, "time_decay": 0.10,
+    }
+    settings.ensemble_stdev_low = 0.05
+    settings.ensemble_stdev_high = 0.12
+    settings.confidence_mult_low = 1.0
+    settings.confidence_mult_mid = 0.7
+    settings.confidence_mult_high = 0.4
+    settings.quant_negative_mult = 0.75
+    settings.post_breaker_kelly_reduction = 0.50
+    settings.bankroll_survival_threshold = 50.0
+    settings.bankroll_growth_threshold = 500.0
+
+    strategy = EnsembleForecastStrategy(
+        settings=settings, ensemble=MagicMock(), researcher=MagicMock())
+
+    ctx = MagicMock()
+    ctx.settings = settings
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.db = AsyncMock()
+    ctx.executor = AsyncMock()
+
+    # candidate.current_price=0.25 is above the 0.15 YES max entry threshold
+    candidate = MarketCandidate(
+        polymarket_id="test-yes-filter", question="Will X happen?", category="test",
+        resolution_time=datetime.now(timezone.utc) + timedelta(hours=24),
+        current_price=0.25, book_depth=1000.0, no_price=0.75)
+
+    quant = QuantSignals(0, 0, 0, 0, 0)
+
+    # ensemble_probability=0.45 => yes_edge=0.20, kelly returns side="YES" with edge=0.20
+    ensemble_result = MagicMock()
+    ensemble_result.ensemble_probability = 0.45
+    ensemble_result.stdev = 0.05
+    est = MagicMock()
+    est.model = "test"
+    est.probability = 0.45
+    est.confidence = 0.8
+    est.reasoning = "test"
+    ensemble_result.estimates = [est]  # single estimate skips consensus check
+    strategy._ensemble.analyze = AsyncMock(return_value=ensemble_result)
+    strategy._ensemble.challenge_estimate = AsyncMock(return_value=None)
+    strategy._researcher.search = AsyncMock(return_value="research text")
+
+    ctx.risk_manager = MagicMock()
+    ctx.risk_manager.confidence_multiplier.return_value = 1.0
+    ctx.risk_manager.edge_skepticism_discount.return_value = 1.0
+    ctx.risk_manager.check.return_value = MagicMock(allowed=True)
+
+    from polybot.trading.risk import PortfolioState
+    portfolio = PortfolioState(
+        bankroll=300.0, total_deployed=0.0, daily_pnl=0.0,
+        open_count=0, category_deployed={}, circuit_breaker_until=None)
+
+    await strategy._full_analyze_and_trade(
+        candidate=candidate, quant=quant, trust_weights={},
+        bankroll=300.0, kelly_mult=0.25, edge_threshold=0.05,
+        portfolio=portfolio, calibration_corrections={}, ctx=ctx)
+
+    # The YES entry filter should have blocked the trade before place_order
+    ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_forecast_yes_entry_filter_passes_below_threshold():
+    """YES trade with current_price < forecast_yes_max_entry should NOT be filtered."""
+    from polybot.markets.filters import MarketCandidate
+    from polybot.analysis.quant import QuantSignals
+    from datetime import datetime, timezone, timedelta
+
+    settings = MagicMock()
+    settings.forecast_interval_seconds = 300
+    settings.forecast_kelly_mult = 0.25
+    settings.forecast_max_single_pct = 0.15
+    settings.use_maker_orders = True
+    settings.max_positions_per_market = 1
+    settings.min_trade_size = 1.0
+    settings.forecast_yes_max_entry = 0.15
+    settings.forecast_no_min_entry = 0.60
+    settings.forecast_category_filter_enabled = False
+    settings.quant_weights = {
+        "line_movement": 0.30, "volume_spike": 0.25,
+        "book_imbalance": 0.20, "spread": 0.15, "time_decay": 0.10,
+    }
+    settings.ensemble_stdev_low = 0.05
+    settings.ensemble_stdev_high = 0.12
+    settings.confidence_mult_low = 1.0
+    settings.confidence_mult_mid = 0.7
+    settings.confidence_mult_high = 0.4
+    settings.quant_negative_mult = 0.75
+    settings.post_breaker_kelly_reduction = 0.50
+    settings.bankroll_survival_threshold = 50.0
+    settings.bankroll_growth_threshold = 500.0
+
+    strategy = EnsembleForecastStrategy(
+        settings=settings, ensemble=MagicMock(), researcher=MagicMock())
+
+    ctx = MagicMock()
+    ctx.settings = settings
+    ctx.portfolio_lock = asyncio.Lock()
+
+    # candidate.current_price=0.10 is BELOW the 0.15 YES max entry threshold
+    candidate = MarketCandidate(
+        polymarket_id="test-yes-passes", question="Will Y happen?", category="test",
+        resolution_time=datetime.now(timezone.utc) + timedelta(hours=24),
+        current_price=0.10, book_depth=1000.0, no_price=0.90)
+
+    quant = QuantSignals(0, 0, 0, 0, 0)
+
+    # ensemble_probability=0.35 => yes_edge=0.25, kelly returns side="YES" with edge=0.25
+    ensemble_result = MagicMock()
+    ensemble_result.ensemble_probability = 0.35
+    ensemble_result.stdev = 0.05
+    est = MagicMock()
+    est.model = "test"
+    est.probability = 0.35
+    est.confidence = 0.8
+    est.reasoning = "test"
+    ensemble_result.estimates = [est]  # single estimate skips consensus check
+    strategy._ensemble.analyze = AsyncMock(return_value=ensemble_result)
+    strategy._ensemble.challenge_estimate = AsyncMock(return_value=None)
+    strategy._researcher.search = AsyncMock(return_value="research text")
+
+    ctx.risk_manager = MagicMock()
+    ctx.risk_manager.confidence_multiplier.return_value = 1.0
+    ctx.risk_manager.edge_skepticism_discount.return_value = 1.0
+    ctx.risk_manager.check.return_value = MagicMock(allowed=True)
+    ctx.executor = AsyncMock()
+
+    # DB mock: market upsert returns id=1, analyses returns 10, dedup check returns 0 (no existing)
+    async def mock_fetchval(sql, *args):
+        if "INSERT INTO markets" in sql:
+            return 1
+        if "INSERT INTO analyses" in sql:
+            return 10
+        if "SELECT COUNT(*) FROM trades" in sql:
+            return 0  # No existing position — allow the trade
+        return None
+
+    async def mock_fetchrow(sql, *args):
+        if "system_state" in sql:
+            return {
+                "bankroll": 300.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+                "circuit_breaker_until": None,
+            }
+        return None
+
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(side_effect=mock_fetchval)
+    ctx.db.fetchrow = AsyncMock(side_effect=mock_fetchrow)
+
+    ctx.email_notifier = AsyncMock()
+
+    from polybot.trading.risk import PortfolioState
+    portfolio = PortfolioState(
+        bankroll=300.0, total_deployed=0.0, daily_pnl=0.0,
+        open_count=0, category_deployed={}, circuit_breaker_until=None)
+
+    await strategy._full_analyze_and_trade(
+        candidate=candidate, quant=quant, trust_weights={},
+        bankroll=300.0, kelly_mult=0.25, edge_threshold=0.05,
+        portfolio=portfolio, calibration_corrections={}, ctx=ctx)
+
+    # The filter should NOT block this trade — place_order should be called
+    ctx.executor.place_order.assert_called_once()
 
 
 @pytest.mark.asyncio
