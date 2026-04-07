@@ -239,6 +239,7 @@ from polybot.strategies.snipe import verify_snipe_via_odds
 async def test_odds_verify_confirms_yes_snipe():
     """Sportsbook consensus > 85% for YES snipe should verify."""
     odds_client = MagicMock()
+    odds_client.credits_exhausted = False
     odds_client.fetch_odds = AsyncMock(return_value=[{
         "id": "evt1", "sport_key": "basketball_nba",
         "home_team": "Thunder", "away_team": "Jazz",
@@ -267,6 +268,7 @@ async def test_odds_verify_confirms_yes_snipe():
 async def test_odds_verify_rejects_weak_consensus():
     """Sportsbook consensus 60% for YES snipe should NOT verify."""
     odds_client = MagicMock()
+    odds_client.credits_exhausted = False
     odds_client.fetch_odds = AsyncMock(return_value=[{
         "id": "evt2", "sport_key": "basketball_nba",
         "home_team": "Lakers", "away_team": "Mavericks",
@@ -291,6 +293,7 @@ async def test_odds_verify_rejects_weak_consensus():
 async def test_odds_verify_returns_false_no_data():
     """No odds data should return False (fall back to LLM)."""
     odds_client = MagicMock()
+    odds_client.credits_exhausted = False
     odds_client.fetch_odds = AsyncMock(return_value=[])
 
     result = await verify_snipe_via_odds(
@@ -303,9 +306,31 @@ async def test_odds_verify_returns_false_no_data():
 
 
 @pytest.mark.asyncio
+async def test_odds_verify_short_circuits_when_credits_exhausted():
+    """verify_snipe_via_odds should return False immediately when credits are exhausted."""
+    from polybot.strategies.snipe import verify_snipe_via_odds
+    from unittest.mock import AsyncMock, MagicMock, PropertyMock
+
+    odds_client = MagicMock()
+    type(odds_client).credits_exhausted = PropertyMock(return_value=True)
+    odds_client.fetch_odds = AsyncMock()
+
+    result = await verify_snipe_via_odds(
+        odds_client=odds_client,
+        question="Will the Los Angeles Lakers win?",
+        side="YES",
+        min_consensus=0.85,
+    )
+
+    assert result is False
+    odds_client.fetch_odds.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_odds_verify_no_side_snipe():
     """NO-side snipe: consensus < 15% (i.e., NO is > 85%) should verify."""
     odds_client = MagicMock()
+    odds_client.credits_exhausted = False
     odds_client.fetch_odds = AsyncMock(return_value=[{
         "id": "evt3", "sport_key": "basketball_nba",
         "home_team": "Thunder", "away_team": "Jazz",

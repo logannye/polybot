@@ -99,6 +99,8 @@ async def verify_snipe_via_odds(
 
     Returns True if sportsbook consensus confirms the snipe, False otherwise.
     """
+    if odds_client.credits_exhausted:
+        return False
     q_lower = question.lower()
 
     for sport in ["basketball_nba", "icehockey_nhl", "soccer_epl",
