@@ -116,6 +116,82 @@ def test_temporal_arb_none_when_correct():
 from polybot.strategies.arbitrage import ArbitrageStrategy, ArbOpportunity
 
 
+class TestArbCapEnforcesLegCount:
+    """Verify that the per-opportunity cap check accounts for multi-leg exhaustive arbs."""
+
+    def _make_strategy(self):
+        class FakeSettings:
+            arb_interval_seconds = 60
+            arb_kelly_multiplier = 0.20
+            arb_max_single_pct = 0.40
+            arb_min_bankroll = 50.0
+            arb_min_leg_liquidity = 0.0
+            arb_max_net_edge = 0.20
+            use_maker_orders = True
+            arb_max_concurrent = 8
+        return ArbitrageStrategy(FakeSettings())
+
+    def test_9_leg_exhaustive_blocked_by_cap_of_8(self):
+        """A 9-leg exhaustive arb must be blocked when arb_max_concurrent=8."""
+        strategy = self._make_strategy()
+
+        # Build 9 markets summing near 1.0 (exhaustive group)
+        nine_markets = [
+            {"polymarket_id": f"gold_{i}", "yes_price": round(1.0 / 9 - 0.005, 4),
+             "no_price": round(1.0 - 1.0 / 9 + 0.005, 4),
+             "book_depth": 10000.0, "category": "politics"}
+            for i in range(9)
+        ]
+
+        scanner = MagicMock()
+        scanner.fetch_markets = AsyncMock(return_value=nine_markets)
+        scanner.fetch_event_groups = MagicMock(return_value={"trump-gold-cards": nine_markets})
+
+        # DB call sequence for fetchrow:
+        # 1. SELECT enabled FROM strategy_performance -> {"enabled": True}
+        # 2. SELECT bankroll FROM system_state -> {"bankroll": 5000}
+        db = AsyncMock()
+        db.fetchrow = AsyncMock(side_effect=[
+            {"enabled": True},   # strategy enabled check
+            {"bankroll": 5000},  # bankroll gate
+        ])
+
+        # DB call sequence for fetchval:
+        # 1. SELECT COUNT(*) ... (initial arb_open cap check, line 178) -> 0
+        # 2. SELECT COUNT(*) ... (dedup recent_count per opp, line 250-256) -> 0
+        # 3. SELECT COUNT(*) ... (re-fetch for per-opp cap check) -> 0
+        db.fetchval = AsyncMock(side_effect=[
+            0,  # initial arb_open cap check
+            0,  # dedup recent_count for the one exhaustive opp
+            0,  # re-fetch open count before per-opp cap loop
+        ])
+
+        # dedup warmup fetch
+        db.fetch = AsyncMock(return_value=[])
+
+        # Patch detect_exhaustive_arb to return a 9-market opportunity
+        arb_opp = ArbOpportunity(
+            arb_type="exhaustive", side="NO", gross_edge=0.05, net_edge=0.03,
+            markets=nine_markets,
+        )
+
+        ctx = MagicMock()
+        ctx.scanner = scanner
+        ctx.db = db
+        ctx.executor = AsyncMock()
+        ctx.email_notifier = AsyncMock()
+        ctx.portfolio_lock = asyncio.Lock()
+        ctx.risk_manager = AsyncMock()
+        ctx.settings = MagicMock()
+
+        with patch("polybot.strategies.arbitrage.detect_exhaustive_arb", return_value=arb_opp), \
+             patch("polybot.strategies.arbitrage.detect_complement_arb", return_value=None):
+            asyncio.run(strategy.run_once(ctx))
+
+        # The 9-leg arb should be blocked: 0 + 9 > 8
+        ctx.executor.place_multi_leg_order.assert_not_called()
+
+
 class TestArbDedup:
     def _make_strategy(self):
         """Create an ArbitrageStrategy with minimal settings."""

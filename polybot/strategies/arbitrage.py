@@ -261,9 +261,21 @@ class ArbitrageStrategy(Strategy):
 
         if opportunities and not new_opps:
             log.debug("arb_all_known", total=len(opportunities))
+
+        # Re-fetch open count and enforce cap including leg count
+        arb_open = await ctx.db.fetchval(
+            "SELECT COUNT(*) FROM trades WHERE strategy = 'arbitrage' AND status IN ('open', 'dry_run', 'filled')")
+        arb_open = arb_open or 0
+
         for market_ids, opp in new_opps:
+            num_legs = len(opp.markets) if opp.arb_type == "exhaustive" else (2 if opp.arb_type == "complement" else 1)
+            if arb_open + num_legs > arb_max:
+                log.info("arb_would_exceed_cap", open=arb_open, legs=num_legs,
+                         max=arb_max, arb_type=opp.arb_type)
+                continue
             self._seen_arbs.update(market_ids)
             await self._execute_arb(opp, ctx)
+            arb_open += num_legs
 
     async def _execute_arb(self, opp: ArbOpportunity, ctx: TradingContext) -> None:
         async with ctx.portfolio_lock:
