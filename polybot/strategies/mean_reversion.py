@@ -32,6 +32,8 @@ class MeanReversionStrategy(Strategy):
         self._max_hold_hours = settings.mr_max_hold_hours
         self._settings = settings
         self._min_expected_reversion = getattr(settings, 'mr_min_expected_reversion', 0.0)
+        self._min_entry_price = getattr(settings, 'mr_min_entry_price', 0.10)
+        self._max_entry_price = getattr(settings, 'mr_max_entry_price', 0.90)
         _bmt = getattr(settings, 'mr_big_move_threshold', 0.15)
         self._big_move_threshold = float(_bmt) if isinstance(_bmt, (int, float)) else 0.15
         _bmk = getattr(settings, 'mr_big_move_kelly_boost', 1.3)
@@ -98,8 +100,8 @@ class MeanReversionStrategy(Strategy):
                 continue
             if m.get("book_depth", 0) < self._min_depth:
                 continue
-            # Skip extreme prices (near resolution, snipe territory)
-            if price < 0.10 or price > 0.90:
+            # Mid-range filter: data shows MR profits in 0.25-0.75, loses at extremes
+            if price < self._min_entry_price or price > self._max_entry_price:
                 continue
 
             # Compare against sliding window of recent snapshots

@@ -19,6 +19,8 @@ def _make_settings():
     s.mr_min_book_depth = 500.0
     s.mr_cooldown_hours = 6.0
     s.mr_max_hold_hours = 24.0
+    s.mr_min_entry_price = 0.25
+    s.mr_max_entry_price = 0.75
     return s
 
 
@@ -292,3 +294,195 @@ async def test_big_move_kelly_boost():
     # than the ~$20 base sizing. Exact value depends on Kelly math, but
     # must be > $25 (boosted) rather than ~$20 (unboosted).
     assert size_usd > 25.0, f"Expected boosted size > $25, got ${size_usd:.2f}"
+
+
+class TestMidRangeFilter:
+    def test_reads_mid_range_settings(self):
+        """Strategy should read mr_min_entry_price and mr_max_entry_price from settings."""
+        s = _make_settings()
+        s.mr_min_entry_price = 0.25
+        s.mr_max_entry_price = 0.75
+        strategy = MeanReversionStrategy(s)
+        assert strategy._min_entry_price == 0.25
+        assert strategy._max_entry_price == 0.75
+
+    def test_defaults_to_legacy_values_if_missing(self):
+        """Should default to 0.10/0.90 (original hardcoded values) if settings absent."""
+        import types
+        # Use a simple namespace so getattr(..., default) correctly returns the default
+        s = types.SimpleNamespace(
+            mr_interval_seconds=120.0,
+            mr_trigger_threshold=0.05,
+            mr_reversion_fraction=0.40,
+            mr_kelly_mult=0.15,
+            mr_max_single_pct=0.10,
+            mr_max_concurrent=5,
+            mr_min_volume_24h=2000.0,
+            mr_min_book_depth=500.0,
+            mr_cooldown_hours=6.0,
+            mr_max_hold_hours=24.0,
+            mr_min_expected_reversion=0.0,
+            mr_big_move_threshold=0.15,
+            mr_big_move_kelly_boost=1.3,
+            conviction_stack_enabled=False,
+            conviction_stack_per_signal=0.5,
+            conviction_stack_max=3.0,
+            # mr_min_entry_price and mr_max_entry_price intentionally absent
+        )
+        strategy = MeanReversionStrategy(s)
+        assert strategy._min_entry_price == 0.10
+        assert strategy._max_entry_price == 0.90
+
+
+@pytest.mark.asyncio
+async def test_rejects_extreme_low_price():
+    """Market at 0.15 (below min 0.25) should be skipped — place_order never called."""
+    s = _make_settings()
+    s.mr_min_entry_price = 0.25
+    s.mr_max_entry_price = 0.75
+    s.use_maker_orders = True
+    s.min_trade_size = 1.0
+    s.post_breaker_kelly_reduction = 0.5
+    s.bankroll_survival_threshold = 50.0
+    s.bankroll_growth_threshold = 500.0
+    s.mr_min_expected_reversion = 0.0
+    s.conviction_stack_enabled = False
+    s.conviction_stack_per_signal = 0.5
+    s.conviction_stack_max = 3.0
+
+    strategy = MeanReversionStrategy(s)
+
+    # Inject a snapshot so a big move would be detected (price dropped from 0.30 to 0.15)
+    now = datetime.now(timezone.utc)
+    strategy._price_snapshots["m1"] = [(0.30, now - timedelta(minutes=5))]
+
+    # Market is currently at extreme low price (0.15 < min 0.25) — should be rejected
+    market = _make_market("m1", price=0.15, volume=5000.0, depth=1000.0)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(side_effect=[
+        True,   # strategy enabled
+        0,      # mr_open count
+    ])
+    ctx.db.fetchrow = AsyncMock(return_value={
+        "bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+        "circuit_breaker_until": None,
+    })
+    ctx.scanner = MagicMock()
+    ctx.scanner.fetch_markets = AsyncMock(return_value=[market])
+    ctx.db.fetch = AsyncMock(return_value=[])
+    ctx.executor = AsyncMock()
+    ctx.settings = s
+    ctx.risk_manager = RiskManager()
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rejects_extreme_high_price():
+    """Market at 0.85 (above max 0.75) should be skipped — place_order never called."""
+    s = _make_settings()
+    s.mr_min_entry_price = 0.25
+    s.mr_max_entry_price = 0.75
+    s.use_maker_orders = True
+    s.min_trade_size = 1.0
+    s.post_breaker_kelly_reduction = 0.5
+    s.bankroll_survival_threshold = 50.0
+    s.bankroll_growth_threshold = 500.0
+    s.mr_min_expected_reversion = 0.0
+    s.conviction_stack_enabled = False
+    s.conviction_stack_per_signal = 0.5
+    s.conviction_stack_max = 3.0
+
+    strategy = MeanReversionStrategy(s)
+
+    # Inject a snapshot so a big move would be detected (price rose from 0.70 to 0.85)
+    now = datetime.now(timezone.utc)
+    strategy._price_snapshots["m1"] = [(0.70, now - timedelta(minutes=5))]
+
+    # Market is currently at extreme high price (0.85 > max 0.75) — should be rejected
+    market = _make_market("m1", price=0.85, volume=5000.0, depth=1000.0)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(side_effect=[
+        True,   # strategy enabled
+        0,      # mr_open count
+    ])
+    ctx.db.fetchrow = AsyncMock(return_value={
+        "bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+        "circuit_breaker_until": None,
+    })
+    ctx.scanner = MagicMock()
+    ctx.scanner.fetch_markets = AsyncMock(return_value=[market])
+    ctx.db.fetch = AsyncMock(return_value=[])
+    ctx.executor = AsyncMock()
+    ctx.settings = s
+    ctx.risk_manager = RiskManager()
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_accepts_mid_range_price():
+    """Market at 0.50 with a big move should pass the filter and reach place_order."""
+    s = _make_settings()
+    s.mr_min_entry_price = 0.25
+    s.mr_max_entry_price = 0.75
+    s.use_maker_orders = True
+    s.min_trade_size = 1.0
+    s.post_breaker_kelly_reduction = 0.5
+    s.bankroll_survival_threshold = 50.0
+    s.bankroll_growth_threshold = 500.0
+    s.mr_min_expected_reversion = 0.0
+    s.conviction_stack_enabled = False
+    s.conviction_stack_per_signal = 0.5
+    s.conviction_stack_max = 3.0
+    s.mr_trigger_threshold = 0.10
+    s.mr_kelly_mult = 0.30
+    s.mr_max_single_pct = 0.10
+    s.mr_big_move_threshold = 0.15
+    s.mr_big_move_kelly_boost = 1.3
+
+    strategy = MeanReversionStrategy(s)
+
+    # Price dropped from 0.70 to 0.50 (20% drop > 10% trigger) — mid-range, should be accepted
+    now = datetime.now(timezone.utc)
+    strategy._price_snapshots["m1"] = [(0.70, now - timedelta(minutes=5))]
+    market = _make_market("m1", price=0.50, volume=5000.0, depth=5000.0)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(side_effect=[
+        True,   # strategy enabled
+        0,      # mr_open count
+        0,      # cooldown check
+        0,      # existing position check
+        1,      # market upsert returning id
+        1,      # analysis insert returning id
+    ])
+    ctx.db.fetchrow = AsyncMock(side_effect=[
+        {"bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+         "circuit_breaker_until": None},
+        {"bankroll": 500.0, "total_deployed": 0.0, "daily_pnl": 0.0,
+         "post_breaker_until": None, "circuit_breaker_until": None},
+    ])
+    ctx.db.fetch = AsyncMock(return_value=[])  # no open trades
+    ctx.executor = AsyncMock()
+    ctx.executor.place_order = AsyncMock(return_value=True)
+    ctx.settings = s
+    ctx.risk_manager = RiskManager()
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+    ctx.scanner = MagicMock()
+    ctx.scanner.fetch_markets = AsyncMock(return_value=[market])
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_called_once()
