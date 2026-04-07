@@ -96,10 +96,10 @@ def test_v2_strategy_settings_defaults():
     assert s.forecast_interval_seconds == 300  # v4 conservative: 180 → 300
     assert s.arb_kelly_mult == 0.80
     assert s.snipe_kelly_mult == 0.50     # v4 conservative: 0.65 → 0.50
-    assert s.forecast_kelly_mult == 0.20   # v4 conservative: 0.40 → 0.20
+    assert s.forecast_kelly_mult == 0.15   # lean-into-winners: 0.20 → 0.15
     assert s.arb_max_single_pct == 0.40
     assert s.snipe_max_single_pct == 0.25  # v4 conservative: 0.30 → 0.25
-    assert s.forecast_max_single_pct == 0.15  # v4 conservative: 0.25 → 0.15
+    assert s.forecast_max_single_pct == 0.05  # lean-into-winners: 0.15 → 0.05
     assert s.use_maker_orders is True
     assert s.max_total_deployed_pct == 0.70  # v4 conservative: 0.90 → 0.70
     assert s.max_concurrent_positions == 12  # v4 conservative: 20 → 12
@@ -109,9 +109,9 @@ def test_v2_strategy_settings_defaults():
     assert s.min_trade_size == 1.0
     # v5 10x: new strategies
     assert s.mm_enabled is False  # disabled — no real edge at $500 scale
-    assert s.mr_enabled is False  # disabled — not a home-run strategy
-    assert s.snipe_cooldown_hours == 1.0     # v5 10x: 4.0 → 1.0
-    assert s.snipe_max_entries_per_market == 4  # raised from 2 for convergence
+    assert s.mr_enabled is True   # lean-into-winners: re-enabled with mid-range filter
+    assert s.snipe_cooldown_hours == 0.5     # lean-into-winners: 1.0 → 0.5
+    assert s.snipe_max_entries_per_market == 6  # lean-into-winners: 4 → 6
     assert s.snipe_max_market_exposure_pct == 0.30
     assert not hasattr(s, "twilio_account_sid")
     assert not hasattr(s, "alert_phone")
