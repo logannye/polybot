@@ -213,6 +213,53 @@ async def test_run_once_skips_penny_odds():
 
 
 @pytest.mark.asyncio
+async def test_run_once_skips_penny_odds_no_side():
+    """Should skip NO-side divergences where 1 - yes_price < cv_min_implied_prob."""
+    s = _make_settings()
+    s.cv_min_implied_prob = 0.10
+    odds_client = MagicMock()
+    # FanDuel: Team A -2000 (~95%), Team B +1200 (~8%) — after devig Team A ~92%, Team B ~8%
+    # Polymarket: Team A -10000 (~99%), Team B +5566 (~1.77%)
+    # For Team A: consensus(~92%) < poly(~99%) → divergence < 0 → side = "NO"
+    # buy_price = 1 - yes_price = 1 - 0.99 = 0.01, which is < cv_min_implied_prob (0.10) → skip
+    odds_client.fetch_all_sports = AsyncMock(return_value=[
+        {"id": "evt1", "sport_key": "basketball_nba",
+         "home_team": "Team A", "away_team": "Team B",
+         "commence_time": "2026-04-06T00:00:00Z",
+         "bookmakers": [
+             {"key": "fanduel", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Team A", "price": -2000},
+                 {"name": "Team B", "price": 1200}]}]},
+             {"key": "polymarket", "markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Team A", "price": -10000},
+                 {"name": "Team B", "price": 5566}]}]},
+         ]}
+    ])
+
+    strategy = CrossVenueStrategy(settings=s, odds_client=odds_client)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    ctx.db.fetchval = AsyncMock(return_value=True)
+    ctx.executor = AsyncMock()
+    ctx.settings = s
+    ctx.scanner = MagicMock()
+    ctx.scanner.get_all_cached_prices.return_value = {
+        # yes_price=0.99 means NO buy_price = 1 - 0.99 = 0.01 (penny odds)
+        "m1": {"polymarket_id": "0xabc", "question": "Will Team A win?",
+               "yes_price": 0.99, "category": "sports", "book_depth": 5000,
+               "resolution_time": datetime.now(timezone.utc) + timedelta(days=3),
+               "volume_24h": 10000,
+               "yes_token_id": "tok1", "no_token_id": "tok2"},
+    }
+    ctx.portfolio_lock = asyncio.Lock()
+    ctx.email_notifier = AsyncMock()
+
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_once_trades_mid_range_divergence():
     """Should place a trade when divergence is real and buy_price >= cv_min_implied_prob."""
     s = _make_settings()
