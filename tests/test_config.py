@@ -28,7 +28,7 @@ def test_settings_loads_defaults(monkeypatch):
     assert settings.max_concurrent_positions == 12
     assert settings.daily_loss_limit_pct == 0.15
     assert settings.circuit_breaker_hours == 6
-    assert settings.resolution_hours_max == 72
+    assert settings.resolution_hours_max == 168
     assert settings.min_book_depth == 500.0
     assert settings.min_price == 0.05
     assert settings.max_price == 0.95

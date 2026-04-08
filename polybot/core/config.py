@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     post_breaker_kelly_reduction: float = 0.50
 
     # Market filters
-    resolution_hours_max: int = 72
+    resolution_hours_max: int = 168
     min_book_depth: float = 500.0
     min_price: float = 0.05
     max_price: float = 0.95
