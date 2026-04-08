@@ -44,3 +44,13 @@ class TestFilterMarkets:
         result = filter_markets(markets, min_book_depth=500.0, min_price=0.05)
         assert len(result) == 1
         assert result[0].polymarket_id == "good"
+
+    def test_passes_market_within_168h(self):
+        """A market resolving in 5 days passes the new 168h default window."""
+        m = _make_market(resolution_time=datetime.now(timezone.utc) + timedelta(hours=120))
+        assert len(filter_markets([m], resolution_hours_max=168)) == 1
+
+    def test_rejects_market_beyond_168h(self):
+        """A market resolving in 8 days is rejected by the 168h window."""
+        m = _make_market(resolution_time=datetime.now(timezone.utc) + timedelta(hours=200))
+        assert len(filter_markets([m], resolution_hours_max=168)) == 0
