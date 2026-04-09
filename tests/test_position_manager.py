@@ -914,6 +914,8 @@ async def test_political_trades_skip_early_exit():
     settings.take_profit_threshold = 0.20
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
+    settings.universal_max_hold_hours = 720.0  # disable universal time-stop for this test
+    settings.pol_max_hold_hours = 720.0  # disable political time-stop for this test
 
     mgr = ActivePositionManager(
         db=db, executor=executor, scanner=scanner,
@@ -952,6 +954,8 @@ async def test_political_trades_still_stop_loss():
     settings.take_profit_threshold = 0.20
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
+    settings.universal_max_hold_hours = 720.0  # disable universal time-stop for this test
+    settings.pol_max_hold_hours = 720.0  # disable political time-stop for this test
 
     email = AsyncMock()
 
@@ -992,6 +996,8 @@ async def test_political_trades_still_take_profit():
     settings.take_profit_threshold = 0.20
     settings.stop_loss_threshold = 0.25
     settings.early_exit_edge = 0.02
+    settings.universal_max_hold_hours = 720.0  # disable universal time-stop for this test
+    settings.pol_max_hold_hours = 720.0  # disable political time-stop for this test
 
     email = AsyncMock()
 
@@ -1053,3 +1059,165 @@ async def test_forecast_position_uses_forecast_stop_loss():
     executor.exit_position.assert_called_once()
     call_kwargs = executor.exit_position.call_args[1]
     assert call_kwargs["exit_reason"] == "stop_loss"
+
+
+@pytest.mark.asyncio
+async def test_universal_time_stop_fires():
+    """Any trade held longer than universal_max_hold_hours should be time-stopped."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    opened_13h_ago = datetime.now(timezone.utc) - timedelta(hours=13)
+    resolves_72h = datetime.now(timezone.utc) + timedelta(hours=72)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 100, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "forecast", "status": "dry_run",
+        "polymarket_id": "mkt-universal", "question": "Universal time-stop test?",
+        "ensemble_probability": 0.65, "opened_at": opened_13h_ago,
+        "resolution_time": resolves_72h, "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=-0.50)
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-universal": {"yes_price": 0.48, "no_price": 0.52},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.forecast_time_stop_minutes = 90.0
+    settings.forecast_time_stop_fraction = 0.15
+    settings.forecast_time_stop_max_minutes = 480.0
+    settings.forecast_time_stop_min_resolution_hours = 48.0
+    settings.universal_max_hold_hours = 12.0
+    settings.snipe_max_hold_hours = 8.0
+    settings.forecast_stop_loss_threshold = 0.10
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=100, exit_price=0.48, exit_reason="time_stop")
+
+
+@pytest.mark.asyncio
+async def test_universal_time_stop_does_not_fire_within_limit():
+    """Trade held 11h (under 12h universal limit) should not be universally time-stopped."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    opened_11h_ago = datetime.now(timezone.utc) - timedelta(hours=11)
+    resolves_72h = datetime.now(timezone.utc) + timedelta(hours=72)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 101, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "political", "status": "dry_run",
+        "polymarket_id": "mkt-ok", "question": "Within universal limit?",
+        "ensemble_probability": None, "opened_at": opened_11h_ago,
+        "resolution_time": resolves_72h, "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-ok": {"yes_price": 0.50, "no_price": 0.50},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.universal_max_hold_hours = 12.0
+    settings.pol_max_hold_hours = 12.0
+    settings.snipe_max_hold_hours = 8.0
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_political_time_stop_fires():
+    """Political trade held longer than pol_max_hold_hours should be time-stopped."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    opened_13h_ago = datetime.now(timezone.utc) - timedelta(hours=13)
+    resolves_7d = datetime.now(timezone.utc) + timedelta(days=7)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 102, "side": "NO", "entry_price": 0.80, "shares": 50.0,
+        "position_size_usd": 40.0, "strategy": "political", "status": "dry_run",
+        "polymarket_id": "mkt-pol", "question": "Political time-stop test?",
+        "ensemble_probability": None, "opened_at": opened_13h_ago,
+        "resolution_time": resolves_7d, "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    executor.exit_position = AsyncMock(return_value=-1.20)
+
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-pol": {"yes_price": 0.75, "no_price": 0.25},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.universal_max_hold_hours = 12.0
+    settings.pol_max_hold_hours = 12.0
+    settings.snipe_max_hold_hours = 8.0
+
+    email = AsyncMock()
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=email, settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_called_once_with(
+        trade_id=102, exit_price=0.25, exit_reason="time_stop")
+
+
+@pytest.mark.asyncio
+async def test_universal_time_stop_skips_profitable():
+    """Trade past universal limit but profitable should NOT be time-stopped (let TP handle it)."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=None)
+    opened_13h_ago = datetime.now(timezone.utc) - timedelta(hours=13)
+    resolves_72h = datetime.now(timezone.utc) + timedelta(hours=72)
+    db.fetch = AsyncMock(return_value=[{
+        "id": 103, "side": "YES", "entry_price": 0.50, "shares": 20.0,
+        "position_size_usd": 10.0, "strategy": "political", "status": "dry_run",
+        "polymarket_id": "mkt-profit-univ", "question": "Profitable past universal?",
+        "ensemble_probability": None, "opened_at": opened_13h_ago,
+        "resolution_time": resolves_72h, "kelly_inputs": None,
+    }])
+
+    executor = AsyncMock()
+    scanner = MagicMock()
+    scanner.get_all_cached_prices.return_value = {
+        "mkt-profit-univ": {"yes_price": 0.55, "no_price": 0.45},
+    }
+
+    settings = MagicMock()
+    settings.take_profit_threshold = 0.20
+    settings.stop_loss_threshold = 0.25
+    settings.early_exit_edge = 0.02
+    settings.universal_max_hold_hours = 12.0
+    settings.pol_max_hold_hours = 12.0
+    settings.snipe_max_hold_hours = 8.0
+
+    mgr = ActivePositionManager(
+        db=db, executor=executor, scanner=scanner,
+        email_notifier=AsyncMock(), settings=settings)
+    await mgr.check_positions()
+
+    executor.exit_position.assert_not_called()

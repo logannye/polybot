@@ -155,6 +155,7 @@ class TestStrategyAwareRiskLimits:
 
     def test_updated_risk_defaults(self):
         rm = RiskManager()
+        assert rm.max_per_category_pct == 0.50
         assert rm.max_total_deployed_pct == 0.70
         assert rm.max_concurrent == 12
         assert rm.daily_loss_limit_pct == 0.15
