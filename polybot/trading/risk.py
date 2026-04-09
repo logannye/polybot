@@ -42,7 +42,7 @@ def bankroll_kelly_adjustment(
 
 class RiskManager:
     def __init__(self, max_single_pct=0.15, max_total_deployed_pct=0.70,
-                 max_per_category_pct=0.25, max_concurrent=12,
+                 max_per_category_pct=0.50, max_concurrent=12,
                  daily_loss_limit_pct=0.15, circuit_breaker_hours=6,
                  min_trade_size=1.0, book_depth_max_pct=0.10):
         self.max_single_pct = max_single_pct

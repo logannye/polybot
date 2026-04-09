@@ -55,6 +55,10 @@ class ActivePositionManager:
             settings, 'forecast_time_stop_min_resolution_hours', 48.0)
         self._portfolio_lock = portfolio_lock
         self._snipe_max_hold_hours = getattr(settings, 'snipe_max_hold_hours', 48.0)
+        _umhh = getattr(settings, 'universal_max_hold_hours', 12.0)
+        self._universal_max_hold_hours = float(_umhh) if isinstance(_umhh, (int, float)) else 12.0
+        _pmhh = getattr(settings, 'pol_max_hold_hours', 12.0)
+        self._pol_max_hold_hours = float(_pmhh) if isinstance(_pmhh, (int, float)) else 12.0
 
     async def check_positions(self):
         # Load per-strategy learned thresholds (adaptive TP/SL)
@@ -100,6 +104,38 @@ class ActivePositionManager:
             entry_price = float(pos["entry_price"])
             side = pos["side"]
             trade_id = pos["id"]
+
+            # Universal time-stop: hard ceiling on all positions.
+            # Skips profitable positions — let TP handle those.
+            if pos.get("opened_at") is not None:
+                hold_hours = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 3600
+                if hold_hours > self._universal_max_hold_hours:
+                    unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
+                    if unrealized <= 0:
+                        exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                        if self._portfolio_lock:
+                            async with self._portfolio_lock:
+                                pnl = await self._executor.exit_position(
+                                    trade_id=trade_id, exit_price=exit_price,
+                                    exit_reason="time_stop")
+                        else:
+                            pnl = await self._executor.exit_position(
+                                trade_id=trade_id, exit_price=exit_price,
+                                exit_reason="time_stop")
+                        if pnl is not None:
+                            exits_triggered += 1
+                            log.info("universal_time_stop", trade_id=trade_id,
+                                     hold_hours=round(hold_hours, 1),
+                                     pnl=round(pnl, 4),
+                                     market=pos["question"][:60])
+                            await self._email.send(
+                                f"[POLYBOT] Universal time-stop ({hold_hours:.0f}h)",
+                                f"<p><b>Market:</b> {pos['question']}</p>"
+                                f"<p><b>Strategy:</b> {pos['strategy']} | "
+                                f"Held: {hold_hours:.0f}h (limit: "
+                                f"{self._universal_max_hold_hours:.0f}h) | "
+                                f"P&L: ${pnl:+.2f}</p>")
+                        continue
 
             # Time-stop: auto-exit forecast trades exceeding hold limit.
             # Dynamic: scales with time-to-resolution so long-dated markets
@@ -238,6 +274,37 @@ class ActivePositionManager:
             # The edge is structural calibration bias, not timing-dependent.
             # Only take-profit and stop-loss apply — skip early-exit (edge erosion).
             if pos["strategy"] == "political":
+                # Political time-stop: free capital from stale positions
+                # Skips profitable positions — let TP handle those.
+                if pos.get("opened_at") is not None:
+                    hold_hours = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 3600
+                    if hold_hours > self._pol_max_hold_hours:
+                        unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
+                        if unrealized <= 0:
+                            exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                            if self._portfolio_lock:
+                                async with self._portfolio_lock:
+                                    pnl = await self._executor.exit_position(
+                                        trade_id=trade_id, exit_price=exit_price,
+                                        exit_reason="time_stop")
+                            else:
+                                pnl = await self._executor.exit_position(
+                                    trade_id=trade_id, exit_price=exit_price,
+                                    exit_reason="time_stop")
+                            if pnl is not None:
+                                exits_triggered += 1
+                                log.info("pol_time_stop", trade_id=trade_id,
+                                         hold_hours=round(hold_hours, 1),
+                                         pnl=round(pnl, 4),
+                                         market=pos["question"][:60])
+                                await self._email.send(
+                                    f"[POLYBOT] Political time-stop ({hold_hours:.0f}h)",
+                                    f"<p><b>Market:</b> {pos['question']}</p>"
+                                    f"<p><b>Held:</b> {hold_hours:.0f}h (limit: "
+                                    f"{self._pol_max_hold_hours:.0f}h) | "
+                                    f"P&L: ${pnl:+.2f}</p>")
+                            continue
+                # Existing TP/SL logic continues below...
                 if should_take_profit(side, entry_price, current_yes_price,
                                       self._take_profit):
                     exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
