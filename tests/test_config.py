@@ -23,7 +23,7 @@ def test_settings_loads_defaults(monkeypatch):
     assert settings.scan_interval_seconds == 300
     assert settings.max_single_position_pct == 0.15
     assert settings.max_total_deployed_pct == 0.70
-    assert settings.max_per_category_pct == 0.25
+    assert settings.max_per_category_pct == 0.50
     assert settings.min_trade_size == 1.0
     assert settings.max_concurrent_positions == 12
     assert settings.daily_loss_limit_pct == 0.15
@@ -103,7 +103,7 @@ def test_v2_strategy_settings_defaults():
     assert s.use_maker_orders is True
     assert s.max_total_deployed_pct == 0.70  # v4 conservative: 0.90 → 0.70
     assert s.max_concurrent_positions == 12  # v4 conservative: 20 → 12
-    assert s.max_per_category_pct == 0.25    # v4 conservative: 0.40 → 0.25
+    assert s.max_per_category_pct == 0.50    # capital turnover: 0.25 → 0.50
     assert s.daily_loss_limit_pct == 0.15
     assert s.circuit_breaker_hours == 6
     assert s.min_trade_size == 1.0
