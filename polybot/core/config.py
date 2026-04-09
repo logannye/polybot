@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     # Portfolio limits
     max_single_position_pct: float = 0.15
     max_total_deployed_pct: float = 0.70
-    max_per_category_pct: float = 0.25
+    max_per_category_pct: float = 0.50
     min_trade_size: float = 1.0
     max_concurrent_positions: int = 12
     max_positions_per_market: int = 1
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     snipe_reentry_threshold: float = 0.03
     snipe_max_entries_per_market: int = 3
     snipe_max_market_exposure_pct: float = 0.30  # max cumulative exposure per market
-    snipe_max_hold_hours: float = 6.0
+    snipe_max_hold_hours: float = 8.0
     snipe_odds_verification_enabled: bool = True
     snipe_odds_min_consensus: float = 0.85
 
@@ -200,7 +200,7 @@ class Settings(BaseSettings):
     mr_min_volume_24h: float = 2000.0
     mr_min_book_depth: float = 500.0
     mr_cooldown_hours: float = 0.5
-    mr_max_hold_hours: float = 1.0
+    mr_max_hold_hours: float = 2.0
     mr_min_expected_reversion: float = 0.03
     mr_big_move_threshold: float = 0.15   # moves above this get kelly boost
     mr_big_move_kelly_boost: float = 1.3  # kelly multiplier for big moves
@@ -234,6 +234,10 @@ class Settings(BaseSettings):
     pol_min_liquidity: float = 50000.0         # only liquid markets
     pol_llm_confirm_edge: float = 0.10         # use LLM to confirm edges above 10% (future)
     pol_max_positions: int = 5                 # max concurrent political positions
+    pol_max_hold_hours: float = 12.0           # time-stop: free capital from stale political positions
+
+    # Universal position hold limit
+    universal_max_hold_hours: float = 12.0     # hard ceiling — no position held longer than this
 
     # Live Game Closer strategy
     lg_enabled: bool = True
