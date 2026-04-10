@@ -89,30 +89,30 @@ class ActivePositionManager:
         if not positions:
             return
 
-        price_cache = self._scanner.get_all_cached_prices()
-        if not price_cache:
-            log.debug("position_manager_no_prices")
-            return
+        price_cache = self._scanner.get_all_cached_prices() or {}
 
         exits_triggered = 0
         for pos in positions:
             market_data = price_cache.get(pos["polymarket_id"])
-            if not market_data:
-                continue
-
-            current_yes_price = market_data["yes_price"]
             entry_price = float(pos["entry_price"])
             side = pos["side"]
             trade_id = pos["id"]
 
             # Universal time-stop: hard ceiling on all positions.
-            # Skips profitable positions — let TP handle those.
+            # Fires BEFORE price cache check — markets that fell out of the
+            # scanner's cache still get reaped. Uses entry price as fallback
+            # when no current price is available (closes at ~breakeven).
             if pos.get("opened_at") is not None:
                 hold_hours = (datetime.now(timezone.utc) - pos["opened_at"]).total_seconds() / 3600
                 if hold_hours > self._universal_max_hold_hours:
-                    unrealized = compute_unrealized_return(side, entry_price, current_yes_price)
+                    if market_data:
+                        current = market_data["yes_price"]
+                        unrealized = compute_unrealized_return(side, entry_price, current)
+                    else:
+                        current = (1.0 - entry_price) if side == "NO" else entry_price
+                        unrealized = 0.0  # no price data — assume breakeven
                     if unrealized <= 0:
-                        exit_price = current_yes_price if side == "YES" else (1.0 - current_yes_price)
+                        exit_price = current if side == "YES" else (1.0 - current)
                         if self._portfolio_lock:
                             async with self._portfolio_lock:
                                 pnl = await self._executor.exit_position(
@@ -127,6 +127,7 @@ class ActivePositionManager:
                             log.info("universal_time_stop", trade_id=trade_id,
                                      hold_hours=round(hold_hours, 1),
                                      pnl=round(pnl, 4),
+                                     had_price=bool(market_data),
                                      market=pos["question"][:60])
                             await self._email.send(
                                 f"[POLYBOT] Universal time-stop ({hold_hours:.0f}h)",
@@ -136,6 +137,11 @@ class ActivePositionManager:
                                 f"{self._universal_max_hold_hours:.0f}h) | "
                                 f"P&L: ${pnl:+.2f}</p>")
                         continue
+
+            if not market_data:
+                continue
+
+            current_yes_price = market_data["yes_price"]
 
             # Time-stop: auto-exit forecast trades exceeding hold limit.
             # Dynamic: scales with time-to-resolution so long-dated markets
