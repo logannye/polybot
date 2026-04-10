@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # Strategy position limits
     arb_max_single_pct: float = 0.40
-    snipe_max_single_pct: float = 0.25
+    snipe_max_single_pct: float = 0.05
     forecast_max_single_pct: float = 0.15
 
     # Fee model: makers pay 0%, takers pay category-specific rates
@@ -191,10 +191,10 @@ class Settings(BaseSettings):
 
     # Mean reversion strategy
     mr_enabled: bool = False
-    mr_interval_seconds: float = 120.0
+    mr_interval_seconds: float = 60.0
     mr_trigger_threshold: float = 0.10
     mr_reversion_fraction: float = 0.40
-    mr_kelly_mult: float = 0.35
+    mr_kelly_mult: float = 0.50
     mr_max_single_pct: float = 0.20
     mr_max_concurrent: int = 5
     mr_min_volume_24h: float = 2000.0
@@ -226,7 +226,7 @@ class Settings(BaseSettings):
     odds_api_key: str = ""
 
     # Political calibration strategy
-    pol_enabled: bool = True
+    pol_enabled: bool = False
     pol_interval_seconds: float = 600.0        # 10 min scan cycle
     pol_kelly_mult: float = 0.40               # aggressive — high-conviction calibration edge
     pol_max_single_pct: float = 0.20           # up to 20% bankroll per position

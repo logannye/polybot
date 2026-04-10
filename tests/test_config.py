@@ -98,7 +98,7 @@ def test_v2_strategy_settings_defaults():
     assert s.snipe_kelly_mult == 0.50     # v4 conservative: 0.65 → 0.50
     assert s.forecast_kelly_mult == 0.15   # lean-into-winners: 0.20 → 0.15
     assert s.arb_max_single_pct == 0.40
-    assert s.snipe_max_single_pct == 0.25  # v4 conservative: 0.30 → 0.25
+    assert s.snipe_max_single_pct == 0.05  # capital realloc: 0.25 → 0.05 (redirect to MR)
     assert s.forecast_max_single_pct == 0.05  # lean-into-winners: 0.15 → 0.05
     assert s.use_maker_orders is True
     assert s.max_total_deployed_pct == 0.70  # v4 conservative: 0.90 → 0.70
