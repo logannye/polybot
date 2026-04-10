@@ -349,3 +349,36 @@ async def test_odds_verify_no_side_snipe():
         min_consensus=0.85,
     )
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_snipe_max_concurrent_blocks():
+    """Snipe run_once should return early when max concurrent reached."""
+    from unittest.mock import AsyncMock, MagicMock
+    from polybot.strategies.snipe import ResolutionSnipeStrategy
+
+    settings = MagicMock()
+    settings.snipe_max_single_pct = 0.05
+    settings.snipe_min_net_edge = 0.02
+    settings.snipe_min_confidence = 0.90
+    settings.snipe_hours_max = 72.0
+    settings.use_maker_orders = True
+    settings.snipe_cooldown_hours = 4.0
+    settings.snipe_reentry_threshold = 0.03
+    settings.snipe_max_entries_per_market = 3
+    settings.snipe_odds_verification_enabled = False
+    settings.snipe_odds_min_consensus = 0.85
+    settings.snipe_max_concurrent = 3
+
+    strategy = ResolutionSnipeStrategy(settings=settings, ensemble=None, odds_client=None)
+
+    ctx = MagicMock()
+    ctx.db = AsyncMock()
+    # First fetchval: enabled check → True
+    # Second fetchval: open snipe count → 3 (at limit)
+    ctx.db.fetchval = AsyncMock(side_effect=[True, 3])
+
+    await strategy.run_once(ctx)
+
+    # Should have returned early — no fetch call for cooldowns
+    ctx.db.fetch.assert_not_called()

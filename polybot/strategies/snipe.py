@@ -160,11 +160,22 @@ class ResolutionSnipeStrategy(Strategy):
         self._odds_client = odds_client
         self._odds_verification_enabled = getattr(settings, 'snipe_odds_verification_enabled', False)
         self._odds_min_consensus = getattr(settings, 'snipe_odds_min_consensus', 0.85)
+        self._max_concurrent = getattr(settings, 'snipe_max_concurrent', 3)
 
     async def run_once(self, ctx: TradingContext) -> None:
         enabled = await ctx.db.fetchval(
             "SELECT enabled FROM strategy_performance WHERE strategy = 'snipe'")
         if enabled is False:
+            return
+
+        # Check concurrent position cap
+        open_snipe_count = await ctx.db.fetchval(
+            """SELECT COUNT(*) FROM trades
+               WHERE strategy = 'snipe'
+                 AND status IN ('open', 'filled', 'dry_run')""")
+        if (open_snipe_count or 0) >= self._max_concurrent:
+            log.info("snipe_max_concurrent_reached", open=open_snipe_count,
+                     max=self._max_concurrent)
             return
 
         # Refresh per-market cooldowns from recently closed snipe trades

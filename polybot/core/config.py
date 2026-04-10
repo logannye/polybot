@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     max_concurrent_positions: int = 12
     max_positions_per_market: int = 1
     arb_max_concurrent: int = 8      # reserve slots for forecast/snipe
+    snipe_max_concurrent: int = 3    # cap snipe positions to free slots/capital for MR
     daily_loss_limit_pct: float = 0.15
     circuit_breaker_hours: int = 6
     post_breaker_cooldown_hours: int = 24
