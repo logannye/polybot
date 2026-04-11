@@ -58,7 +58,7 @@ class ClobGateway:
     async def get_balance(self) -> float:
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         result = await asyncio.to_thread(self._client.get_balance_allowance, params)
-        return float(result.get("balance", 0))
+        return float(result.get("balance", 0)) / 1e6
 
     # --- Market-making support methods ---
 

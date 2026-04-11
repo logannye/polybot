@@ -48,7 +48,7 @@ async def test_get_order_status():
 async def test_get_balance():
     gw = ClobGateway.__new__(ClobGateway)
     mock_client = MagicMock()
-    mock_client.get_balance_allowance.return_value = {"balance": "150.50"}
+    mock_client.get_balance_allowance.return_value = {"balance": "150500000"}
     gw._client = mock_client
     result = await gw.get_balance()
     assert abs(result - 150.50) < 0.01
