@@ -16,7 +16,11 @@ class ClobGateway:
     async def submit_order(self, token_id: str, side: str, price: float,
                            size: float, order_type: str = "GTC",
                            post_only: bool = False) -> str:
-        order_args = OrderArgs(token_id=token_id, price=price, size=size, side=side)
+        # Strategies pass "YES"/"NO" but the CLOB API expects "BUY"/"SELL".
+        # Buying YES or NO tokens is always a "BUY" — the token_id determines
+        # which outcome token. "SELL" is only for exiting existing positions.
+        clob_side = "BUY" if side in ("YES", "NO", "BUY") else side
+        order_args = OrderArgs(token_id=token_id, price=price, size=size, side=clob_side)
         ot = getattr(OrderType, order_type, OrderType.GTC)
         def _create_and_post():
             signed_order = self._client.create_order(order_args)
