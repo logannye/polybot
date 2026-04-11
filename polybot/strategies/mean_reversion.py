@@ -296,7 +296,7 @@ class MeanReversionStrategy(Strategy):
                         "sl_yes_price": round(sl_price, 4),
                         "max_hold_hours": self._max_hold_hours,
                     },
-                    post_only=self._settings.use_maker_orders)
+                    post_only=getattr(self._settings, 'mr_use_maker_orders', self._settings.use_maker_orders))
                 if not result:
                     continue
 

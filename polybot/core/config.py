@@ -193,7 +193,7 @@ class Settings(BaseSettings):
     # Mean reversion strategy
     mr_enabled: bool = False
     mr_interval_seconds: float = 60.0
-    mr_trigger_threshold: float = 0.10
+    mr_trigger_threshold: float = 0.075
     mr_reversion_fraction: float = 0.40
     mr_kelly_mult: float = 0.50
     mr_max_single_pct: float = 0.20
@@ -203,6 +203,7 @@ class Settings(BaseSettings):
     mr_cooldown_hours: float = 0.5
     mr_max_hold_hours: float = 2.0
     mr_min_expected_reversion: float = 0.03
+    mr_use_maker_orders: bool = False      # taker orders for instant fill (MR needs speed)
     mr_big_move_threshold: float = 0.15   # moves above this get kelly boost
     mr_big_move_kelly_boost: float = 1.3  # kelly multiplier for big moves
     mr_min_entry_price: float = 0.25           # skip extremes below this (data: +$22.64 mid-range vs -$18.45 extremes)
