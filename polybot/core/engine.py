@@ -208,8 +208,12 @@ class Engine:
                 log.info("order_cancelled_externally", trade_id=trade["id"])
             elif status["status"] == "live":
                 elapsed = (datetime.now(timezone.utc) - trade["opened_at"]).total_seconds()
-                timeout = (self._settings.arb_fill_timeout_seconds if trade["strategy"] == "arbitrage"
-                           else self._settings.fill_timeout_seconds)
+                if trade["strategy"] == "arbitrage":
+                    timeout = self._settings.arb_fill_timeout_seconds
+                elif trade["strategy"] == "mean_reversion":
+                    timeout = getattr(self._settings, 'mr_fill_timeout_seconds', self._settings.fill_timeout_seconds)
+                else:
+                    timeout = self._settings.fill_timeout_seconds
                 if elapsed > timeout:
                     await self._clob.cancel_order(trade["clob_order_id"])
                     await self._db.execute("UPDATE trades SET status = 'cancelled' WHERE id = $1", trade["id"])
