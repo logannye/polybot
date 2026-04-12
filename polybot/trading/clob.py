@@ -68,7 +68,8 @@ class ClobGateway:
         """Fetch real-time buy price for a token from the CLOB."""
         try:
             result = await asyncio.to_thread(self._client.get_price, token_id, "buy")
-            return float(result)
+            price = result["price"] if isinstance(result, dict) else result
+            return float(price)
         except Exception as e:
             log.warning("clob_get_price_failed", token_id=token_id[:20], error=str(e))
             return None

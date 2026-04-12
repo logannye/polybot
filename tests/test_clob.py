@@ -58,7 +58,7 @@ async def test_get_balance():
 async def test_get_market_price():
     gw = ClobGateway.__new__(ClobGateway)
     mock_client = MagicMock()
-    mock_client.get_price.return_value = "0.5500"
+    mock_client.get_price.return_value = {"price": "0.5500"}
     gw._client = mock_client
     result = await gw.get_market_price("token123")
     assert abs(result - 0.55) < 0.001
