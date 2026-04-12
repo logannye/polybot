@@ -52,3 +52,24 @@ async def test_get_balance():
     gw._client = mock_client
     result = await gw.get_balance()
     assert abs(result - 150.50) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_get_market_price():
+    gw = ClobGateway.__new__(ClobGateway)
+    mock_client = MagicMock()
+    mock_client.get_price.return_value = "0.5500"
+    gw._client = mock_client
+    result = await gw.get_market_price("token123")
+    assert abs(result - 0.55) < 0.001
+    mock_client.get_price.assert_called_once_with("token123", "buy")
+
+
+@pytest.mark.asyncio
+async def test_get_market_price_fallback():
+    gw = ClobGateway.__new__(ClobGateway)
+    mock_client = MagicMock()
+    mock_client.get_price.side_effect = Exception("API error")
+    gw._client = mock_client
+    result = await gw.get_market_price("token123")
+    assert result is None

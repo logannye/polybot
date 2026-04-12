@@ -64,6 +64,15 @@ class ClobGateway:
         result = await asyncio.to_thread(self._client.get_balance_allowance, params)
         return float(result.get("balance", 0)) / 1e6
 
+    async def get_market_price(self, token_id: str) -> float | None:
+        """Fetch real-time buy price for a token from the CLOB."""
+        try:
+            result = await asyncio.to_thread(self._client.get_price, token_id, "buy")
+            return float(result)
+        except Exception as e:
+            log.warning("clob_get_price_failed", token_id=token_id[:20], error=str(e))
+            return None
+
     # --- Market-making support methods ---
 
     async def send_heartbeat(self, heartbeat_id: str) -> str:
