@@ -27,7 +27,7 @@ class Engine:
         self._context = TradingContext(
             db=db, scanner=scanner, risk_manager=risk_manager,
             portfolio_lock=portfolio_lock or asyncio.Lock(), executor=executor,
-            email_notifier=email_notifier, settings=settings)
+            email_notifier=email_notifier, settings=settings, clob=clob)
         self._strategies: list[Strategy] = []
         self._trade_learner = trade_learner
         self._last_heartbeats: dict[str, datetime] = {}

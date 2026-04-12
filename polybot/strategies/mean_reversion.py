@@ -173,6 +173,17 @@ class MeanReversionStrategy(Strategy):
                 side = "YES"
                 buy_price = m["yes_price"]
 
+            # For taker orders, fetch real-time CLOB price to guarantee fill.
+            # Scanner prices are stale; the CLOB price reflects the actual book.
+            if not getattr(self._settings, 'mr_use_maker_orders', True) and ctx.clob is not None:
+                token_id = m.get("yes_token_id", "") if side == "YES" else m.get("no_token_id", "")
+                if token_id:
+                    live_price = await ctx.clob.get_market_price(token_id)
+                    if live_price is not None:
+                        log.debug("mr_live_price", scanner_price=round(buy_price, 4),
+                                  clob_price=round(live_price, 4), side=side)
+                        buy_price = live_price
+
             # Edge estimate: expected reversion * fraction
             expected_reversion = abs(move) * self._reversion_frac
             net_edge = expected_reversion  # maker = 0% fee
