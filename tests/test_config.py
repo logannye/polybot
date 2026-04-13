@@ -108,8 +108,8 @@ def test_v2_strategy_settings_defaults():
     assert s.circuit_breaker_hours == 6
     assert s.min_trade_size == 1.0
     # v5 10x: new strategies
-    assert s.mm_enabled is False  # disabled — no real edge at $500 scale
-    assert s.mr_enabled is True   # lean-into-winners: re-enabled with mid-range filter
+    assert s.mm_enabled is True   # activated: spread capture on liquid markets
+    assert s.mr_enabled is False  # disabled: 89% timeout rate on thin books
     assert s.snipe_cooldown_hours == 0.5     # lean-into-winners: 1.0 → 0.5
     assert s.snipe_max_entries_per_market == 6  # lean-into-winners: 4 → 6
     assert s.snipe_max_market_exposure_pct == 0.30

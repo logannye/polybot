@@ -169,7 +169,7 @@ class Settings(BaseSettings):
     strategy_kill_min_trades: int = 50
 
     # Market-making strategy
-    mm_enabled: bool = False
+    mm_enabled: bool = True
     mm_cycle_seconds: float = 5.0
     mm_selection_interval_seconds: float = 300.0
     mm_kelly_mult: float = 0.15
@@ -184,11 +184,11 @@ class Settings(BaseSettings):
     mm_max_total_inventory: float = 200.0
     mm_max_skew_bps: int = 100
     mm_requote_threshold: float = 0.005
-    mm_min_volume_24h: float = 5000.0
+    mm_min_volume_24h: float = 2000.0
     mm_min_resolution_hours: float = 168.0
     mm_emergency_vol_threshold: float = 0.15
     mm_volatility_pullback_mult: float = 2.0
-    mm_min_book_depth: float = 1000.0
+    mm_min_book_depth: float = 500.0
 
     # Mean reversion strategy
     mr_enabled: bool = False
