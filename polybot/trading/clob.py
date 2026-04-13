@@ -65,13 +65,33 @@ class ClobGateway:
         return float(result.get("balance", 0)) / 1e6
 
     async def get_market_price(self, token_id: str) -> float | None:
-        """Fetch real-time buy price for a token from the CLOB."""
+        """Fetch real-time buy price from the CLOB order book (best ask).
+
+        Uses the actual order book, not the theoretical midpoint price.
+        Returns the cheapest price someone is willing to sell at, which
+        is the price needed to guarantee an instant taker fill.
+        """
         try:
-            result = await asyncio.to_thread(self._client.get_price, token_id, "buy")
-            price = result["price"] if isinstance(result, dict) else result
-            return float(price)
+            book = await asyncio.to_thread(self._client.get_order_book, token_id)
+            if book.asks:
+                best_ask = float(book.asks[0].price)
+                spread = best_ask - float(book.bids[0].price) if book.bids else 1.0
+                log.debug("clob_book_price", token_id=token_id[:20],
+                          best_ask=best_ask, spread=round(spread, 4))
+                return best_ask
+            return None
         except Exception as e:
             log.warning("clob_get_price_failed", token_id=token_id[:20], error=str(e))
+            return None
+
+    async def get_book_spread(self, token_id: str) -> float | None:
+        """Get the bid-ask spread for a token. Returns None on error."""
+        try:
+            book = await asyncio.to_thread(self._client.get_order_book, token_id)
+            if book.asks and book.bids:
+                return float(book.asks[0].price) - float(book.bids[0].price)
+            return None
+        except Exception:
             return None
 
     # --- Market-making support methods ---

@@ -173,15 +173,25 @@ class MeanReversionStrategy(Strategy):
                 side = "YES"
                 buy_price = m["yes_price"]
 
-            # For taker orders, fetch real-time CLOB price to guarantee fill.
-            # Scanner prices are stale; the CLOB price reflects the actual book.
+            # For taker orders, fetch real-time best ask from the CLOB order book.
+            # The scanner's cached price is stale and doesn't reflect the actual
+            # book. get_market_price() reads the order book and returns the best
+            # ask — the cheapest price someone is actually selling at.
             if not getattr(self._settings, 'mr_use_maker_orders', True) and ctx.clob is not None:
                 token_id = m.get("yes_token_id", "") if side == "YES" else m.get("no_token_id", "")
                 if token_id:
                     live_price = await ctx.clob.get_market_price(token_id)
                     if live_price is not None:
+                        # Skip markets with wide spreads — no real liquidity
+                        max_spread = getattr(self._settings, 'mr_max_spread', 0.10)
+                        spread = await ctx.clob.get_book_spread(token_id)
+                        if spread is not None and spread > max_spread:
+                            log.info("mr_wide_spread_skip", market=pid,
+                                     spread=round(spread, 4), max=max_spread)
+                            continue
                         log.debug("mr_live_price", scanner_price=round(buy_price, 4),
-                                  clob_price=round(live_price, 4), side=side)
+                                  best_ask=round(live_price, 4), side=side,
+                                  spread=round(spread, 4) if spread else None)
                         buy_price = live_price
 
             # Edge estimate: expected reversion * fraction

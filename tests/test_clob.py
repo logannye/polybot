@@ -56,20 +56,41 @@ async def test_get_balance():
 
 @pytest.mark.asyncio
 async def test_get_market_price():
+    """get_market_price returns the best ask from the order book."""
     gw = ClobGateway.__new__(ClobGateway)
     mock_client = MagicMock()
-    mock_client.get_price.return_value = {"price": "0.5500"}
+    mock_ask = MagicMock()
+    mock_ask.price = "0.5500"
+    mock_bid = MagicMock()
+    mock_bid.price = "0.5400"
+    mock_book = MagicMock()
+    mock_book.asks = [mock_ask]
+    mock_book.bids = [mock_bid]
+    mock_client.get_order_book.return_value = mock_book
     gw._client = mock_client
     result = await gw.get_market_price("token123")
     assert abs(result - 0.55) < 0.001
-    mock_client.get_price.assert_called_once_with("token123", "buy")
+    mock_client.get_order_book.assert_called_once_with("token123")
+
+
+@pytest.mark.asyncio
+async def test_get_market_price_no_asks():
+    """get_market_price returns None when no asks on the book."""
+    gw = ClobGateway.__new__(ClobGateway)
+    mock_client = MagicMock()
+    mock_book = MagicMock()
+    mock_book.asks = []
+    mock_client.get_order_book.return_value = mock_book
+    gw._client = mock_client
+    result = await gw.get_market_price("token123")
+    assert result is None
 
 
 @pytest.mark.asyncio
 async def test_get_market_price_fallback():
     gw = ClobGateway.__new__(ClobGateway)
     mock_client = MagicMock()
-    mock_client.get_price.side_effect = Exception("API error")
+    mock_client.get_order_book.side_effect = Exception("API error")
     gw._client = mock_client
     result = await gw.get_market_price("token123")
     assert result is None

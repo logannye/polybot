@@ -205,6 +205,7 @@ class Settings(BaseSettings):
     mr_min_expected_reversion: float = 0.02
     mr_use_maker_orders: bool = False      # taker orders for instant fill (MR needs speed)
     mr_fill_timeout_seconds: float = 30.0   # taker orders should fill in seconds, not minutes
+    mr_max_spread: float = 0.10              # skip markets with bid-ask spread > 10%
     mr_big_move_threshold: float = 0.15   # moves above this get kelly boost
     mr_big_move_kelly_boost: float = 1.3  # kelly multiplier for big moves
     mr_min_entry_price: float = 0.25           # skip extremes below this (data: +$22.64 mid-range vs -$18.45 extremes)
