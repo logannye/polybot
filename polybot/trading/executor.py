@@ -134,12 +134,31 @@ class OrderExecutor:
                 if market_data:
                     token_id = market_data.get("yes_token_id") if side == "YES" else market_data.get("no_token_id")
                     if token_id:
-                        try:
-                            await self._clob.sell_shares(
-                                token_id=token_id, price=exit_price, size=shares)
-                        except Exception as e:
-                            log.error("exit_sell_failed", trade_id=trade_id, error=str(e))
-                            return None
+                        # Haircut: sell 99.9% of shares to avoid exceeding on-chain balance.
+                        # The CLOB fills can settle with slightly fewer shares than computed
+                        # due to rounding in on-chain token transfers.
+                        sell_size = round(shares * 0.999, 6)
+                        sold = False
+                        for attempt, size_mult in enumerate([1.0, 0.99], start=1):
+                            try:
+                                await self._clob.sell_shares(
+                                    token_id=token_id, price=exit_price,
+                                    size=round(sell_size * size_mult, 6))
+                                sold = True
+                                break
+                            except Exception as e:
+                                err = str(e)
+                                log.warning("exit_sell_attempt_failed", trade_id=trade_id,
+                                            attempt=attempt, size=round(sell_size * size_mult, 6),
+                                            error=err)
+                                if "not enough balance" not in err.lower():
+                                    break  # Non-balance error, don't retry
+                        if not sold:
+                            # Force-close in DB to free capital. A stuck position blocking
+                            # all trading for hours is worse than losing dust.
+                            log.error("exit_sell_force_close", trade_id=trade_id,
+                                      shares=shares, exit_price=exit_price)
+                            pnl = 0.0  # Assume breakeven — actual shares still on-chain
 
         await self._db.execute(
             """UPDATE trades SET status=$1, exit_price=$2, exit_reason=$3,
