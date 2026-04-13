@@ -26,7 +26,7 @@ def test_settings_loads_defaults(monkeypatch):
     assert settings.max_per_category_pct == 0.50
     assert settings.min_trade_size == 1.0
     assert settings.max_concurrent_positions == 12
-    assert settings.daily_loss_limit_pct == 0.15
+    assert settings.daily_loss_limit_pct == 0.20
     assert settings.circuit_breaker_hours == 6
     assert settings.resolution_hours_max == 168
     assert settings.min_book_depth == 500.0
@@ -104,7 +104,7 @@ def test_v2_strategy_settings_defaults():
     assert s.max_total_deployed_pct == 0.70  # v4 conservative: 0.90 → 0.70
     assert s.max_concurrent_positions == 12  # v4 conservative: 20 → 12
     assert s.max_per_category_pct == 0.50    # capital turnover: 0.25 → 0.50
-    assert s.daily_loss_limit_pct == 0.15
+    assert s.daily_loss_limit_pct == 0.20
     assert s.circuit_breaker_hours == 6
     assert s.min_trade_size == 1.0
     # v5 10x: new strategies

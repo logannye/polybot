@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     max_positions_per_market: int = 1
     arb_max_concurrent: int = 8      # reserve slots for forecast/snipe
     snipe_max_concurrent: int = 3    # cap snipe positions to free slots/capital for MR
-    daily_loss_limit_pct: float = 0.15
+    daily_loss_limit_pct: float = 0.20
     circuit_breaker_hours: int = 6
     post_breaker_cooldown_hours: int = 24
     post_breaker_kelly_reduction: float = 0.50
@@ -193,16 +193,16 @@ class Settings(BaseSettings):
     # Mean reversion strategy
     mr_enabled: bool = False
     mr_interval_seconds: float = 60.0
-    mr_trigger_threshold: float = 0.075
+    mr_trigger_threshold: float = 0.05
     mr_reversion_fraction: float = 0.40
     mr_kelly_mult: float = 0.50
     mr_max_single_pct: float = 0.20
     mr_max_concurrent: int = 5
     mr_min_volume_24h: float = 2000.0
-    mr_min_book_depth: float = 500.0
+    mr_min_book_depth: float = 200.0
     mr_cooldown_hours: float = 0.5
     mr_max_hold_hours: float = 2.0
-    mr_min_expected_reversion: float = 0.03
+    mr_min_expected_reversion: float = 0.02
     mr_use_maker_orders: bool = False      # taker orders for instant fill (MR needs speed)
     mr_fill_timeout_seconds: float = 30.0   # taker orders should fill in seconds, not minutes
     mr_big_move_threshold: float = 0.15   # moves above this get kelly boost
@@ -210,7 +210,7 @@ class Settings(BaseSettings):
     mr_min_entry_price: float = 0.25           # skip extremes below this (data: +$22.64 mid-range vs -$18.45 extremes)
     mr_max_entry_price: float = 0.75           # skip extremes above this
     mr_history_scan_interval: float = 180.0  # seconds between price history scans
-    mr_history_max_markets: int = 600        # max markets to scan per cycle
+    mr_history_max_markets: int = 1500       # max markets to scan per cycle
     mr_history_concurrency: int = 50         # max concurrent API requests
 
     # Cross-venue arbitrage strategy
