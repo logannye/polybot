@@ -132,6 +132,7 @@ async def main():
         fill_timeout_seconds=settings.fill_timeout_seconds,
         clob=clob, dry_run=settings.dry_run,
         trade_learner=trade_learner)
+    executor._settings = settings
     risk_manager = RiskManager(
         max_single_pct=settings.max_single_position_pct,
         max_total_deployed_pct=settings.max_total_deployed_pct,

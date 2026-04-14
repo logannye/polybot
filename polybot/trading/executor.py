@@ -1,3 +1,4 @@
+import asyncio
 import structlog
 from datetime import datetime, timezone
 
@@ -27,6 +28,7 @@ class OrderExecutor:
         self._clob = clob
         self._dry_run = dry_run
         self._trade_learner = trade_learner
+        self._settings = None  # set from engine/main for realistic dry-run
 
     def should_cancel_order(self, elapsed_seconds: float) -> bool:
         return elapsed_seconds > self._fill_timeout_seconds
@@ -38,6 +40,36 @@ class OrderExecutor:
         if shares <= 0:
             return None
 
+        # Realistic dry-run: check order book before filling
+        effective_price = price
+        if (self._dry_run
+                and getattr(self, '_settings', None)
+                and getattr(self._settings, 'dry_run_realistic', False)
+                and self._clob is not None
+                and token_id):
+            try:
+                book = await asyncio.to_thread(self._clob._client.get_order_book, token_id)
+                if book.asks and book.bids:
+                    best_ask = float(book.asks[0].price)
+                    best_bid = float(book.bids[0].price)
+                    spread = best_ask - best_bid
+                    max_spread = getattr(self._settings, 'dry_run_max_spread', 0.15)
+                    if spread > max_spread:
+                        log.info("dryrun_spread_reject", token_id=token_id[:20],
+                                 spread=round(spread, 4), max=max_spread, strategy=strategy)
+                        return None
+                    # Fill at best ask (what you'd actually pay), with simulated fee
+                    if side in ("YES", "NO"):
+                        effective_price = best_ask
+                        fee_pct = getattr(self._settings, 'dry_run_taker_fee_pct', 0.02)
+                        size_usd = size_usd * (1 - fee_pct)
+                        shares = self._wallet.compute_shares(size_usd, effective_price)
+                elif not book.asks:
+                    log.info("dryrun_no_asks", token_id=token_id[:20], strategy=strategy)
+                    return None
+            except Exception as e:
+                log.debug("dryrun_book_check_failed", error=str(e)[:60])
+
         status = "dry_run" if self._dry_run else "open"
         log.info("placing_order", market_id=market_id, side=side, size_usd=size_usd,
                  price=price, shares=shares, strategy=strategy, dry_run=self._dry_run)
@@ -48,7 +80,7 @@ class OrderExecutor:
             """INSERT INTO trades (market_id, analysis_id, side, entry_price, position_size_usd,
                shares, kelly_inputs, status, strategy)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
-            market_id, analysis_id, side, price, size_usd, shares, kelly_json, status, strategy)
+            market_id, analysis_id, side, effective_price, size_usd, shares, kelly_json, status, strategy)
 
         # Lock deployed capital
         await self._db.execute(
