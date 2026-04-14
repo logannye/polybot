@@ -39,6 +39,17 @@ class Engine:
         self._strategies.append(strategy)
 
     async def run_forever(self):
+        # Enforce deployment stage limits
+        stage = getattr(self._settings, 'live_deployment_stage', 'dry_run')
+        if not self._settings.dry_run:
+            if stage == 'dry_run':
+                log.critical("DEPLOYMENT_STAGE_BLOCK",
+                             message="live_deployment_stage is 'dry_run' but dry_run=false. Refusing to start.")
+                return
+            if stage == 'micro_test':
+                self._settings.max_total_deployed_pct = 0.05
+                log.warning("MICRO_TEST_MODE", max_deployed_pct=5)
+
         log.info("engine_starting", strategies=[s.name for s in self._strategies])
         await self._reconcile_on_startup()
         tasks = [self._run_strategy(s) for s in self._strategies]
