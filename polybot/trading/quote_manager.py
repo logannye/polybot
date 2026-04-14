@@ -17,6 +17,7 @@ class Quote:
     size: float
     posted_at: datetime
     status: str = "live"  # live, partial, filled, cancelled, stale
+    trade_id: int | None = None
 
 
 @dataclass
@@ -36,15 +37,16 @@ class ActiveMarket:
 class QuoteManager:
     """Manages two-sided quotes across multiple markets."""
 
-    def __init__(self, clob, settings, dry_run: bool = False):
+    def __init__(self, clob, settings, dry_run: bool = False, db=None):
         self._clob = clob
         self._settings = settings
         self._dry_run = dry_run
+        self._db = db
         self._active_quotes: dict[str, tuple[Quote | None, Quote | None]] = {}
 
     async def place_two_sided(
         self, market: ActiveMarket, bid_price: float, bid_size: float,
-        ask_price: float, ask_size: float,
+        ask_price: float, ask_size: float, market_id: int | None = None,
     ) -> tuple[str | None, str | None]:
         """Place a two-sided quote (bid + ask) with post_only=True."""
         bid_id = ask_id = None
@@ -65,6 +67,16 @@ class QuoteManager:
                     post_only=True)
                 bid_quote = Quote(order_id=bid_id, token_id=market.yes_token_id,
                                   side="BUY", price=bid_price, size=bid_size, posted_at=now)
+                if self._db and market_id and bid_id:
+                    bid_quote.trade_id = await self._db.fetchval(
+                        """INSERT INTO trades (market_id, analysis_id, side, entry_price,
+                           position_size_usd, shares, kelly_inputs, status, strategy, clob_order_id)
+                           VALUES ($1, NULL, 'YES', $2, $3, $4, '{}', 'open', 'market_maker', $5)
+                           RETURNING id""",
+                        market_id, bid_price, round(bid_size * bid_price, 2), bid_size, bid_id)
+                    await self._db.execute(
+                        "UPDATE system_state SET total_deployed = total_deployed + $1 WHERE id = 1",
+                        round(bid_size * bid_price, 2))
             except Exception as e:
                 log.error("mm_bid_failed", market=market.polymarket_id, error=str(e))
                 bid_quote = None
@@ -76,6 +88,16 @@ class QuoteManager:
                     post_only=True)
                 ask_quote = Quote(order_id=ask_id, token_id=market.yes_token_id,
                                   side="SELL", price=ask_price, size=ask_size, posted_at=now)
+                if self._db and market_id and ask_id:
+                    ask_quote.trade_id = await self._db.fetchval(
+                        """INSERT INTO trades (market_id, analysis_id, side, entry_price,
+                           position_size_usd, shares, kelly_inputs, status, strategy, clob_order_id)
+                           VALUES ($1, NULL, 'NO', $2, $3, $4, '{}', 'open', 'market_maker', $5)
+                           RETURNING id""",
+                        market_id, ask_price, round(ask_size * ask_price, 2), ask_size, ask_id)
+                    await self._db.execute(
+                        "UPDATE system_state SET total_deployed = total_deployed + $1 WHERE id = 1",
+                        round(ask_size * ask_price, 2))
             except Exception as e:
                 log.error("mm_ask_failed", market=market.polymarket_id, error=str(e))
                 ask_quote = None
@@ -88,6 +110,7 @@ class QuoteManager:
     async def requote(
         self, market: ActiveMarket, new_bid: float, new_bid_size: float,
         new_ask: float, new_ask_size: float, threshold: float = 0.005,
+        market_id: int | None = None,
     ) -> None:
         """Cancel and replace quotes only if price moved beyond threshold."""
         old_bid, old_ask = self._active_quotes.get(market.polymarket_id, (None, None))
@@ -102,7 +125,8 @@ class QuoteManager:
         await self.cancel_market_quotes(market.polymarket_id)
 
         # Place new quotes
-        await self.place_two_sided(market, new_bid, new_bid_size, new_ask, new_ask_size)
+        await self.place_two_sided(market, new_bid, new_bid_size, new_ask, new_ask_size,
+                                   market_id=market_id)
         log.debug("mm_requoted", market=market.polymarket_id,
                   bid=round(new_bid, 4), ask=round(new_ask, 4))
 
@@ -117,6 +141,17 @@ class QuoteManager:
                 ids_to_cancel.append(old_ask.order_id)
             if ids_to_cancel:
                 await self._clob.cancel_orders_batch(ids_to_cancel)
+            # Cancel trade rows in DB and free deployed capital
+            if self._db:
+                for quote in [old_bid, old_ask]:
+                    if quote and getattr(quote, 'trade_id', None):
+                        size = round(quote.size * quote.price, 2)
+                        await self._db.execute(
+                            "UPDATE trades SET status = 'cancelled' WHERE id = $1 AND status = 'open'",
+                            quote.trade_id)
+                        await self._db.execute(
+                            "UPDATE system_state SET total_deployed = GREATEST(0, total_deployed - $1) WHERE id = 1",
+                            size)
         self._active_quotes.pop(polymarket_id, None)
 
     async def cancel_all_quotes(self) -> None:
