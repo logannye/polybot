@@ -176,8 +176,8 @@ class Settings(BaseSettings):
     mm_max_single_pct: float = 0.10
     mm_max_total_pct: float = 0.30
     mm_max_markets: int = 8
-    mm_base_spread_bps: int = 150
-    mm_min_spread_bps: int = 50
+    mm_base_spread_bps: int = 60
+    mm_min_spread_bps: int = 30
     mm_max_spread_bps: int = 500
     mm_quote_size_usd: float = 10.0
     mm_max_inventory_per_market: float = 50.0
