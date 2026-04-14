@@ -99,8 +99,9 @@ class ClobGateway:
     async def send_heartbeat(self, heartbeat_id: str) -> str:
         """Send heartbeat to keep orders alive. MUST be called every <10s."""
         result = await asyncio.to_thread(self._client.post_heartbeat, heartbeat_id)
-        new_id = result if isinstance(result, str) else str(result)
-        return new_id
+        if isinstance(result, dict):
+            return result.get("heartbeat_id", heartbeat_id)
+        return str(result)
 
     async def cancel_all_orders(self) -> bool:
         """Emergency: cancel all resting orders."""
