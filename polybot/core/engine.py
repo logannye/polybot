@@ -285,6 +285,9 @@ class Engine:
                     float(trade["position_size_usd"]))
                 log.info("order_cancelled_externally", trade_id=trade["id"])
             elif status["status"] == "live":
+                # MM orders are managed by QuoteManager (requote cycle), not fill timeout
+                if trade["strategy"] == "market_maker":
+                    continue
                 elapsed = (datetime.now(timezone.utc) - trade["opened_at"]).total_seconds()
                 if trade["strategy"] == "arbitrage":
                     timeout = self._settings.arb_fill_timeout_seconds
