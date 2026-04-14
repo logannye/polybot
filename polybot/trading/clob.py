@@ -98,10 +98,26 @@ class ClobGateway:
 
     async def send_heartbeat(self, heartbeat_id: str) -> str:
         """Send heartbeat to keep orders alive. MUST be called every <10s."""
-        result = await asyncio.to_thread(self._client.post_heartbeat, heartbeat_id)
-        if isinstance(result, dict):
-            return result.get("heartbeat_id", heartbeat_id)
-        return str(result)
+        try:
+            result = await asyncio.to_thread(self._client.post_heartbeat, heartbeat_id)
+            if isinstance(result, dict):
+                return result.get("heartbeat_id", heartbeat_id)
+            return str(result)
+        except Exception as e:
+            err = str(e)
+            # On "Invalid Heartbeat ID", the server returns the expected ID.
+            # Extract it and retry — this happens on first call or after reconnect.
+            if "Invalid Heartbeat ID" in err:
+                import re
+                match = re.search(r"'heartbeat_id': '([^']+)'", err)
+                if match:
+                    server_id = match.group(1)
+                    log.info("heartbeat_resync", server_id=server_id)
+                    result = await asyncio.to_thread(self._client.post_heartbeat, server_id)
+                    if isinstance(result, dict):
+                        return result.get("heartbeat_id", server_id)
+                    return str(result)
+            raise
 
     async def cancel_all_orders(self) -> bool:
         """Emergency: cancel all resting orders."""
