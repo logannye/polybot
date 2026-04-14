@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     post_breaker_cooldown_hours: int = 24
     post_breaker_kelly_reduction: float = 0.50
 
+    # Total drawdown protection
+    max_total_drawdown_pct: float = 0.30     # halt all trading at 30% total loss from high-water
+    max_capital_divergence_pct: float = 0.10  # halt if CLOB vs DB diverges > 10%
+    live_deployment_stage: str = "dry_run"    # dry_run → micro_test → full
+
     # Market filters
     resolution_hours_max: int = 168
     min_book_depth: float = 500.0
