@@ -20,6 +20,9 @@ class Settings(BaseSettings):
 
     # Dry-run mode
     dry_run: bool = True
+    dry_run_realistic: bool = True           # use real order books for dry-run pricing
+    dry_run_taker_fee_pct: float = 0.02      # simulated taker fee (2%)
+    dry_run_max_spread: float = 0.15         # reject dry-run orders on markets with > 15% spread
 
     # Bot parameters
     starting_bankroll: float = 300.0
