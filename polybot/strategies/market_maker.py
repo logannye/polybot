@@ -57,6 +57,10 @@ class MarketMakerStrategy:
         # 1. Heartbeat — MUST happen every <10s
         await self._send_heartbeat()
 
+        # Ensure QuoteManager has DB access for trade tracking
+        if self._quote_mgr._db is None and hasattr(ctx, 'db'):
+            self._quote_mgr._db = ctx.db
+
         # 2. Re-select markets periodically
         now = datetime.now(timezone.utc)
         if (self._last_selection is None or
@@ -219,10 +223,23 @@ class MarketMakerStrategy:
                 # Short YES — increase bid, reduce ask
                 ask_size *= max(0.2, 1.0 + inv.net_delta / self._settings.mm_max_inventory_per_market)
 
+        # Look up DB market_id for trade tracking
+        db_market_id = None
+        if not self._dry_run:
+            if not hasattr(self, '_market_db_ids'):
+                self._market_db_ids = {}
+            if market.polymarket_id in self._market_db_ids:
+                db_market_id = self._market_db_ids[market.polymarket_id]
+            elif hasattr(ctx, 'db') and ctx.db:
+                db_market_id = await ctx.db.fetchval(
+                    "SELECT id FROM markets WHERE polymarket_id = $1", market.polymarket_id)
+                if db_market_id:
+                    self._market_db_ids[market.polymarket_id] = db_market_id
+
         # Requote if moved beyond threshold
         await self._quote_mgr.requote(
             market, bid_price, bid_size, ask_price, ask_size,
-            threshold=s.mm_requote_threshold)
+            threshold=s.mm_requote_threshold, market_id=db_market_id)
 
         # Record the price used for this quote cycle (used by fill simulation)
         self._prev_prices[market.polymarket_id] = current_price

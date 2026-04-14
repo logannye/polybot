@@ -132,6 +132,7 @@ class TestQuoteManagement:
             min_incentive_size=10.0, fair_value=0.50)
 
         ctx = MagicMock()
+        ctx.db = AsyncMock()
         await strategy._manage_quotes(market, ctx)
         qm.requote.assert_awaited_once()
 
