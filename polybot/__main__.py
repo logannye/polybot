@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal
 import structlog
 import uvicorn
@@ -105,6 +106,23 @@ async def main():
     if not settings.dry_run and clob is None:
         log.error("live_mode_requires_clob_credentials")
         return
+
+    # Run preflight checks before starting live trading
+    if not settings.dry_run:
+        import subprocess
+        log.info("running_live_preflight")
+        result = subprocess.run(
+            ["uv", "run", "python", "scripts/live_preflight.py"],
+            capture_output=True, text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        print(result.stdout)
+        if result.returncode != 0:
+            log.critical("PREFLIGHT_FAILED — refusing to start live trading")
+            if result.stderr:
+                log.error("preflight_stderr", output=result.stderr[-500:])
+            return
+        log.info("preflight_passed")
+
     recorder = TradeRecorder(
         db=db, cold_start_trades=settings.cold_start_trades,
         brier_ema_alpha=settings.brier_ema_alpha)
