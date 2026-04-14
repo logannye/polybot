@@ -33,6 +33,7 @@ class Engine:
         self._last_heartbeats: dict[str, datetime] = {}
         self._last_self_assess: datetime | None = None
         self._price_history_scanner = price_history_scanner
+        self._capital_divergence_halted = False
 
     def add_strategy(self, strategy: Strategy) -> None:
         self._strategies.append(strategy)
@@ -45,6 +46,7 @@ class Engine:
         tasks.append(self._run_periodic(self._maybe_self_assess, 60))
         if not self._settings.dry_run and self._clob:
             tasks.append(self._run_periodic(self._fill_monitor, 30))
+            tasks.append(self._run_periodic(self._check_capital_divergence, 60))
         tasks.append(self._run_periodic(self._resolution_monitor, 60))
         tasks.append(self._run_periodic(self._reconcile_capital, 300))
         tasks.append(self._run_periodic(self._check_positions,
@@ -63,6 +65,12 @@ class Engine:
         kill_threshold = 30  # permanent disable after this many consecutive
         while True:
             try:
+                if await self._check_drawdown_halt():
+                    await asyncio.sleep(60)
+                    continue
+                if self._capital_divergence_halted:
+                    await asyncio.sleep(60)
+                    continue
                 await strategy.run_once(self._context)
                 consecutive_errors = 0
                 self._last_heartbeats[strategy.name] = datetime.now(timezone.utc)
@@ -146,6 +154,76 @@ class Engine:
                     log.error("startup_bankroll_sync_failed", error=str(e))
         except Exception as e:
             log.error("reconciliation_error", error=str(e))
+
+    async def _check_drawdown_halt(self) -> bool:
+        """Check if total drawdown halt is active or should be triggered.
+        Returns True if trading should be halted."""
+        state = await self._db.fetchrow("SELECT * FROM system_state WHERE id = 1")
+        if not state:
+            return False
+
+        bankroll = float(state["bankroll"])
+        high_water = float(state.get("high_water_bankroll", bankroll) or bankroll)
+        halt_until = state.get("drawdown_halt_until")
+
+        # Already halted?
+        if halt_until and halt_until > datetime.now(timezone.utc):
+            return True
+
+        # Update high-water mark
+        if bankroll > high_water:
+            await self._db.execute(
+                "UPDATE system_state SET high_water_bankroll = $1 WHERE id = 1", bankroll)
+            return False
+
+        # Check drawdown
+        if high_water > 0:
+            drawdown = 1.0 - (bankroll / high_water)
+            max_drawdown = getattr(self._settings, 'max_total_drawdown_pct', 0.30)
+            if drawdown >= max_drawdown:
+                halt_time = datetime.now(timezone.utc) + timedelta(days=365)
+                await self._db.execute(
+                    "UPDATE system_state SET drawdown_halt_until = $1 WHERE id = 1",
+                    halt_time)
+                log.critical("DRAWDOWN_HALT", bankroll=bankroll, high_water=high_water,
+                             drawdown_pct=round(drawdown * 100, 1))
+                try:
+                    await self._context.email_notifier.send(
+                        "[POLYBOT CRITICAL] DRAWDOWN HALT — ALL TRADING STOPPED",
+                        f"<p>Bankroll ${bankroll:.2f} is {drawdown*100:.1f}% below "
+                        f"high-water ${high_water:.2f}. Threshold: {max_drawdown*100:.0f}%.</p>"
+                        f"<p>All trading halted. Manual DB reset required to resume.</p>")
+                except Exception:
+                    pass
+                return True
+
+        return False
+
+    async def _check_capital_divergence(self):
+        """Compare CLOB balance vs DB bankroll. Halt if divergence > threshold."""
+        if not self._clob or self._settings.dry_run:
+            return
+        try:
+            state = await self._db.fetchrow("SELECT bankroll, total_deployed FROM system_state WHERE id = 1")
+            clob_balance = await self._clob.get_balance()
+            expected_cash = float(state["bankroll"]) - float(state["total_deployed"])
+            if expected_cash <= 0:
+                return
+            divergence = abs(clob_balance - expected_cash) / expected_cash
+            max_div = getattr(self._settings, 'max_capital_divergence_pct', 0.10)
+            if divergence > max_div:
+                self._capital_divergence_halted = True
+                log.critical("CAPITAL_DIVERGENCE_HALT", clob=clob_balance,
+                             expected=expected_cash, divergence_pct=round(divergence * 100, 1))
+                try:
+                    await self._context.email_notifier.send(
+                        "[POLYBOT CRITICAL] Capital divergence halt",
+                        f"<p>CLOB: ${clob_balance:.2f}, Expected: ${expected_cash:.2f}, "
+                        f"Divergence: {divergence*100:.1f}%</p>")
+                except Exception:
+                    pass
+        except Exception as e:
+            log.error("capital_divergence_check_error", error=str(e))
 
     async def _health_check(self):
         now = datetime.now(timezone.utc)
