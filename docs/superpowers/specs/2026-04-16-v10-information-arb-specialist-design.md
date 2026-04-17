@@ -240,9 +240,9 @@ Four loops at increasing cadence, each with one job. No hidden state, no deep RL
 On every position close, write a `trade_outcome` row:
 
 ```
-{strategy, market_id, entry_price, exit_price, pnl,
+{strategy, market_id, market_category, entry_price, exit_price, pnl,
  predicted_prob, realized_outcome,
- game_state_bucket,       # live_sports only
+ game_state_bucket,       # live_sports only (sport + state key)
  tier,                    # snipe only
  kelly_inputs, exit_reason, duration_minutes}
 ```
@@ -291,7 +291,7 @@ Advancement requires explicit human approval; no auto-advance.
 | 0. Dry-run | $2,000 sim | 70% | 14 days | Positive P&L, ≥200 LG + ≥100 Snipe trades, no safeguard trips, ≥10 buckets per sport at ≥30 obs |
 | 1. Preflight | — | — | single run | `live_preflight.py` passes (balance, submit+cancel, heartbeat ×3, approvals, collateral) |
 | 2. Micro-test | $2,000 live | 5% ($100) | 7 days | Fills within 2% of dry-run predictions, CLOB↔DB reconciled every check, ≥30 live trades, no safeguard trips, P&L within 1σ of dry-run |
-| 3. Ramp | $2,000 live | 25% ($500) | 7 days | Sharpe > 0, calibrator drift < 20% vs dry-run baseline, no strategy paused, LLM spend within cap |
+| 3. Ramp | $2,000 live | 25% ($500) | 7 days | Sharpe > 0, mean per-bucket Brier degradation < 20% vs the trailing dry-run baseline (same metric as §5 Loop 4), no strategy paused, LLM spend within cap |
 | 4. Full | $2,000 live | 70% | ongoing | Scale bankroll only after 30 days positive full-stage P&L |
 
 Stages 2–3 winnings stay in the CLOB account but `system_state.bankroll` stays pegged at $2,000 (excess swept manually) so Kelly sizing doesn't creep on unvalidated live history.
