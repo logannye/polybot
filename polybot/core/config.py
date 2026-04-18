@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     dry_run_max_spread: float = 0.15         # reject dry-run orders on markets with > 15% spread
 
     # Bot parameters
-    starting_bankroll: float = 300.0
+    starting_bankroll: float = 2000.0
     kelly_mult: float = 0.25
     edge_threshold: float = 0.05
     scan_interval_seconds: int = 300

@@ -17,7 +17,7 @@ def test_settings_loads_defaults(monkeypatch):
         alert_email="test@test.com",
         _env_file=None,
     )
-    assert settings.starting_bankroll == 300.0
+    assert settings.starting_bankroll == 2000.0
     assert settings.kelly_mult == 0.25
     assert settings.edge_threshold == 0.05
     assert settings.scan_interval_seconds == 300
