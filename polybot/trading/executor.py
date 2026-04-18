@@ -48,24 +48,22 @@ class OrderExecutor:
                 and self._clob is not None
                 and token_id):
             try:
-                book = await asyncio.to_thread(self._clob._client.get_order_book, token_id)
-                if book.asks and book.bids:
-                    best_ask = float(book.asks[0].price)
-                    best_bid = float(book.bids[0].price)
-                    spread = best_ask - best_bid
+                summary = await self._clob.get_order_book_summary(token_id)
+                if summary is not None:
                     max_spread = getattr(self._settings, 'dry_run_max_spread', 0.15)
-                    if spread > max_spread:
+                    if summary["spread"] > max_spread:
                         log.info("dryrun_spread_reject", token_id=token_id[:20],
-                                 spread=round(spread, 4), max=max_spread, strategy=strategy)
+                                 spread=round(summary["spread"], 4), max=max_spread,
+                                 strategy=strategy)
                         return None
                     # Fill at best ask (what you'd actually pay), with simulated fee
                     if side in ("YES", "NO"):
-                        effective_price = best_ask
+                        effective_price = summary["best_ask"]
                         fee_pct = getattr(self._settings, 'dry_run_taker_fee_pct', 0.02)
                         size_usd = size_usd * (1 - fee_pct)
                         shares = self._wallet.compute_shares(size_usd, effective_price)
-                elif not book.asks:
-                    log.info("dryrun_no_asks", token_id=token_id[:20], strategy=strategy)
+                else:
+                    log.info("dryrun_no_book", token_id=token_id[:20], strategy=strategy)
                     return None
             except Exception as e:
                 log.debug("dryrun_book_check_failed", error=str(e)[:60])
