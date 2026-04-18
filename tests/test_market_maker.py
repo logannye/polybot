@@ -189,3 +189,54 @@ class TestEmergencyWithdraw:
         await strategy.emergency_withdraw()
         qm.cancel_all_quotes.assert_awaited_once()
         assert len(strategy._active_markets) == 0
+
+
+class TestInventoryReconciliation:
+    @pytest.mark.asyncio
+    async def test_reconcile_inventory_seeds_from_db(self):
+        """First run_once should seed inventory from filled MM trades in DB."""
+        settings = _make_settings()
+        clob = AsyncMock()
+        clob.send_heartbeat = AsyncMock(return_value="hb1")
+        scanner = MagicMock()
+        scanner.fetch_markets = AsyncMock(return_value=[])
+        inv = InventoryTracker(max_per_market=50.0, max_total=200.0, max_skew_bps=100)
+        strategy = MarketMakerStrategy(settings=settings, clob=clob, scanner=scanner,
+                                       inventory=inv)
+
+        ctx = MagicMock()
+        ctx.db = AsyncMock()
+        # YES fills -> BUY (adds to yes_shares), NO fills -> SELL (subtracts from yes_shares)
+        ctx.db.fetch = AsyncMock(return_value=[
+            {"polymarket_id": "m1", "side": "YES", "total_shares": 25.0},
+            {"polymarket_id": "m1", "side": "NO", "total_shares": 10.0},
+        ])
+
+        assert strategy._inventory_reconciled is False
+        await strategy.run_once(ctx)
+        assert strategy._inventory_reconciled is True
+
+        m1_inv = inv.get_inventory("m1")
+        assert m1_inv is not None
+        # record_fill("BUY", 0.50, 25) -> yes_shares=25, then
+        # record_fill("SELL", 0.50, 10) -> yes_shares=15 (net long 15 YES)
+        assert m1_inv.yes_shares == 15.0
+
+    @pytest.mark.asyncio
+    async def test_reconcile_inventory_runs_once(self):
+        """Inventory reconciliation should only run on first run_once."""
+        settings = _make_settings()
+        clob = AsyncMock()
+        clob.send_heartbeat = AsyncMock(return_value="hb1")
+        scanner = MagicMock()
+        scanner.fetch_markets = AsyncMock(return_value=[])
+        strategy = MarketMakerStrategy(settings=settings, clob=clob, scanner=scanner)
+
+        ctx = MagicMock()
+        ctx.db = AsyncMock()
+        ctx.db.fetch = AsyncMock(return_value=[])
+
+        await strategy.run_once(ctx)
+        await strategy.run_once(ctx)
+        # fetch should be called once for reconciliation, not twice
+        assert ctx.db.fetch.call_count == 1

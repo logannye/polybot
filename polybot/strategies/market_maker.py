@@ -48,11 +48,16 @@ class MarketMakerStrategy:
         self._heartbeat_id: str = str(uuid4())
         self._last_heartbeat: datetime | None = None
         self._vol_blacklist: dict[str, datetime] = {}  # market -> blacklist_until
+        self._inventory_reconciled = False
 
     async def run_once(self, ctx) -> None:
         """Main 5-second loop: heartbeat, select, quote, check fills."""
         # 1. Heartbeat — MUST happen every <10s
         await self._send_heartbeat()
+
+        # Seed inventory from DB on first cycle
+        if not self._inventory_reconciled:
+            await self._reconcile_inventory(ctx)
 
         # Ensure QuoteManager has DB access for trade tracking
         if self._quote_mgr._db is None and hasattr(ctx, 'db'):
@@ -90,6 +95,26 @@ class MarketMakerStrategy:
         except Exception as e:
             log.critical("mm_heartbeat_failed", error=str(e))
             self._quote_mgr.mark_all_stale()
+
+    async def _reconcile_inventory(self, ctx) -> None:
+        """Seed inventory from filled MM trades in DB. Called once on first run_once()."""
+        try:
+            rows = await ctx.db.fetch(
+                """SELECT mk.polymarket_id, t.side,
+                          SUM(t.shares) as total_shares
+                   FROM trades t
+                   JOIN markets mk ON t.market_id = mk.id
+                   WHERE t.strategy = 'market_maker' AND t.status = 'filled'
+                   GROUP BY mk.polymarket_id, t.side""")
+            for row in rows:
+                side = "BUY" if row["side"] == "YES" else "SELL"
+                self._inventory.record_fill(
+                    row["polymarket_id"], side, 0.50, float(row["total_shares"]))
+            if rows:
+                log.info("mm_inventory_reconciled", rows=len(rows))
+        except Exception as e:
+            log.error("mm_inventory_reconcile_failed", error=str(e))
+        self._inventory_reconciled = True
 
     async def _select_markets(self, ctx) -> None:
         """Score and select markets for quoting."""
