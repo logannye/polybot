@@ -137,115 +137,42 @@ class TestQuoteManagement:
         qm.requote.assert_awaited_once()
 
 
-class TestSimulateFills:
-    def _make_strategy(self, spread_bps=150):
+class TestDryRunNoSimulation:
+    @pytest.mark.asyncio
+    async def test_dry_run_does_not_simulate_fills(self):
+        """Dry-run run_once should NOT call _simulate_fills (method removed)."""
         settings = _make_settings()
-        settings.mm_base_spread_bps = spread_bps
         clob = AsyncMock()
+        clob.send_heartbeat = AsyncMock(return_value="hb1")
         scanner = MagicMock()
-        inv = InventoryTracker(max_per_market=50.0, max_total=200.0, max_skew_bps=100)
-        qm = MagicMock()
-        strategy = MarketMakerStrategy(
-            settings=settings, clob=clob, scanner=scanner,
-            dry_run=True, inventory=inv, quote_manager=qm)
-        return strategy
+        scanner.fetch_markets = AsyncMock(return_value=[])
+        strategy = MarketMakerStrategy(settings=settings, clob=clob, scanner=scanner,
+                                       dry_run=True)
+        assert not hasattr(strategy, '_simulate_fills')
+        assert not hasattr(strategy, '_sim_pnl')
+        assert not hasattr(strategy, '_sim_fills')
+        assert not hasattr(strategy, '_prev_prices')
 
-    def _make_quote(self, side, price, size=20.0):
-        from polybot.trading.quote_manager import Quote
-        return Quote(
-            order_id=f"dry_{side}", token_id="t1", side=side,
-            price=price, size=size,
-            posted_at=datetime.now(timezone.utc), status="live")
-
-    def test_simulate_fills_detects_bid_cross(self):
-        """Price drops below bid from previous cycle -> bid fill triggered."""
-        strategy = self._make_strategy()
-        market = ActiveMarket(
-            polymarket_id="m1", yes_token_id="t1", no_token_id="t2",
-            category="politics", max_incentive_spread=0.05,
-            min_incentive_size=10.0, fair_value=0.50)
-        strategy._active_markets = {"m1": market}
-
-        # Previous cycle quoted at 0.50, bid at 0.4925
-        strategy._prev_prices["m1"] = 0.50
-        bid = self._make_quote("BUY", 0.4925, size=20.0)
-        ask = self._make_quote("SELL", 0.5075, size=20.0)
-        strategy._quote_mgr.get_quotes = MagicMock(return_value=(bid, ask))
-
-        # Price dropped to 0.48 -> below bid
-        strategy._scanner.get_cached_price = MagicMock(
-            return_value={"yes_price": 0.48})
-
-        strategy._simulate_fills()
-
-        assert strategy._sim_fills == 1
-        assert strategy._sim_pnl > 0  # spread_earned = 0.50 - 0.4925 = 0.0075
-
-    def test_simulate_fills_detects_ask_cross(self):
-        """Price rises above ask from previous cycle -> ask fill triggered."""
-        strategy = self._make_strategy()
-        market = ActiveMarket(
-            polymarket_id="m1", yes_token_id="t1", no_token_id="t2",
-            category="politics", max_incentive_spread=0.05,
-            min_incentive_size=10.0, fair_value=0.50)
-        strategy._active_markets = {"m1": market}
-
-        strategy._prev_prices["m1"] = 0.50
-        bid = self._make_quote("BUY", 0.4925, size=20.0)
-        ask = self._make_quote("SELL", 0.5075, size=20.0)
-        strategy._quote_mgr.get_quotes = MagicMock(return_value=(bid, ask))
-
-        # Price rose to 0.52 -> above ask
-        strategy._scanner.get_cached_price = MagicMock(
-            return_value={"yes_price": 0.52})
-
-        strategy._simulate_fills()
-
-        assert strategy._sim_fills == 1
-        assert strategy._sim_pnl > 0  # spread_earned = 0.5075 - 0.50 = 0.0075
-
-    def test_simulate_fills_no_fill_when_price_unchanged(self):
-        """Same price as quote cycle -> no fills triggered."""
-        strategy = self._make_strategy()
-        market = ActiveMarket(
-            polymarket_id="m1", yes_token_id="t1", no_token_id="t2",
-            category="politics", max_incentive_spread=0.05,
-            min_incentive_size=10.0, fair_value=0.50)
-        strategy._active_markets = {"m1": market}
-
-        strategy._prev_prices["m1"] = 0.50
-        bid = self._make_quote("BUY", 0.4925, size=20.0)
-        ask = self._make_quote("SELL", 0.5075, size=20.0)
-        strategy._quote_mgr.get_quotes = MagicMock(return_value=(bid, ask))
-
-        # Price unchanged at 0.50 -> between bid and ask
-        strategy._scanner.get_cached_price = MagicMock(
-            return_value={"yes_price": 0.50})
-
-        strategy._simulate_fills()
-
-        assert strategy._sim_fills == 0
-        assert strategy._sim_pnl == 0.0
-
-    def test_simulate_fills_skips_without_prev_price(self):
-        """First cycle for a market (no prev_price) -> graceful skip."""
-        strategy = self._make_strategy()
-        market = ActiveMarket(
-            polymarket_id="m1", yes_token_id="t1", no_token_id="t2",
-            category="politics", max_incentive_spread=0.05,
-            min_incentive_size=10.0, fair_value=0.50)
-        strategy._active_markets = {"m1": market}
-
-        # No entry in _prev_prices
-        bid = self._make_quote("BUY", 0.49, size=20.0)
-        ask = self._make_quote("SELL", 0.51, size=20.0)
-        strategy._quote_mgr.get_quotes = MagicMock(return_value=(bid, ask))
-        strategy._scanner.get_cached_price = MagicMock(
-            return_value={"yes_price": 0.40})  # would cross bid
-
-        strategy._simulate_fills()
-
-        assert strategy._sim_fills == 0  # skipped because no prev_price
+    @pytest.mark.asyncio
+    async def test_dry_run_logs_quote_summary(self):
+        """Dry-run run_once should log active market count."""
+        settings = _make_settings()
+        clob = AsyncMock()
+        clob.send_heartbeat = AsyncMock(return_value="hb1")
+        scanner = MagicMock()
+        scanner.fetch_markets = AsyncMock(return_value=[
+            _make_market("m1", price=0.50, volume=20000, depth=8000),
+        ])
+        scanner.get_cached_price = MagicMock(return_value={
+            "yes_price": 0.50, "no_price": 0.50,
+        })
+        qm = AsyncMock()
+        strategy = MarketMakerStrategy(settings=settings, clob=clob, scanner=scanner,
+                                       dry_run=True, quote_manager=qm)
+        ctx = MagicMock()
+        ctx.db = AsyncMock()
+        await strategy.run_once(ctx)
+        # Should not crash; quoting still runs in dry-run
 
 
 class TestEmergencyWithdraw:
