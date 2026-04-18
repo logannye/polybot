@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     forecast_consensus_margin: float = 0.05            # margin from market price to count as "agreeing"
     forecast_category_min_trades: int = 10             # min trades before filtering by category
     forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
-    forecast_enabled: bool = False
+    forecast_enabled: bool = True
     forecast_category_filter_enabled: bool = True      # disable to skip category filtering
     forecast_yes_max_entry: float = 0.15       # only enter YES below this price (data: winners avg 0.098)
     forecast_no_min_entry: float = 0.60        # only enter NO above this yes_price (mid-range filter)
@@ -199,7 +199,7 @@ class Settings(BaseSettings):
     mm_min_book_depth: float = 500.0
 
     # Mean reversion strategy
-    mr_enabled: bool = False
+    mr_enabled: bool = True
     mr_interval_seconds: float = 60.0
     mr_trigger_threshold: float = 0.05
     mr_reversion_fraction: float = 0.40
