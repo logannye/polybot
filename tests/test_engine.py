@@ -1,4 +1,5 @@
 import asyncio
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from polybot.core.engine import Engine
@@ -31,6 +32,8 @@ def test_add_strategy():
 @pytest.mark.asyncio
 async def test_run_strategy_calls_run_once():
     engine = make_engine()
+    # Short-circuit the drawdown DB lookup so _run_strategy reaches strategy.run_once
+    engine._drawdown_cache = (False, time.monotonic())
     strategy = MagicMock()
     strategy.name = "test"
     strategy.interval_seconds = 0.001
@@ -140,6 +143,8 @@ async def test_run_strategy_disables_after_consecutive_errors(monkeypatch):
     # Patch asyncio.sleep to be instant during backoff
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     engine = make_engine()
+    # Short-circuit the drawdown DB lookup so run_once — not fetchrow — is the error source
+    engine._drawdown_cache = (False, time.monotonic())
     strategy = MagicMock()
     strategy.name = "failing"
     strategy.interval_seconds = 0.001
