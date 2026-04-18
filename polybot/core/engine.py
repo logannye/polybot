@@ -34,6 +34,7 @@ class Engine:
         self._last_self_assess: datetime | None = None
         self._price_history_scanner = price_history_scanner
         self._capital_divergence_halted = False
+        self._capital_divergence_ok_count = 0
 
     def add_strategy(self, strategy: Strategy) -> None:
         self._strategies.append(strategy)
@@ -211,7 +212,8 @@ class Engine:
         return False
 
     async def _check_capital_divergence(self):
-        """Compare CLOB balance vs DB bankroll. Halt if divergence > threshold."""
+        """Compare CLOB balance vs DB bankroll. Halt if divergence > threshold.
+        Self-heals after 3 consecutive OK checks."""
         if not self._clob or self._settings.dry_run:
             return
         try:
@@ -224,6 +226,7 @@ class Engine:
             max_div = getattr(self._settings, 'max_capital_divergence_pct', 0.10)
             if divergence > max_div:
                 self._capital_divergence_halted = True
+                self._capital_divergence_ok_count = 0
                 log.critical("CAPITAL_DIVERGENCE_HALT", clob=clob_balance,
                              expected=expected_cash, divergence_pct=round(divergence * 100, 1))
                 try:
@@ -233,6 +236,20 @@ class Engine:
                         f"Divergence: {divergence*100:.1f}%</p>")
                 except Exception:
                     pass
+            elif self._capital_divergence_halted:
+                self._capital_divergence_ok_count += 1
+                if self._capital_divergence_ok_count >= 3:
+                    self._capital_divergence_halted = False
+                    self._capital_divergence_ok_count = 0
+                    log.info("CAPITAL_DIVERGENCE_RECOVERED",
+                             clob=clob_balance, expected=expected_cash)
+                    try:
+                        await self._context.email_notifier.send(
+                            "[POLYBOT INFO] Capital divergence recovered",
+                            f"<p>CLOB balance back in sync after 3 consecutive OK checks. "
+                            f"CLOB: ${clob_balance:.2f}, Expected: ${expected_cash:.2f}</p>")
+                    except Exception:
+                        pass
         except Exception as e:
             log.error("capital_divergence_check_error", error=str(e))
 

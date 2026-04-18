@@ -136,3 +136,74 @@ async def test_capital_divergence_ok_when_close():
 
     await engine._check_capital_divergence()
     assert engine._capital_divergence_halted is False
+
+
+@pytest.mark.asyncio
+async def test_capital_divergence_self_heals_after_3_ok_checks():
+    """Should clear halt after 3 consecutive checks within threshold."""
+    from polybot.core.engine import Engine
+
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "bankroll": 500, "total_deployed": 50,
+    })
+
+    clob = AsyncMock()
+    clob.get_balance = AsyncMock(return_value=445.0)  # 445 vs 450 expected = 1%
+
+    settings = MagicMock()
+    settings.dry_run = False
+    settings.max_capital_divergence_pct = 0.10
+
+    engine = Engine.__new__(Engine)
+    engine._db = db
+    engine._clob = clob
+    engine._settings = settings
+    engine._capital_divergence_halted = True  # previously halted
+    engine._capital_divergence_ok_count = 0
+    engine._context = MagicMock()
+    engine._context.email_notifier = AsyncMock()
+
+    # First two OK checks: still halted
+    await engine._check_capital_divergence()
+    assert engine._capital_divergence_halted is True
+    assert engine._capital_divergence_ok_count == 1
+
+    await engine._check_capital_divergence()
+    assert engine._capital_divergence_halted is True
+    assert engine._capital_divergence_ok_count == 2
+
+    # Third OK check: healed
+    await engine._check_capital_divergence()
+    assert engine._capital_divergence_halted is False
+    assert engine._capital_divergence_ok_count == 0
+
+
+@pytest.mark.asyncio
+async def test_capital_divergence_resets_ok_count_on_new_divergence():
+    """A new divergence during recovery should reset the OK counter."""
+    from polybot.core.engine import Engine
+
+    settings = MagicMock()
+    settings.dry_run = False
+    settings.max_capital_divergence_pct = 0.10
+
+    engine = Engine.__new__(Engine)
+    engine._settings = settings
+    engine._capital_divergence_halted = True
+    engine._capital_divergence_ok_count = 2  # almost healed
+    engine._context = MagicMock()
+    engine._context.email_notifier = AsyncMock()
+
+    # Divergent check: CLOB balance way off
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={"bankroll": 500, "total_deployed": 0})
+    clob = AsyncMock()
+    clob.get_balance = AsyncMock(return_value=100.0)  # 80% divergence
+
+    engine._db = db
+    engine._clob = clob
+
+    await engine._check_capital_divergence()
+    assert engine._capital_divergence_halted is True
+    assert engine._capital_divergence_ok_count == 0  # reset
