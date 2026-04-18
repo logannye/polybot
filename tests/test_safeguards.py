@@ -24,6 +24,7 @@ async def test_drawdown_halt_stops_strategy():
     engine._db = db
     engine._settings = settings
     engine._context = MagicMock()
+    engine._drawdown_cache = None
 
     result = await engine._check_drawdown_halt()
     assert result is True
@@ -51,6 +52,7 @@ async def test_drawdown_triggers_when_below_threshold():
     engine._settings = settings
     engine._context = MagicMock()
     engine._context.email_notifier = AsyncMock()
+    engine._drawdown_cache = None
 
     result = await engine._check_drawdown_halt()
     assert result is True
@@ -77,6 +79,7 @@ async def test_no_halt_when_within_threshold():
     engine = Engine.__new__(Engine)
     engine._db = db
     engine._settings = settings
+    engine._drawdown_cache = None
 
     result = await engine._check_drawdown_halt()
     assert result is False
@@ -207,3 +210,50 @@ async def test_capital_divergence_resets_ok_count_on_new_divergence():
     await engine._check_capital_divergence()
     assert engine._capital_divergence_halted is True
     assert engine._capital_divergence_ok_count == 0  # reset
+
+
+@pytest.mark.asyncio
+async def test_drawdown_check_uses_cache_within_30s():
+    """Should return cached result without querying DB within 30s."""
+    import time
+    from polybot.core.engine import Engine
+
+    db = AsyncMock()
+    settings = MagicMock()
+    settings.dry_run = False
+    settings.max_total_drawdown_pct = 0.30
+
+    engine = Engine.__new__(Engine)
+    engine._db = db
+    engine._settings = settings
+    engine._drawdown_cache = (False, time.monotonic())  # cached 'not halted' just now
+
+    result = await engine._check_drawdown_halt()
+    assert result is False
+    db.fetchrow.assert_not_called()  # should NOT have queried DB
+
+
+@pytest.mark.asyncio
+async def test_drawdown_check_queries_db_after_cache_expires():
+    """Should query DB when cache is older than 30s."""
+    import time
+    from polybot.core.engine import Engine
+
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "bankroll": 400, "high_water_bankroll": 500,
+        "drawdown_halt_until": None,
+    })
+
+    settings = MagicMock()
+    settings.dry_run = False
+    settings.max_total_drawdown_pct = 0.30
+
+    engine = Engine.__new__(Engine)
+    engine._db = db
+    engine._settings = settings
+    engine._drawdown_cache = (False, time.monotonic() - 31)  # expired
+
+    result = await engine._check_drawdown_halt()
+    assert result is False
+    db.fetchrow.assert_called_once()  # SHOULD have queried DB

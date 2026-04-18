@@ -1,6 +1,7 @@
 import asyncio
 import json
 import resource
+import time
 import structlog
 from datetime import datetime, timezone, timedelta
 from polybot.strategies.base import Strategy, TradingContext
@@ -35,6 +36,7 @@ class Engine:
         self._price_history_scanner = price_history_scanner
         self._capital_divergence_halted = False
         self._capital_divergence_ok_count = 0
+        self._drawdown_cache: tuple[bool, float] | None = None
 
     def add_strategy(self, strategy: Strategy) -> None:
         self._strategies.append(strategy)
@@ -169,9 +171,15 @@ class Engine:
 
     async def _check_drawdown_halt(self) -> bool:
         """Check if total drawdown halt is active or should be triggered.
-        Returns True if trading should be halted."""
+        Returns True if trading should be halted. Caches result for 30s."""
+        if self._drawdown_cache is not None:
+            cached_result, cached_at = self._drawdown_cache
+            if time.monotonic() - cached_at < 30:
+                return cached_result
+
         state = await self._db.fetchrow("SELECT * FROM system_state WHERE id = 1")
         if not state:
+            self._drawdown_cache = (False, time.monotonic())
             return False
 
         bankroll = float(state["bankroll"])
@@ -180,12 +188,14 @@ class Engine:
 
         # Already halted?
         if halt_until and halt_until > datetime.now(timezone.utc):
+            self._drawdown_cache = (True, time.monotonic())
             return True
 
         # Update high-water mark
         if bankroll > high_water:
             await self._db.execute(
                 "UPDATE system_state SET high_water_bankroll = $1 WHERE id = 1", bankroll)
+            self._drawdown_cache = (False, time.monotonic())
             return False
 
         # Check drawdown
@@ -207,8 +217,10 @@ class Engine:
                         f"<p>All trading halted. Manual DB reset required to resume.</p>")
                 except Exception:
                     pass
+                self._drawdown_cache = (True, time.monotonic())
                 return True
 
+        self._drawdown_cache = (False, time.monotonic())
         return False
 
     async def _check_capital_divergence(self):
