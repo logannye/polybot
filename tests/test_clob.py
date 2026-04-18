@@ -94,3 +94,49 @@ async def test_get_market_price_fallback():
     gw._client = mock_client
     result = await gw.get_market_price("token123")
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_summary():
+    """get_order_book_summary returns best bid, ask, and spread."""
+    gw = ClobGateway.__new__(ClobGateway)
+    mock_client = MagicMock()
+    mock_ask = MagicMock()
+    mock_ask.price = "0.5500"
+    mock_bid = MagicMock()
+    mock_bid.price = "0.5300"
+    mock_book = MagicMock()
+    mock_book.asks = [mock_ask]
+    mock_book.bids = [mock_bid]
+    mock_client.get_order_book.return_value = mock_book
+    gw._client = mock_client
+    result = await gw.get_order_book_summary("token123")
+    assert result is not None
+    assert abs(result["best_bid"] - 0.53) < 0.001
+    assert abs(result["best_ask"] - 0.55) < 0.001
+    assert abs(result["spread"] - 0.02) < 0.001
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_summary_empty_book():
+    """get_order_book_summary returns None when book is empty."""
+    gw = ClobGateway.__new__(ClobGateway)
+    mock_client = MagicMock()
+    mock_book = MagicMock()
+    mock_book.asks = []
+    mock_book.bids = []
+    mock_client.get_order_book.return_value = mock_book
+    gw._client = mock_client
+    result = await gw.get_order_book_summary("token123")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_summary_error():
+    """get_order_book_summary returns None on API error."""
+    gw = ClobGateway.__new__(ClobGateway)
+    mock_client = MagicMock()
+    mock_client.get_order_book.side_effect = Exception("timeout")
+    gw._client = mock_client
+    result = await gw.get_order_book_summary("token123")
+    assert result is None

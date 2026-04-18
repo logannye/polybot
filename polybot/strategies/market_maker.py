@@ -48,14 +48,16 @@ class MarketMakerStrategy:
         self._heartbeat_id: str = str(uuid4())
         self._last_heartbeat: datetime | None = None
         self._vol_blacklist: dict[str, datetime] = {}  # market -> blacklist_until
-        self._sim_pnl: float = 0.0
-        self._sim_fills: int = 0
-        self._prev_prices: dict[str, float] = {}  # price when quotes were last placed
+        self._inventory_reconciled = False
 
     async def run_once(self, ctx) -> None:
         """Main 5-second loop: heartbeat, select, quote, check fills."""
         # 1. Heartbeat — MUST happen every <10s
         await self._send_heartbeat()
+
+        # Seed inventory from DB on first cycle
+        if not self._inventory_reconciled:
+            await self._reconcile_inventory(ctx)
 
         # Ensure QuoteManager has DB access for trade tracking
         if self._quote_mgr._db is None and hasattr(ctx, 'db'):
@@ -71,16 +73,16 @@ class MarketMakerStrategy:
         if not self._active_markets:
             return
 
-        # 3. Simulate fills BEFORE requoting — compare new price vs old quotes
-        if self._dry_run:
-            self._simulate_fills()
-
-        # 4. Manage quotes for each active market
+        # 3. Manage quotes for each active market
         for market in list(self._active_markets.values()):
             try:
                 await self._manage_quotes(market, ctx)
             except Exception as e:
                 log.error("mm_quote_error", market=market.polymarket_id, error=str(e))
+
+        # Dry-run observability: log quoting activity without simulating fills
+        if self._dry_run and self._active_markets:
+            log.info("mm_dry_run_cycle", active_markets=len(self._active_markets))
 
     async def _send_heartbeat(self) -> None:
         """Send heartbeat to Polymarket to keep orders alive."""
@@ -93,6 +95,26 @@ class MarketMakerStrategy:
         except Exception as e:
             log.critical("mm_heartbeat_failed", error=str(e))
             self._quote_mgr.mark_all_stale()
+
+    async def _reconcile_inventory(self, ctx) -> None:
+        """Seed inventory from filled MM trades in DB. Called once on first run_once()."""
+        try:
+            rows = await ctx.db.fetch(
+                """SELECT mk.polymarket_id, t.side,
+                          SUM(t.shares) as total_shares
+                   FROM trades t
+                   JOIN markets mk ON t.market_id = mk.id
+                   WHERE t.strategy = 'market_maker' AND t.status = 'filled'
+                   GROUP BY mk.polymarket_id, t.side""")
+            for row in rows:
+                side = "BUY" if row["side"] == "YES" else "SELL"
+                self._inventory.record_fill(
+                    row["polymarket_id"], side, 0.50, float(row["total_shares"]))
+            if rows:
+                log.info("mm_inventory_reconciled", rows=len(rows))
+        except Exception as e:
+            log.error("mm_inventory_reconcile_failed", error=str(e))
+        self._inventory_reconciled = True
 
     async def _select_markets(self, ctx) -> None:
         """Score and select markets for quoting."""
@@ -240,51 +262,6 @@ class MarketMakerStrategy:
         await self._quote_mgr.requote(
             market, bid_price, bid_size, ask_price, ask_size,
             threshold=s.mm_requote_threshold, market_id=db_market_id)
-
-        # Record the price used for this quote cycle (used by fill simulation)
-        self._prev_prices[market.polymarket_id] = current_price
-
-    def _simulate_fills(self) -> None:
-        """Simulate fills in dry-run mode by checking if market price crossed our quotes.
-
-        Compares the CURRENT scanner price against quotes placed in the PREVIOUS
-        cycle, giving the market a full cycle to move.
-        """
-        for market in self._active_markets.values():
-            bid, ask = self._quote_mgr.get_quotes(market.polymarket_id)
-            if not bid and not ask:
-                continue
-            cached = self._scanner.get_cached_price(market.polymarket_id)
-            if not cached:
-                continue
-            current_price = cached.get("yes_price", market.fair_value)
-
-            # Need a previous quote-cycle price to compute spread earned
-            prev_price = self._prev_prices.get(market.polymarket_id)
-            if prev_price is None:
-                continue  # first cycle for this market, skip
-
-            # Bid fill: market dropped to or below our bid
-            if bid and bid.status == "live" and current_price <= bid.price:
-                spread_earned = prev_price - bid.price
-                self._inventory.record_fill(market.polymarket_id, "BUY", bid.price, bid.size)
-                self._sim_pnl += spread_earned * bid.size
-                self._sim_fills += 1
-                log.info("mm_sim_bid_fill", market=market.polymarket_id,
-                         bid=round(bid.price, 4), market_price=round(current_price, 4),
-                         spread=round(spread_earned, 4), size=round(bid.size, 2),
-                         cumulative_pnl=round(self._sim_pnl, 4), total_fills=self._sim_fills)
-
-            # Ask fill: market rose to or above our ask
-            if ask and ask.status == "live" and current_price >= ask.price:
-                spread_earned = ask.price - prev_price
-                self._inventory.record_fill(market.polymarket_id, "SELL", ask.price, ask.size)
-                self._sim_pnl += spread_earned * ask.size
-                self._sim_fills += 1
-                log.info("mm_sim_ask_fill", market=market.polymarket_id,
-                         ask=round(ask.price, 4), market_price=round(current_price, 4),
-                         spread=round(spread_earned, 4), size=round(ask.size, 2),
-                         cumulative_pnl=round(self._sim_pnl, 4), total_fills=self._sim_fills)
 
     async def emergency_withdraw(self) -> None:
         """Cancel all quotes and stop market making."""

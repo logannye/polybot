@@ -38,9 +38,10 @@ def _make_executor(db, clob, realistic=True, max_spread=0.15, fee=0.02):
 async def test_realistic_dryrun_rejects_wide_spread():
     """Dry-run should reject orders on markets with spread > threshold."""
     db = AsyncMock()
-    clob = MagicMock()
-    clob._client = MagicMock()
-    clob._client.get_order_book.return_value = _make_book("0.25", "0.75")
+    clob = AsyncMock()
+    clob.get_order_book_summary = AsyncMock(return_value={
+        "best_bid": 0.25, "best_ask": 0.75, "spread": 0.50,
+    })
 
     executor = _make_executor(db, clob, max_spread=0.15)
     result = await executor.place_order(
@@ -55,9 +56,10 @@ async def test_realistic_dryrun_fills_at_best_ask():
     """Dry-run should fill at best ask price, not model price."""
     db = AsyncMock()
     db.fetchval = AsyncMock(return_value=1)
-    clob = MagicMock()
-    clob._client = MagicMock()
-    clob._client.get_order_book.return_value = _make_book("0.48", "0.52")
+    clob = AsyncMock()
+    clob.get_order_book_summary = AsyncMock(return_value={
+        "best_bid": 0.48, "best_ask": 0.52, "spread": 0.04,
+    })
 
     executor = _make_executor(db, clob)
     result = await executor.place_order(

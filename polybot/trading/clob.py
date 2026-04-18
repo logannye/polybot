@@ -94,6 +94,25 @@ class ClobGateway:
         except Exception:
             return None
 
+    async def get_order_book_summary(self, token_id: str) -> dict | None:
+        """Fetch order book and return best bid, best ask, and spread.
+        Returns None if book is empty or on error."""
+        try:
+            book = await asyncio.to_thread(self._client.get_order_book, token_id)
+            if book.asks and book.bids:
+                best_ask = float(book.asks[0].price)
+                best_bid = float(book.bids[0].price)
+                return {
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "spread": best_ask - best_bid,
+                }
+            return None
+        except Exception as e:
+            log.debug("get_order_book_summary_failed", token_id=token_id[:20],
+                      error=str(e)[:60])
+            return None
+
     # --- Market-making support methods ---
 
     async def send_heartbeat(self, heartbeat_id: str) -> str:
