@@ -34,6 +34,7 @@ from polybot.sports.calibrator import OnlineCalibrator, bucket_for_game_state
 from polybot.sports.threshold import get_active_wp_threshold, passes_live_threshold
 from polybot.markets.sports_matcher import (
     LiveGame, PolymarketMarket, match_game_to_market,
+    compute_match_confidence, classify_market_type,
 )
 from polybot.trading.kelly import compute_position_size
 from polybot.learning.trade_outcome import record_outcome as record_trade_outcome
@@ -168,6 +169,20 @@ class LiveSportsStrategy(Strategy):
             log.warning("live_sports_scanner_missing_fetch_sports_markets")
             return
 
+        # Visibility into sports-market supply — how many markets in the
+        # matcher-eligible window (resolution within 12h of now)? Surfaces
+        # the "no live-game markets on Polymarket" condition distinct from
+        # "matcher rejected everything" failure mode.
+        now = datetime.now(timezone.utc)
+        near_term_count = sum(
+            1 for m in markets
+            if m.get("resolution_time")
+            and 0 < (m["resolution_time"] - now).total_seconds() < 12 * 3600)
+        log.info("live_sports_market_supply",
+                 total_sports_markets=len(markets),
+                 near_term_12h=near_term_count,
+                 live_games=len(eligible_games))
+
         for espn_game in eligible_games:
             live_game = espn_game_to_live_game(espn_game)
             state = espn_game_to_game_state(espn_game)
@@ -217,6 +232,10 @@ class LiveSportsStrategy(Strategy):
         """For one live game, find matching markets and enter if gate passes."""
         min_conf = float(getattr(self._settings, "lg_matcher_min_confidence", 0.95))
         active_threshold = get_active_wp_threshold(self._settings)
+        # Track per-game matcher funnel so we can log a summary if nothing matches
+        best_confidence = 0.0
+        best_breakdown: dict = {}
+        markets_classified = 0
         for market_dict in markets:
             try:
                 market = PolymarketMarket(
@@ -228,6 +247,24 @@ class LiveSportsStrategy(Strategy):
                 )
             except KeyError:
                 continue
+
+            # Only consider markets that classify as a relevant type AND
+            # pass basic team-name sniff test — otherwise the matcher
+            # rejection log is flooded with obvious mismatches.
+            if classify_market_type(market.question) is None:
+                continue
+            markets_classified += 1
+            # Score the match for diagnostic tracking
+            conf, breakdown = compute_match_confidence(live_game, market)
+            if conf > best_confidence:
+                best_confidence = conf
+                best_breakdown = {
+                    "market_id": market.polymarket_id[:12],
+                    "question": (market.question or "")[:70],
+                    "confidence": round(conf, 4),
+                    **breakdown,
+                }
+
             match = match_game_to_market(live_game, market, min_confidence=min_conf)
             if not match or match.market_type != "moneyline":
                 continue
@@ -258,6 +295,22 @@ class LiveSportsStrategy(Strategy):
                 prob_trade_wins=prob_trade_wins, raw_wp=raw_wp,
                 passes_live=passes_live, market_dict=market_dict,
                 match_bucket=bucket, live_game=live_game, state=state)
+            return   # One entry per game per cycle — avoid racing on dedup
+
+        # No match found in this cycle — log the best near-miss so we can
+        # see the funnel. Guards against the flood case (thousands of markets
+        # scored 0) by only logging when the best confidence is non-trivial
+        # OR we had at least one classified moneyline/spread/total market.
+        if markets_classified > 0:
+            log.info(
+                "live_sports_matcher_no_match",
+                sport=state.sport,
+                home=live_game.home_team, away=live_game.away_team,
+                markets_classified=markets_classified,
+                best_confidence=round(best_confidence, 4),
+                min_confidence=min_conf,
+                best_match=best_breakdown,
+            )
 
     async def _entry_gate_ok(self, ctx: TradingContext, market: PolymarketMarket,
                                trade_side: str, prob_trade_wins: float,
