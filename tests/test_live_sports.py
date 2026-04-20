@@ -74,6 +74,8 @@ def _base_settings():
     s.lg_max_single_pct = 0.20
     s.lg_min_edge = 0.04
     s.lg_min_win_prob = 0.85
+    s.lg_min_win_prob_dryrun = 0.65
+    s.dry_run = True       # tests exercise dry-run path by default
     s.lg_min_book_depth = 10000.0
     s.lg_matcher_min_confidence = 0.95
     s.lg_max_staleness_s = 60.0
@@ -202,6 +204,106 @@ async def test_entry_gate_passes_when_all_conditions_met():
     assert call_kwargs["side"] in ("YES", "NO")
     assert call_kwargs["post_only"] is True   # maker-first
     assert call_kwargs["strategy"] == "live_sports"
+    # kelly_inputs carries raw_wp + passes_live_threshold for outcome analysis
+    kin = call_kwargs["kelly_inputs"]
+    assert "raw_wp" in kin
+    assert "passes_live_threshold" in kin
+    assert "calibrated_wp" in kin
+
+
+@pytest.mark.asyncio
+async def test_live_sports_records_trade_outcome_on_take_profit():
+    """On take_profit, strategy should call record_outcome with realized=1."""
+    from unittest.mock import patch
+    strategy = _strategy_with_mocked_espn([])
+    ctx = _mock_ctx(scanner_markets=[])
+    opened_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    ctx.db.fetch = AsyncMock(return_value=[{
+        "id": 7, "market_id": 42, "strategy": "live_sports",
+        "status": "dry_run", "polymarket_id": "0x" + "a" * 40,
+        "question": "thunder vs jazz",
+        "entry_price": 0.70, "opened_at": opened_at,
+        "yes_token_id": "tok-yes", "no_token_id": "tok-no",
+        "kelly_inputs": '{"calibrated_wp": 0.92, "raw_wp": 0.95, '
+                         '"game_state_bucket": "late_large", '
+                         '"passes_live_threshold": true}',
+    }])
+    ctx.scanner.fetch_order_book = AsyncMock(return_value={
+        "bids": [{"price": "0.97", "size": "100"}],
+        "asks": [{"price": "0.98", "size": "100"}],
+    })
+    ctx.executor.exit_position = AsyncMock(return_value=5.50)   # $5.50 PnL
+
+    with patch("polybot.strategies.live_sports.record_trade_outcome",
+               new=AsyncMock(return_value=1)) as mock_record:
+        await strategy.run_once(ctx)
+        ctx.executor.exit_position.assert_called_once()
+        mock_record.assert_called_once()
+        kwargs = mock_record.call_args.kwargs
+        assert kwargs["strategy"] == "live_sports"
+        assert kwargs["exit_reason"] == "take_profit"
+        assert kwargs["realized_outcome"] == 1
+        assert kwargs["predicted_prob"] == 0.92
+        assert kwargs["pnl"] == 5.50
+
+
+@pytest.mark.asyncio
+async def test_live_sports_records_trade_outcome_on_time_stop_with_null_realized():
+    """Time-stop exit is ambiguous; realized_outcome should be None."""
+    from unittest.mock import patch
+    strategy = _strategy_with_mocked_espn([])
+    ctx = _mock_ctx(scanner_markets=[])
+    opened_at = datetime.now(timezone.utc) - timedelta(hours=7)
+    ctx.db.fetch = AsyncMock(return_value=[{
+        "id": 8, "market_id": 43, "strategy": "live_sports",
+        "status": "dry_run", "polymarket_id": "0x" + "b" * 40,
+        "question": "?", "entry_price": 0.60, "opened_at": opened_at,
+        "yes_token_id": "tok", "no_token_id": "",
+        "kelly_inputs": "{}",
+    }])
+    ctx.executor.exit_position = AsyncMock(return_value=-2.0)
+
+    with patch("polybot.strategies.live_sports.record_trade_outcome",
+               new=AsyncMock(return_value=1)) as mock_record:
+        await strategy.run_once(ctx)
+        mock_record.assert_called_once()
+        kwargs = mock_record.call_args.kwargs
+        assert kwargs["exit_reason"] == "time_stop"
+        assert kwargs["realized_outcome"] is None  # ambiguous
+
+
+@pytest.mark.asyncio
+async def test_live_sports_dryrun_threshold_allows_lower_wp_entry():
+    """With dry_run=True and lg_min_win_prob_dryrun=0.65, a calibrated WP
+    of 0.72 should pass the entry gate (would have been rejected at 0.85)."""
+    espn_games = [{
+        "sport": "nba", "espn_id": "1", "home_team": "thunder",
+        "away_team": "jazz", "home_score": 95, "away_score": 88,
+        "status": "in_progress", "period": 4, "clock": "5:00",
+    }]
+    market = {
+        "polymarket_id": "0x" + "e" * 40,
+        "question": "thunder vs jazz 2026-04-05", "slug": "thunder-vs-jazz",
+        "resolution_time": datetime.now(timezone.utc),
+        "yes_price": 0.55, "no_price": 0.45,   # edge available at 0.55
+        "book_depth": 20000.0,
+        "yes_token_id": "tok-yes", "no_token_id": "tok-no",
+    }
+    settings = _base_settings()
+    settings.dry_run = True
+    settings.lg_min_win_prob_dryrun = 0.65
+    espn = MagicMock()
+    espn.fetch_all_live_games = AsyncMock(return_value=espn_games)
+    strategy = LiveSportsStrategy(settings=settings, espn_client=espn)
+    ctx = _mock_ctx(scanner_markets=[market])
+    async def fetchval_side_effect(sql, *args):
+        if "SELECT COUNT(*)" in sql: return 0
+        if "INSERT INTO markets" in sql: return 42
+        return None
+    ctx.db.fetchval = AsyncMock(side_effect=fetchval_side_effect)
+    await strategy.run_once(ctx)
+    # Dry-run lower threshold should have let this trade through
+    ctx.executor.place_order.assert_called_once()
 
 
 @pytest.mark.asyncio

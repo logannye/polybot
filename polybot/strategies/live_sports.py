@@ -31,10 +31,12 @@ from polybot.strategies.base import Strategy, TradingContext
 from polybot.sports.espn_client import ESPNClient
 from polybot.sports.win_prob import compute_win_prob, GameState
 from polybot.sports.calibrator import OnlineCalibrator, bucket_for_game_state
+from polybot.sports.threshold import get_active_wp_threshold, passes_live_threshold
 from polybot.markets.sports_matcher import (
     LiveGame, PolymarketMarket, match_game_to_market,
 )
 from polybot.trading.kelly import compute_position_size
+from polybot.learning.trade_outcome import record_outcome as record_trade_outcome
 
 log = structlog.get_logger()
 
@@ -181,21 +183,40 @@ class LiveSportsStrategy(Strategy):
                 seconds_left=state.regulation_seconds_remaining)
             calibrated = self._calibrator.apply(state.sport, bucket, raw_prob)
 
-            min_wp = float(getattr(self._settings, "lg_min_win_prob", 0.85))
-            if calibrated < min_wp:
-                log.debug("live_sports_wp_below_threshold",
-                          sport=state.sport, wp=round(calibrated, 3), min=min_wp)
+            active_threshold = get_active_wp_threshold(self._settings)
+            live_ok = passes_live_threshold(calibrated, self._settings)
+
+            # Full-funnel instrumentation — always log the evaluation so we
+            # see the WP distribution, not just rejections. Enables
+            # data-driven tuning without speculation.
+            log.info(
+                "live_sports_wp_evaluated",
+                sport=state.sport, bucket=bucket,
+                raw_wp=round(raw_prob, 4),
+                calibrated_wp=round(calibrated, 4),
+                score_diff=state.score_diff,
+                period=state.period,
+                clock_s=round(state.clock_seconds, 1),
+                active_threshold=round(active_threshold, 3),
+                passes_active=calibrated >= active_threshold,
+                passes_live_threshold=live_ok,
+            )
+
+            if calibrated < active_threshold:
                 continue
 
             await self._evaluate_game(
                 ctx=ctx, live_game=live_game, state=state,
-                calibrated_wp=calibrated, bucket=bucket, markets=markets)
+                calibrated_wp=calibrated, raw_wp=raw_prob,
+                bucket=bucket, passes_live=live_ok, markets=markets)
 
     async def _evaluate_game(self, ctx: TradingContext, live_game: LiveGame,
-                              state: GameState, calibrated_wp: float, bucket: str,
+                              state: GameState, calibrated_wp: float,
+                              raw_wp: float, bucket: str, passes_live: bool,
                               markets: list) -> None:
         """For one live game, find matching markets and enter if gate passes."""
         min_conf = float(getattr(self._settings, "lg_matcher_min_confidence", 0.95))
+        active_threshold = get_active_wp_threshold(self._settings)
         for market_dict in markets:
             try:
                 market = PolymarketMarket(
@@ -222,7 +243,7 @@ class LiveSportsStrategy(Strategy):
                 trade_side = "YES" if not wp_leader_is_home else "NO"
                 prob_trade_wins = calibrated_wp if not wp_leader_is_home else (1.0 - calibrated_wp)
 
-            if prob_trade_wins < float(getattr(self._settings, "lg_min_win_prob", 0.85)):
+            if prob_trade_wins < active_threshold:
                 continue
 
             # Entry gate — remaining checks
@@ -234,7 +255,8 @@ class LiveSportsStrategy(Strategy):
 
             await self._enter(
                 ctx=ctx, market=market, trade_side=trade_side,
-                prob_trade_wins=prob_trade_wins, market_dict=market_dict,
+                prob_trade_wins=prob_trade_wins, raw_wp=raw_wp,
+                passes_live=passes_live, market_dict=market_dict,
                 match_bucket=bucket, live_game=live_game, state=state)
 
     async def _entry_gate_ok(self, ctx: TradingContext, market: PolymarketMarket,
@@ -269,7 +291,8 @@ class LiveSportsStrategy(Strategy):
         return True
 
     async def _enter(self, ctx: TradingContext, market: PolymarketMarket,
-                      trade_side: str, prob_trade_wins: float, market_dict: dict,
+                      trade_side: str, prob_trade_wins: float, raw_wp: float,
+                      passes_live: bool, market_dict: dict,
                       match_bucket: str, live_game: LiveGame, state: GameState) -> None:
         """Submit an entry order (maker-first via executor)."""
         # Upsert market row
@@ -314,6 +337,7 @@ class LiveSportsStrategy(Strategy):
         log.info("live_sports_entry",
                  market=market.polymarket_id, side=trade_side, size=round(size, 2),
                  edge=round(edge, 4), calibrated_wp=round(prob_trade_wins, 4),
+                 raw_wp=round(raw_wp, 4), passes_live_threshold=passes_live,
                  sport=state.sport, bucket=match_bucket)
 
         async with ctx.portfolio_lock:
@@ -323,11 +347,13 @@ class LiveSportsStrategy(Strategy):
                 market_id=market_id, analysis_id=None, strategy=self.name,
                 kelly_inputs={
                     "calibrated_wp": round(prob_trade_wins, 4),
+                    "raw_wp": round(raw_wp, 4),
                     "market_price": round(poly_price, 4),
                     "edge": round(edge, 4),
                     "kelly_fraction": round(kelly_fraction, 4),
                     "sport": state.sport,
                     "game_state_bucket": match_bucket,
+                    "passes_live_threshold": passes_live,
                 },
                 post_only=True)    # maker-first
 
@@ -377,13 +403,77 @@ class LiveSportsStrategy(Strategy):
 
     async def _exit(self, ctx: TradingContext, trade, exit_reason: str,
                      exit_price: Optional[float] = None) -> None:
-        """Close a trade via executor with the given reason."""
+        """Close a trade via executor with the given reason. Records a
+        trade_outcome row after the close so the calibrator + Kelly
+        scaler + edge-decay monitor can learn from realized PnL."""
         log.info("live_sports_exit", trade_id=trade["id"], reason=exit_reason)
         try:
-            await ctx.executor.exit_position(
+            pnl = await ctx.executor.exit_position(
                 trade_id=trade["id"],
                 exit_price=exit_price if exit_price is not None else 0.5,
                 exit_reason=exit_reason)
         except Exception as e:
             log.error("live_sports_exit_failed",
                       trade_id=trade["id"], reason=exit_reason, error=str(e))
+            return
+
+        # Record the outcome for the learning layer. Non-fatal on error —
+        # record_outcome logs and returns -1 rather than raising so a
+        # learning-layer hiccup can't lose the trade close.
+        try:
+            kelly_inputs = _safe_json_loads(trade.get("kelly_inputs"))
+            entry_price = float(trade.get("entry_price") or 0.5)
+            effective_exit = float(exit_price) if exit_price is not None else 0.5
+            opened_at = trade.get("opened_at")
+            duration_min = 0.0
+            if opened_at is not None:
+                duration_min = (datetime.now(timezone.utc) - opened_at).total_seconds() / 60.0
+            realized = _exit_reason_to_realized_outcome(exit_reason, effective_exit)
+            await record_trade_outcome(
+                db=ctx.db,
+                strategy=self.name,
+                market_id=int(trade.get("market_id") or 0),
+                market_category="live_sports",
+                entry_price=entry_price,
+                exit_price=effective_exit,
+                pnl=float(pnl) if pnl is not None else 0.0,
+                predicted_prob=(
+                    float(kelly_inputs.get("calibrated_wp"))
+                    if kelly_inputs.get("calibrated_wp") is not None else None),
+                realized_outcome=realized,
+                exit_reason=exit_reason,
+                duration_minutes=duration_min,
+                kelly_inputs=kelly_inputs,
+                game_state_bucket=kelly_inputs.get("game_state_bucket"),
+            )
+        except Exception as e:
+            log.error("live_sports_outcome_record_failed",
+                      trade_id=trade["id"], error=str(e))
+
+
+def _safe_json_loads(value) -> dict:
+    """Robustly parse a kelly_inputs value that may be JSON text, already
+    a dict (from pg jsonb), or None."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _exit_reason_to_realized_outcome(exit_reason: str,
+                                      exit_price: float) -> Optional[int]:
+    """Map exit_reason + exit_price to 0/1 realized outcome for calibrator.
+    Returns None when the outcome is ambiguous (early exit without resolution)."""
+    if exit_reason == "take_profit":
+        return 1       # position won
+    if exit_reason in ("stop_loss", "emergency_exit"):
+        return 0       # position lost
+    if exit_reason in ("market_resolved", "resolved"):
+        return 1 if exit_price >= 0.5 else 0
+    # time_stop / manual / ambiguous — leave realized=None so the calibrator
+    # ignores this sample rather than poisoning it with a guess
+    return None
