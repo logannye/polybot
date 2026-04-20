@@ -6,6 +6,8 @@ import structlog
 from datetime import datetime, timezone, timedelta
 from polybot.strategies.base import Strategy, TradingContext
 from polybot.trading.risk import PortfolioState
+from polybot.safeguards import (
+    DrawdownHalt, CapitalDivergenceMonitor, DeploymentStageGate)
 
 log = structlog.get_logger()
 
@@ -35,6 +37,15 @@ class Engine:
         self._trade_learner = trade_learner
         self._last_heartbeats: dict[str, datetime] = {}
         self._last_self_assess: datetime | None = None
+        # Extracted safeguards (v10 Phase A). Engine delegates via thin
+        # wrappers below; direct-call migration deferred to PR B.
+        self._drawdown_halt = DrawdownHalt(
+            db=db, settings=settings, email_notifier=email_notifier)
+        self._divergence_monitor = CapitalDivergenceMonitor(
+            db=db, clob=clob, settings=settings, email_notifier=email_notifier)
+        self._deployment_gate = DeploymentStageGate(db=db, settings=settings)
+        # Legacy attributes preserved for tests that poke internals directly.
+        # New code should use self._drawdown_halt / self._divergence_monitor.
         self._capital_divergence_halted = False
         self._capital_divergence_ok_count = 0
         self._drawdown_cache: tuple[bool, float] | None = None
