@@ -306,6 +306,44 @@ def _determine_side(game: LiveGame, market: PolymarketMarket,
     return "home" if home_idx < away_idx else "away"
 
 
+def compute_match_confidence(game: LiveGame,
+                              market: PolymarketMarket) -> tuple[float, dict]:
+    """Return (confidence, breakdown_dict) so callers can inspect signals.
+
+    Slug-aware weighting: Polymarket's Gamma API returns empty slug for
+    most sports markets (observed live 2026-04-20). Wasting 25% weight on
+    a zero signal makes perfect matches score 0.72, which is below the
+    0.95 floor — so real matches get silently rejected.
+
+    When slug is empty: redistribute slug weight to name (primary signal);
+    time weight held constant so proximity gate still enforces a close
+    match between the Polymarket resolution window and the live game.
+
+    When slug is present: original 0.55 / 0.25 / 0.20 weighting.
+
+    The confidence FLOOR is unchanged — this just changes how we compute
+    the score so legitimate matches under the real data shape can clear it.
+    """
+    name_score = _team_name_score(game, market)
+    slug_score = _slug_score(game, market)
+    time_score = _time_proximity_score(game, market)
+    slug_present = bool((market.slug or "").strip())
+
+    if slug_present:
+        w_name, w_slug, w_time = 0.55, 0.25, 0.20
+    else:
+        w_name, w_slug, w_time = 0.80, 0.0, 0.20
+
+    confidence = w_name * name_score + w_slug * slug_score + w_time * time_score
+    return confidence, {
+        "name_score": round(name_score, 4),
+        "slug_score": round(slug_score, 4),
+        "slug_present": slug_present,
+        "time_score": round(time_score, 4),
+        "name_weight": w_name,
+    }
+
+
 def match_game_to_market(game: LiveGame, market: PolymarketMarket,
                           min_confidence: float = 0.95) -> Optional[MatchResult]:
     """Return a MatchResult only when confidence ≥ min_confidence, else None.
@@ -319,13 +357,7 @@ def match_game_to_market(game: LiveGame, market: PolymarketMarket,
         return None
     market_type, line = classification
 
-    name_score = _team_name_score(game, market)
-    slug_score = _slug_score(game, market)
-    time_score = _time_proximity_score(game, market)
-
-    # Confidence is a weighted average. Team-name match dominates because
-    # a market on the wrong game is useless even if the slug and time match.
-    confidence = 0.55 * name_score + 0.25 * slug_score + 0.20 * time_score
+    confidence, _breakdown = compute_match_confidence(game, market)
 
     if confidence < min_confidence:
         return None
