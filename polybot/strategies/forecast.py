@@ -144,6 +144,8 @@ class EnsembleForecastStrategy(Strategy):
         scored: list[tuple[float, MarketCandidate, QuantSignals]] = []
         for candidate in filtered:
             quant = await self._compute_quant(candidate, ctx)
+            if quant is None:
+                continue
             score = prescore(candidate, category_stats, quant,
                              getattr(self._settings, "quant_weights", None))
             scored.append((score, candidate, quant))
@@ -512,7 +514,7 @@ class EnsembleForecastStrategy(Strategy):
                 format_trade_email(event="executed", market=candidate.question, side=kelly_result.side,
                                    size=size, price=candidate.current_price, edge=kelly_result.edge))
 
-    async def _compute_quant(self, candidate: MarketCandidate, ctx: TradingContext) -> QuantSignals:
+    async def _compute_quant(self, candidate: MarketCandidate, ctx: TradingContext) -> QuantSignals | None:
         try:
             price_history = await ctx.scanner.fetch_price_history(candidate.polymarket_id)
             book = await ctx.scanner.fetch_order_book(candidate.polymarket_id)
@@ -525,6 +527,16 @@ class EnsembleForecastStrategy(Strategy):
         ask_depth = sum(float(a.get("size", 0)) for a in asks)
         best_bid = float(bids[0]["price"]) if bids else candidate.current_price - 0.01
         best_ask = float(asks[0]["price"]) if asks else candidate.current_price + 0.01
+
+        # Liquidity gate: skip illiquid markets before running expensive ensemble / analysis
+        # downstream. Mirrors executor dry-run spread reject so behavior is consistent
+        # across dry and live modes.
+        max_spread = getattr(self._settings, "forecast_max_spread", 0.15)
+        raw_spread = best_ask - best_bid
+        if bids and asks and raw_spread > max_spread:
+            log.info("forecast_wide_spread_skip", market=candidate.polymarket_id,
+                     spread=round(raw_spread, 4), max=max_spread)
+            return None
 
         hours_remaining = max(
             0.0,

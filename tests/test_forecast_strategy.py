@@ -368,3 +368,72 @@ async def test_forecast_edge_threshold_0_04_admits_moderate_disagreement():
     edge = shrunk - market_price  # 0.555 - 0.50 = 0.055
     assert edge > 0.04, f"Edge {edge} should exceed 0.04 threshold"
     assert edge < 0.07, f"Edge {edge} should be below old 0.07 threshold (proving old config blocked this)"
+
+
+@pytest.mark.asyncio
+async def test_compute_quant_returns_none_on_wide_spread():
+    """_compute_quant should return None when the order book spread exceeds
+    forecast_max_spread so the strategy skips the candidate before running
+    the ensemble. Without this gate, forecast spammed illiquid markets with
+    signals that the executor then rejected at place_order time."""
+    from polybot.markets.filters import MarketCandidate
+    from datetime import datetime, timezone, timedelta
+
+    settings = MagicMock()
+    settings.forecast_interval_seconds = 300
+    settings.forecast_kelly_mult = 0.25
+    settings.forecast_max_single_pct = 0.15
+    settings.forecast_max_spread = 0.15
+
+    strategy = EnsembleForecastStrategy(
+        settings=settings, ensemble=MagicMock(), researcher=MagicMock())
+
+    candidate = MarketCandidate(
+        polymarket_id="illiquid", question="?", category="test",
+        resolution_time=datetime.now(timezone.utc) + timedelta(hours=24),
+        current_price=0.50, book_depth=1000.0, no_price=0.50)
+
+    ctx = MagicMock()
+    ctx.scanner = AsyncMock()
+    ctx.scanner.fetch_price_history = AsyncMock(return_value=[0.50])
+    # Best bid 0.01, best ask 0.99 — spread 0.98, like the live production data
+    ctx.scanner.fetch_order_book = AsyncMock(return_value={
+        "bids": [{"price": "0.01", "size": "10"}],
+        "asks": [{"price": "0.99", "size": "10"}],
+    })
+
+    result = await strategy._compute_quant(candidate, ctx)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_compute_quant_allows_tight_spread():
+    """Tight-spread markets should still produce QuantSignals."""
+    from polybot.markets.filters import MarketCandidate
+    from polybot.analysis.quant import QuantSignals
+    from datetime import datetime, timezone, timedelta
+
+    settings = MagicMock()
+    settings.forecast_interval_seconds = 300
+    settings.forecast_kelly_mult = 0.25
+    settings.forecast_max_single_pct = 0.15
+    settings.forecast_max_spread = 0.15
+
+    strategy = EnsembleForecastStrategy(
+        settings=settings, ensemble=MagicMock(), researcher=MagicMock())
+
+    candidate = MarketCandidate(
+        polymarket_id="liquid", question="?", category="test",
+        resolution_time=datetime.now(timezone.utc) + timedelta(hours=24),
+        current_price=0.50, book_depth=1000.0, no_price=0.50)
+
+    ctx = MagicMock()
+    ctx.scanner = AsyncMock()
+    ctx.scanner.fetch_price_history = AsyncMock(return_value=[0.50])
+    ctx.scanner.fetch_order_book = AsyncMock(return_value={
+        "bids": [{"price": "0.48", "size": "100"}],
+        "asks": [{"price": "0.52", "size": "100"}],
+    })
+
+    result = await strategy._compute_quant(candidate, ctx)
+    assert isinstance(result, QuantSignals)
