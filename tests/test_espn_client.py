@@ -1,7 +1,7 @@
 """Tests for ESPN scoreboard client — parse_espn_scoreboard()."""
 
 import pytest
-from polybot.analysis.espn_client import parse_espn_scoreboard, SPORT_URLS
+from polybot.sports.espn_client import parse_espn_scoreboard, SPORT_URLS
 
 
 def _make_competitor(home_away: str, display_name: str, abbreviation: str, score: str) -> dict:

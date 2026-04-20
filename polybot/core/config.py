@@ -94,16 +94,25 @@ class Settings(BaseSettings):
     snipe_odds_verification_enabled: bool = False   # forced False in v10 (odds_client deleted)
     snipe_odds_min_consensus: float = 0.85
 
-    # Live Game Closer (evolves into Live Sports v10 engine in PR B)
+    # Live Sports v10 engine (spec §3)
     lg_enabled: bool = True
-    lg_interval_seconds: float = 30.0          # poll ESPN every 30s
-    lg_kelly_mult: float = 0.50
-    lg_max_single_pct: float = 0.25
-    lg_min_edge: float = 0.04
-    lg_min_win_prob: float = 0.85
-    lg_min_book_depth: float = 10000.0
-    lg_max_concurrent: int = 6
+    lg_interval_seconds: float = 15.0          # spec: 15s ESPN polling cadence
+    lg_kelly_mult: float = 0.50                # half-Kelly
+    lg_max_single_pct: float = 0.20            # spec: max 20% per market (was 25%)
+    lg_min_edge: float = 0.04                  # min 4% edge vs Polymarket price
+    lg_min_win_prob: float = 0.85              # only trade when calibrated WP ≥ 0.85
+    lg_min_book_depth: float = 10000.0         # min $10K liquidity at entry
+    lg_max_concurrent: int = 6                 # max concurrent live_sports positions
     lg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
+    lg_max_staleness_s: float = 60.0           # reject data older than 60s
+    lg_matcher_min_confidence: float = 0.95    # 3-pass matcher confidence floor
+    lg_take_profit_price: float = 0.97         # exit when price hits this
+    lg_emergency_exit_wp: float = 0.70         # exit if calibrated WP drops below
+    lg_max_hold_hours: float = 6.0             # hard time stop
+
+    # Online calibrator (spec §5 Loop 2)
+    sports_calibrator_min_obs: int = 30
+    sports_calibrator_fallback_shrinkage: float = 0.10
 
     # Learning (TradeLearner still in use; replaced by v10 learning layer in PR C)
     enable_hourly_learning: bool = True

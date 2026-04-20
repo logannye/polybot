@@ -17,8 +17,9 @@ from polybot.notifications.email import EmailNotifier
 from polybot.trading.position_manager import ActivePositionManager
 from polybot.dashboard.app import create_app
 from polybot.strategies.snipe import ResolutionSnipeStrategy
-from polybot.strategies.live_game import LiveGameCloserStrategy
-from polybot.analysis.espn_client import ESPNClient
+from polybot.strategies.live_sports import LiveSportsStrategy
+from polybot.sports.espn_client import ESPNClient
+from polybot.sports.calibrator import OnlineCalibrator
 
 structlog.configure(
     processors=[
@@ -148,8 +149,13 @@ async def main():
         espn_client = ESPNClient(
             sports=getattr(settings, 'lg_sports', 'mlb,nba,nhl').split(','))
         await espn_client.start()
-        lg_strategy = LiveGameCloserStrategy(settings=settings, espn_client=espn_client)
-        engine.add_strategy(lg_strategy)
+        calibrator = OnlineCalibrator(
+            min_obs_for_fit=int(getattr(settings, 'sports_calibrator_min_obs', 30)),
+            fallback_shrinkage=float(getattr(settings, 'sports_calibrator_fallback_shrinkage', 0.10)),
+        )
+        live_sports_strategy = LiveSportsStrategy(
+            settings=settings, espn_client=espn_client, calibrator=calibrator)
+        engine.add_strategy(live_sports_strategy)
 
     app = create_app(db)
     dashboard_server = uvicorn.Server(
