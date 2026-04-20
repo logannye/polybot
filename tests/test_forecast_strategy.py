@@ -391,7 +391,8 @@ async def test_compute_quant_returns_none_on_wide_spread():
     candidate = MarketCandidate(
         polymarket_id="illiquid", question="?", category="test",
         resolution_time=datetime.now(timezone.utc) + timedelta(hours=24),
-        current_price=0.50, book_depth=1000.0, no_price=0.50)
+        current_price=0.50, book_depth=1000.0, no_price=0.50,
+        yes_token_id="yes-token", no_token_id="no-token")
 
     ctx = MagicMock()
     ctx.scanner = AsyncMock()
@@ -401,6 +402,35 @@ async def test_compute_quant_returns_none_on_wide_spread():
         "bids": [{"price": "0.01", "size": "10"}],
         "asks": [{"price": "0.99", "size": "10"}],
     })
+
+    result = await strategy._compute_quant(candidate, ctx)
+    assert result is None
+    # Scanner should have been called with the YES token, not the market id
+    ctx.scanner.fetch_order_book.assert_called_with("yes-token")
+
+
+@pytest.mark.asyncio
+async def test_compute_quant_returns_none_on_empty_book():
+    """Empty order book (no liquidity) should skip the candidate."""
+    from polybot.markets.filters import MarketCandidate
+    from datetime import datetime, timezone, timedelta
+
+    settings = MagicMock()
+    settings.forecast_max_spread = 0.15
+
+    strategy = EnsembleForecastStrategy(
+        settings=settings, ensemble=MagicMock(), researcher=MagicMock())
+
+    candidate = MarketCandidate(
+        polymarket_id="empty", question="?", category="test",
+        resolution_time=datetime.now(timezone.utc) + timedelta(hours=24),
+        current_price=0.50, book_depth=1000.0, no_price=0.50,
+        yes_token_id="yes-token", no_token_id="no-token")
+
+    ctx = MagicMock()
+    ctx.scanner = AsyncMock()
+    ctx.scanner.fetch_price_history = AsyncMock(return_value=[0.50])
+    ctx.scanner.fetch_order_book = AsyncMock(return_value={"bids": [], "asks": []})
 
     result = await strategy._compute_quant(candidate, ctx)
     assert result is None
@@ -425,7 +455,8 @@ async def test_compute_quant_allows_tight_spread():
     candidate = MarketCandidate(
         polymarket_id="liquid", question="?", category="test",
         resolution_time=datetime.now(timezone.utc) + timedelta(hours=24),
-        current_price=0.50, book_depth=1000.0, no_price=0.50)
+        current_price=0.50, book_depth=1000.0, no_price=0.50,
+        yes_token_id="yes-token", no_token_id="no-token")
 
     ctx = MagicMock()
     ctx.scanner = AsyncMock()
