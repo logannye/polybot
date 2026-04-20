@@ -23,8 +23,6 @@ from polybot.strategies.forecast import EnsembleForecastStrategy
 from polybot.strategies.market_maker import MarketMakerStrategy
 from polybot.strategies.mean_reversion import MeanReversionStrategy
 from polybot.markets.price_history import PriceHistoryScanner
-from polybot.analysis.odds_client import OddsClient
-from polybot.strategies.cross_venue import CrossVenueStrategy
 from polybot.strategies.live_game import LiveGameCloserStrategy
 from polybot.analysis.espn_client import ESPNClient
 
@@ -71,17 +69,12 @@ async def _run_bot_tasks(engine_fn, dashboard_fn, shutdown_event: asyncio.Event)
 async def main():
     settings = Settings()
     log.info("polybot_starting", bankroll=settings.starting_bankroll)
-    odds_client = None
     espn_client = None
-    _snipe_odds = None
     db = Database(settings.database_url)
     await db.connect()
     exists = await db.fetchval("SELECT COUNT(*) FROM system_state")
     if exists == 0:
         await db.execute("INSERT INTO system_state (bankroll) VALUES ($1)", settings.starting_bankroll)
-    await db.execute(
-        """INSERT INTO strategy_performance (strategy, total_trades, winning_trades, total_pnl, avg_edge, enabled)
-           VALUES ('cross_venue', 0, 0, 0, 0, true) ON CONFLICT (strategy) DO NOTHING""")
     scanner = PolymarketScanner(api_key=settings.polymarket_api_key)
     await scanner.start()
     researcher = BraveResearcher(api_key=settings.brave_api_key)
@@ -160,15 +153,8 @@ async def main():
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
-    if getattr(settings, 'snipe_odds_verification_enabled', False) and getattr(settings, 'odds_api_key', ''):
-        if 'odds_client' in dir():
-            _snipe_odds = odds_client
-        else:
-            from polybot.analysis.odds_client import OddsClient as _OC
-            _snipe_odds = _OC(api_key=settings.odds_api_key)
-            await _snipe_odds.start()
     engine.add_strategy(ResolutionSnipeStrategy(
-        settings=settings, ensemble=ensemble, odds_client=_snipe_odds))
+        settings=settings, ensemble=ensemble, odds_client=None))
     if getattr(settings, 'forecast_enabled', True):
         engine.add_strategy(EnsembleForecastStrategy(
             settings=settings, ensemble=ensemble, researcher=researcher))
@@ -190,14 +176,6 @@ async def main():
             concurrency=getattr(settings, 'mr_history_concurrency', 50),
         )
         engine._price_history_scanner = price_history_scanner
-
-    if getattr(settings, 'cv_enabled', False) and getattr(settings, 'odds_api_key', ''):
-        odds_client = OddsClient(
-            api_key=settings.odds_api_key,
-            sports=getattr(settings, 'cv_sports', 'basketball_nba,icehockey_nhl').split(','))
-        await odds_client.start()
-        cv_strategy = CrossVenueStrategy(settings=settings, odds_client=odds_client)
-        engine.add_strategy(cv_strategy)
 
     if getattr(settings, 'lg_enabled', False):
         espn_client = ESPNClient(
@@ -236,7 +214,7 @@ async def main():
                                 for t in open_trades])
         except Exception:
             pass
-        for client in [scanner, researcher, odds_client, _snipe_odds, espn_client]:
+        for client in [scanner, researcher, espn_client]:
             if client is not None:
                 try:
                     await client.close()
