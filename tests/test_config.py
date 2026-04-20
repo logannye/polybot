@@ -3,20 +3,22 @@ import pytest
 from polybot.core.config import Settings
 
 
+def _base_env() -> dict[str, str]:
+    return {
+        "POLYMARKET_API_KEY": "test",
+        "POLYMARKET_PRIVATE_KEY": "0x" + "a" * 64,
+        "GOOGLE_API_KEY": "test",
+        "DATABASE_URL": "postgresql://localhost/test",
+        "RESEND_API_KEY": "test",
+        "ALERT_EMAIL": "test@test.com",
+    }
+
+
 def test_settings_loads_defaults(monkeypatch):
     monkeypatch.delenv("STARTING_BANKROLL", raising=False)
-    settings = Settings(
-        polymarket_api_key="test",
-        polymarket_private_key="0x" + "ab" * 32,
-        anthropic_api_key="test",
-        openai_api_key="test",
-        google_api_key="test",
-        brave_api_key="test",
-        database_url="postgresql://localhost/test",
-        resend_api_key="test",
-        alert_email="test@test.com",
-        _env_file=None,
-    )
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    settings = Settings(_env_file=None)
     assert settings.starting_bankroll == 2000.0
     assert settings.kelly_mult == 0.25
     assert settings.edge_threshold == 0.05
@@ -37,103 +39,83 @@ def test_settings_loads_defaults(monkeypatch):
     assert settings.early_exit_edge == 0.02
     assert settings.fill_timeout_seconds == 120
     assert settings.book_depth_max_pct == 0.10
-    assert settings.quant_weights == {
-        "line_movement": 0.30,
-        "volume_spike": 0.25,
-        "book_imbalance": 0.20,
-        "spread": 0.15,
-        "time_decay": 0.10,
-    }
-    assert settings.ensemble_stdev_low == 0.05
-    assert settings.ensemble_stdev_high == 0.12
-    assert settings.confidence_mult_low == 1.0
-    assert settings.confidence_mult_mid == 0.7
-    assert settings.confidence_mult_high == 0.4
-    assert settings.quant_negative_mult == 0.75
     assert settings.cold_start_trades == 30
     assert settings.brier_ema_alpha == 0.15
     assert settings.category_min_trades == 20
 
 
-def test_settings_overrides():
+def test_settings_overrides(monkeypatch):
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
     settings = Settings(
-        polymarket_api_key="test",
-        polymarket_private_key="0x" + "ab" * 32,
-        anthropic_api_key="test",
-        openai_api_key="test",
-        google_api_key="test",
-        brave_api_key="test",
-        database_url="postgresql://localhost/test",
-        resend_api_key="test",
-        alert_email="test@test.com",
         starting_bankroll=500.0,
         kelly_mult=0.30,
         edge_threshold=0.08,
+        _env_file=None,
     )
     assert settings.starting_bankroll == 500.0
     assert settings.kelly_mult == 0.30
     assert settings.edge_threshold == 0.08
 
 
-def test_v2_strategy_settings_defaults():
-    """Verify all v2 settings have correct defaults."""
-    required = {
-        "POLYMARKET_API_KEY": "test",
-        "POLYMARKET_PRIVATE_KEY": "0x" + "a" * 64,
-        "ANTHROPIC_API_KEY": "test",
-        "OPENAI_API_KEY": "test",
-        "GOOGLE_API_KEY": "test",
-        "BRAVE_API_KEY": "test",
-        "DATABASE_URL": "postgresql://localhost/test",
-        "RESEND_API_KEY": "test",
-        "ALERT_EMAIL": "test@test.com",
-    }
-    for k, v in required.items():
-        os.environ[k] = v
-    s = Settings()
-    assert s.arb_interval_seconds == 45
-    assert s.snipe_interval_seconds == 60   # v5 10x: 120 → 60
-    assert s.forecast_interval_seconds == 300  # v4 conservative: 180 → 300
-    assert s.arb_kelly_mult == 0.80
-    assert s.snipe_kelly_mult == 0.50     # v4 conservative: 0.65 → 0.50
-    assert s.forecast_kelly_mult == 0.15   # lean-into-winners: 0.20 → 0.15
-    assert s.arb_max_single_pct == 0.40
-    assert s.snipe_max_single_pct == 0.05  # capital realloc: 0.25 → 0.05 (redirect to MR)
-    assert s.forecast_max_single_pct == 0.05  # lean-into-winners: 0.15 → 0.05
-    assert s.use_maker_orders is True
-    assert s.max_total_deployed_pct == 0.70  # v4 conservative: 0.90 → 0.70
-    assert s.max_concurrent_positions == 12  # v4 conservative: 20 → 12
-    assert s.max_per_category_pct == 0.50    # capital turnover: 0.25 → 0.50
-    assert s.daily_loss_limit_pct == 0.20
-    assert s.circuit_breaker_hours == 6
-    assert s.min_trade_size == 1.0
-    # v5 10x: new strategies
-    assert s.mm_enabled is True   # activated: spread capture on liquid markets
-    assert s.mr_enabled is True   # re-enabled for realistic dry-run validation
-    assert s.snipe_cooldown_hours == 0.5     # lean-into-winners: 1.0 → 0.5
-    assert s.snipe_max_entries_per_market == 6  # lean-into-winners: 4 → 6
-    assert s.snipe_max_market_exposure_pct == 0.30
-    assert not hasattr(s, "twilio_account_sid")
-    assert not hasattr(s, "alert_phone")
-
-
-def test_v2_bankroll_tier_settings():
-    """Verify bankroll tier settings have correct defaults."""
-    required = {
-        "POLYMARKET_API_KEY": "test",
-        "POLYMARKET_PRIVATE_KEY": "0x" + "a" * 64,
-        "ANTHROPIC_API_KEY": "test",
-        "OPENAI_API_KEY": "test",
-        "GOOGLE_API_KEY": "test",
-        "BRAVE_API_KEY": "test",
-        "DATABASE_URL": "postgresql://localhost/test",
-        "RESEND_API_KEY": "test",
-        "ALERT_EMAIL": "test@test.com",
-    }
-    for k, v in required.items():
-        os.environ[k] = v
-    s = Settings()
-    assert s.bankroll_survival_threshold == 50.0
-    assert s.bankroll_growth_threshold == 1000.0  # raised to stay aggressive during compounding
+def test_v10_safeguard_defaults(monkeypatch):
+    """v10 safeguard settings have correct defaults per spec §6."""
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    s = Settings(_env_file=None)
+    assert s.max_total_drawdown_pct == 0.30
+    assert s.max_capital_divergence_pct == 0.10
+    assert s.live_deployment_stage == "dry_run"
     assert s.post_breaker_cooldown_hours == 24
     assert s.post_breaker_kelly_reduction == 0.50
+
+
+def test_v10_snipe_defaults(monkeypatch):
+    """Snipe settings preserved across v10 Phase A (rewritten in PR C)."""
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    s = Settings(_env_file=None)
+    assert s.snipe_kelly_mult == 0.50
+    assert s.snipe_max_single_pct == 0.05
+    assert s.snipe_max_concurrent == 3
+    assert s.snipe_hours_max == 72.0
+    assert s.snipe_min_confidence == 0.90
+    # Odds verification disabled after v10 Phase A (odds_client deleted)
+    assert s.snipe_odds_verification_enabled is False
+
+
+def test_v10_live_game_defaults(monkeypatch):
+    """Live Game Closer settings (evolves to Live Sports v10 in PR B)."""
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    s = Settings(_env_file=None)
+    assert s.lg_enabled is True
+    assert s.lg_kelly_mult == 0.50
+    assert s.lg_min_edge == 0.04
+    assert s.lg_min_win_prob == 0.85
+    assert s.lg_min_book_depth == 10000.0
+    assert s.lg_max_concurrent == 6
+
+
+def test_v10_deleted_strategies_absent(monkeypatch):
+    """Strategies deleted in v10 Phase A should not have config keys."""
+    for k, v in _base_env().items():
+        monkeypatch.setenv(k, v)
+    s = Settings(_env_file=None)
+    for key in (
+        # Forecast
+        "forecast_enabled", "forecast_kelly_mult", "forecast_max_single_pct",
+        "forecast_interval_seconds", "forecast_yes_max_entry", "forecast_max_spread",
+        # Market Maker
+        "mm_enabled", "mm_kelly_mult", "mm_max_single_pct",
+        # Mean Reversion
+        "mr_enabled", "mr_trigger_threshold", "mr_kelly_mult",
+        # Cross Venue
+        "cv_enabled", "cv_kelly_mult", "odds_api_key",
+        # Political
+        "pol_enabled", "pol_kelly_mult",
+        # Arbitrage (the strategy — arb_fill_timeout_seconds + arb_max_hold_days
+        # retained as transitional engine keys per Phase A plan)
+        "arb_enabled", "arb_kelly_mult", "arb_max_single_pct",
+    ):
+        assert not hasattr(s, key), f"Deleted strategy key still present: {key}"

@@ -5,10 +5,7 @@ class Settings(BaseSettings):
     # Secrets
     polymarket_api_key: str
     polymarket_private_key: str
-    anthropic_api_key: str
-    openai_api_key: str
-    google_api_key: str
-    brave_api_key: str
+    google_api_key: str                 # Gemini Flash for Snipe T1 verification (v10 PR C)
     database_url: str
     resend_api_key: str
     alert_email: str = "logan@galenhealth.org"
@@ -30,40 +27,9 @@ class Settings(BaseSettings):
     edge_threshold: float = 0.05
     scan_interval_seconds: int = 300
 
-    # Strategy intervals
-    arb_interval_seconds: int = 45
-    snipe_interval_seconds: int = 120
-    forecast_interval_seconds: int = 300
-
-    # Strategy Kelly multipliers
-    arb_kelly_mult: float = 0.80
-    snipe_kelly_mult: float = 0.50
-    forecast_kelly_mult: float = 0.25
-
-    # Strategy position limits
-    arb_max_single_pct: float = 0.40
-    snipe_max_single_pct: float = 0.05
-    forecast_max_single_pct: float = 0.15
-
     # Fee model: makers pay 0%, takers pay category-specific rates
     use_maker_orders: bool = True   # post_only flag → guaranteed 0% maker fee
     fee_rate_default: float = 0.04  # fallback taker rate for unknown categories
-
-    # Snipe thresholds
-    snipe_hours_max: float = 72.0
-    snipe_min_confidence: float = 0.90
-    snipe_min_net_edge: float = 0.02
-
-    # Arb thresholds
-    arb_enabled: bool = True
-    arb_min_net_edge: float = 0.02
-    arb_fill_timeout_seconds: int = 30
-    arb_max_net_edge: float = 0.20
-    arb_min_leg_liquidity: float = 5000.0   # min book depth per leg in exhaustive arb
-
-    # Pre-scoring
-    prescore_top_n: int = 5
-    quick_screen_max_edge_gap: float = 0.07
 
     # Portfolio limits
     max_single_position_pct: float = 0.15
@@ -72,17 +38,15 @@ class Settings(BaseSettings):
     min_trade_size: float = 1.0
     max_concurrent_positions: int = 12
     max_positions_per_market: int = 1
-    arb_max_concurrent: int = 8      # reserve slots for forecast/snipe
-    snipe_max_concurrent: int = 3    # cap snipe positions to free slots/capital for MR
     daily_loss_limit_pct: float = 0.20
     circuit_breaker_hours: int = 6
     post_breaker_cooldown_hours: int = 24
     post_breaker_kelly_reduction: float = 0.50
 
-    # Total drawdown protection
+    # Total drawdown + divergence protection + deployment stage (v10 safeguards)
     max_total_drawdown_pct: float = 0.30     # halt all trading at 30% total loss from high-water
     max_capital_divergence_pct: float = 0.10  # halt if CLOB vs DB diverges > 10%
-    live_deployment_stage: str = "dry_run"    # dry_run → micro_test → full
+    live_deployment_stage: str = "dry_run"    # dry_run → micro_test → ramp → full
 
     # Market filters
     resolution_hours_max: int = 168
@@ -96,172 +60,65 @@ class Settings(BaseSettings):
     early_exit_edge: float = 0.02
     fill_timeout_seconds: int = 120
     book_depth_max_pct: float = 0.10
-
-    # Active position management
     take_profit_threshold: float = 0.20
     stop_loss_threshold: float = 0.15
-    forecast_stop_loss_threshold: float = 0.10  # tighter stop for forecast (data: avg loss was -35% at 0.15)
     position_check_interval: int = 60
+    universal_max_hold_hours: float = 12.0
 
-    # Snipe tier 2/3 LLM guard
+    # Bankroll tiers (snipe uses direct attribute access; v10 PR C will move
+    # this logic into the strategy itself or delete it with simplified Kelly)
+    bankroll_survival_threshold: float = 50.0
+    bankroll_growth_threshold: float = 500.0
+
+    # Transitional keys still referenced by engine/position_manager via
+    # getattr with defaults. These will be cleaned up in PR B/C.
+    arb_fill_timeout_seconds: int = 30
+    arb_max_hold_days: float = 3.0
+
+    # Snipe strategy (to be rewritten to 2-tier in PR C — keys retained for
+    # transitional v8 snipe that ships in Phase A)
+    snipe_interval_seconds: int = 120
+    snipe_kelly_mult: float = 0.50
+    snipe_max_single_pct: float = 0.05
+    snipe_hours_max: float = 72.0
+    snipe_min_confidence: float = 0.90
+    snipe_min_net_edge: float = 0.02
+    snipe_max_concurrent: int = 3
     snipe_tier2_llm_max_hours: float = 48.0
     snipe_tier3_llm_max_hours: float = 120.0
-
-    # Snipe cooldown & re-entry
     snipe_cooldown_hours: float = 4.0
     snipe_reentry_threshold: float = 0.03
     snipe_max_entries_per_market: int = 3
-    snipe_max_market_exposure_pct: float = 0.30  # max cumulative exposure per market
+    snipe_max_market_exposure_pct: float = 0.30
     snipe_max_hold_hours: float = 8.0
-    snipe_odds_verification_enabled: bool = True
+    snipe_odds_verification_enabled: bool = False   # forced False in v10 (odds_client deleted)
     snipe_odds_min_consensus: float = 0.85
 
-    # Arb bankroll gate
-    arb_min_bankroll: float = 50.0
-    arb_max_hold_days: float = 3.0
+    # Live Game Closer (evolves into Live Sports v10 engine in PR B)
+    lg_enabled: bool = True
+    lg_interval_seconds: float = 30.0          # poll ESPN every 30s
+    lg_kelly_mult: float = 0.50
+    lg_max_single_pct: float = 0.25
+    lg_min_edge: float = 0.04
+    lg_min_win_prob: float = 0.85
+    lg_min_book_depth: float = 10000.0
+    lg_max_concurrent: int = 6
+    lg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
 
-    # Forecast time-stop (dynamic: scales with time-to-resolution)
-    forecast_time_stop_minutes: float = 90.0           # floor — minimum hold time
-    forecast_time_stop_fraction: float = 0.15          # hold up to 15% of time-to-resolution
-    forecast_time_stop_max_minutes: float = 480.0      # cap — never hold longer than 8h
-    forecast_time_stop_min_resolution_hours: float = 48.0  # skip time-stop if resolving within this window
-
-    # Forecast consensus & category filtering
-    forecast_min_consensus: int = 2                    # min models agreeing on direction
-    forecast_consensus_margin: float = 0.05            # margin from market price to count as "agreeing"
-    forecast_category_min_trades: int = 10             # min trades before filtering by category
-    forecast_category_min_avg_pnl: float = -1.0        # filter categories worse than this avg pnl
-    forecast_enabled: bool = True
-    forecast_category_filter_enabled: bool = True      # disable to skip category filtering
-    forecast_yes_max_entry: float = 0.15       # only enter YES below this price (data: winners avg 0.098)
-    forecast_no_min_entry: float = 0.60        # only enter NO above this yes_price (mid-range filter)
-    forecast_max_spread: float = 0.15          # skip candidates whose bid-ask spread exceeds this (matches dry_run_max_spread)
-
-    # Learning system
+    # Learning (TradeLearner still in use; replaced by v10 learning layer in PR C)
+    enable_hourly_learning: bool = True
+    enable_adaptive_thresholds: bool = True
+    adaptive_threshold_min_trades: int = 10
+    enable_snipe_learning: bool = True
     enable_proxy_trust_learning: bool = True
     proxy_brier_alpha_tp: float = 0.05
     proxy_brier_alpha_sl: float = 0.08
     proxy_brier_alpha_weak: float = 0.03
-    enable_adaptive_thresholds: bool = True
-    adaptive_threshold_min_trades: int = 10
-    enable_snipe_learning: bool = True
-    enable_hourly_learning: bool = True
-
-    # Quant signal weights
-    quant_weights: dict[str, float] = {
-        "line_movement": 0.30,
-        "volume_spike": 0.25,
-        "book_imbalance": 0.20,
-        "spread": 0.15,
-        "time_decay": 0.10,
-    }
-
-    # Ensemble confidence thresholds
-    ensemble_stdev_low: float = 0.05
-    ensemble_stdev_high: float = 0.12
-    confidence_mult_low: float = 1.0
-    confidence_mult_mid: float = 0.7
-    confidence_mult_high: float = 0.4
-    quant_negative_mult: float = 0.75
-
-    # Bankroll tiers
-    bankroll_survival_threshold: float = 50.0
-    bankroll_normal_low: float = 50.0
-    bankroll_normal_high: float = 150.0
-    bankroll_growth_threshold: float = 500.0
-
-    # Learning
     cold_start_trades: int = 30
     brier_ema_alpha: float = 0.15
     category_min_trades: int = 20
     calibration_min_trades: int = 50
     strategy_kill_min_trades: int = 50
-
-    # Market-making strategy
-    mm_enabled: bool = True
-    mm_cycle_seconds: float = 5.0
-    mm_selection_interval_seconds: float = 300.0
-    mm_kelly_mult: float = 0.15
-    mm_max_single_pct: float = 0.10
-    mm_max_total_pct: float = 0.30
-    mm_max_markets: int = 8
-    mm_base_spread_bps: int = 60
-    mm_min_spread_bps: int = 30
-    mm_max_spread_bps: int = 500
-    mm_quote_size_usd: float = 10.0
-    mm_max_inventory_per_market: float = 50.0
-    mm_max_total_inventory: float = 200.0
-    mm_max_skew_bps: int = 100
-    mm_requote_threshold: float = 0.005
-    mm_min_volume_24h: float = 2000.0
-    mm_min_resolution_hours: float = 168.0
-    mm_emergency_vol_threshold: float = 0.15
-    mm_volatility_pullback_mult: float = 2.0
-    mm_min_book_depth: float = 500.0
-
-    # Mean reversion strategy
-    mr_enabled: bool = True
-    mr_interval_seconds: float = 60.0
-    mr_trigger_threshold: float = 0.05
-    mr_reversion_fraction: float = 0.40
-    mr_kelly_mult: float = 0.50
-    mr_max_single_pct: float = 0.20
-    mr_max_concurrent: int = 5
-    mr_min_volume_24h: float = 2000.0
-    mr_min_book_depth: float = 200.0
-    mr_cooldown_hours: float = 0.5
-    mr_max_hold_hours: float = 2.0
-    mr_min_expected_reversion: float = 0.02
-    mr_use_maker_orders: bool = False      # taker orders for instant fill (MR needs speed)
-    mr_fill_timeout_seconds: float = 30.0   # taker orders should fill in seconds, not minutes
-    mr_max_spread: float = 0.10              # skip markets with bid-ask spread > 10%
-    mr_big_move_threshold: float = 0.15   # moves above this get kelly boost
-    mr_big_move_kelly_boost: float = 1.3  # kelly multiplier for big moves
-    mr_min_entry_price: float = 0.25           # skip extremes below this (data: +$22.64 mid-range vs -$18.45 extremes)
-    mr_max_entry_price: float = 0.75           # skip extremes above this
-    mr_history_scan_interval: float = 180.0  # seconds between price history scans
-    mr_history_max_markets: int = 1500       # max markets to scan per cycle
-    mr_history_concurrency: int = 50         # max concurrent API requests
-
-    # Cross-venue arbitrage strategy
-    cv_enabled: bool = False
-    cv_interval_seconds: float = 1800.0
-    cv_kelly_mult: float = 0.25
-    cv_max_single_pct: float = 0.15
-    cv_min_divergence: float = 0.03
-    cv_min_implied_prob: float = 0.10   # skip outcomes below 10% implied
-    cv_sports: str = "basketball_nba,icehockey_nhl,soccer_epl"
-    cv_cooldown_hours: float = 12.0
-    cv_max_days_to_resolution: float = 7.0
-    conviction_stack_enabled: bool = True
-    conviction_stack_per_signal: float = 0.5
-    conviction_stack_max: float = 3.0
-    odds_api_key: str = ""
-
-    # Political calibration strategy
-    pol_enabled: bool = False
-    pol_interval_seconds: float = 600.0        # 10 min scan cycle
-    pol_kelly_mult: float = 0.40               # aggressive — high-conviction calibration edge
-    pol_max_single_pct: float = 0.20           # up to 20% bankroll per position
-    pol_min_edge: float = 0.04                 # min 4% calibration-adjusted edge
-    pol_min_liquidity: float = 50000.0         # only liquid markets
-    pol_llm_confirm_edge: float = 0.10         # use LLM to confirm edges above 10% (future)
-    pol_max_positions: int = 5                 # max concurrent political positions
-    pol_max_hold_hours: float = 12.0           # time-stop: free capital from stale political positions
-
-    # Universal position hold limit
-    universal_max_hold_hours: float = 12.0     # hard ceiling — no position held longer than this
-
-    # Live Game Closer strategy
-    lg_enabled: bool = True
-    lg_interval_seconds: float = 30.0          # poll ESPN every 30s
-    lg_kelly_mult: float = 0.50                # aggressive — high-confidence plays
-    lg_max_single_pct: float = 0.25            # up to 25% bankroll per game
-    lg_min_edge: float = 0.04                  # min 4% edge (WP vs Polymarket price)
-    lg_min_win_prob: float = 0.85              # only trade when WP >= 85%
-    lg_min_book_depth: float = 10000.0         # min $10K liquidity
-    lg_max_concurrent: int = 6                 # max concurrent live game positions
-    lg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
 
     # WebSocket streaming
     enable_websocket_streaming: bool = True

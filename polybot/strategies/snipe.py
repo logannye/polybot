@@ -6,7 +6,6 @@ from polybot.trading.risk import PortfolioState, TradeProposal, bankroll_kelly_a
 from polybot.trading.kelly import compute_position_size
 from polybot.analysis.prompts import build_snipe_prompt, parse_snipe_response
 from polybot.notifications.email import format_trade_email
-from polybot.analysis.odds_client import compute_consensus
 
 log = structlog.get_logger()
 
@@ -84,61 +83,6 @@ def check_snipe_cooldown(
     # Still in cooldown — check if price moved enough for re-entry
     price_delta = abs(current_price - entry["exit_price"])
     return price_delta >= reentry_threshold
-
-
-async def verify_snipe_via_odds(
-    odds_client,
-    question: str,
-    side: str,
-    min_consensus: float = 0.85,
-) -> bool:
-    """Verify a snipe candidate using sportsbook consensus instead of LLM.
-
-    Searches The Odds API events for a matching event by team name,
-    then checks if the sportsbook consensus supports the snipe direction.
-
-    Returns True if sportsbook consensus confirms the snipe, False otherwise.
-    """
-    if odds_client.credits_exhausted:
-        return False
-    q_lower = question.lower()
-
-    for sport in ["basketball_nba", "icehockey_nhl", "soccer_epl",
-                   "soccer_uefa_champs_league", "soccer_usa_mls"]:
-        try:
-            events = await odds_client.fetch_odds(sport)
-        except Exception:
-            continue
-
-        for event in events:
-            home = event.get("home_team", "").lower()
-            away = event.get("away_team", "").lower()
-
-            matched_team = None
-            if home and home in q_lower:
-                matched_team = event.get("home_team")
-            elif away and away in q_lower:
-                matched_team = event.get("away_team")
-
-            if not matched_team:
-                continue
-
-            consensus = compute_consensus(event.get("bookmakers", []))
-            if not consensus or matched_team not in consensus:
-                continue
-
-            team_prob = consensus[matched_team]
-
-            if side == "YES" and team_prob >= min_consensus:
-                log.info("snipe_odds_verified", team=matched_team,
-                         consensus=round(team_prob, 3), side=side)
-                return True
-            elif side == "NO" and team_prob <= (1.0 - min_consensus):
-                log.info("snipe_odds_verified", team=matched_team,
-                         consensus=round(team_prob, 3), side=side)
-                return True
-
-    return False
 
 
 class ResolutionSnipeStrategy(Strategy):
@@ -284,23 +228,8 @@ class ResolutionSnipeStrategy(Strategy):
             if tier in (1, 2, 3):
                 verified = False
 
-                # Try odds-based verification first (faster, cheaper, no LLM)
-                if self._odds_client and self._odds_verification_enabled:
-                    try:
-                        verified = await verify_snipe_via_odds(
-                            odds_client=self._odds_client,
-                            question=m["question"],
-                            side=side,
-                            min_consensus=self._odds_min_consensus,
-                        )
-                        if verified:
-                            log.info("snipe_verified_via_odds", market=m["polymarket_id"],
-                                     tier=tier, side=side)
-                    except Exception as e:
-                        log.error("snipe_odds_verify_error", error=str(e))
-
-                # Fall back to LLM if odds verification didn't confirm
-                if not verified and self._ensemble:
+                # LLM verification path (odds path removed in v10 Phase A)
+                if self._ensemble:
                     tier_max_hours = {1: 12.0, 2: getattr(ctx.settings, "snipe_tier2_llm_max_hours", 48.0), 3: getattr(ctx.settings, "snipe_tier3_llm_max_hours", 120.0)}
                     if hours_remaining > tier_max_hours.get(tier, 12.0):
                         log.info("snipe_rejected_far_future", market=m["polymarket_id"],
