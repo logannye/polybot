@@ -77,22 +77,18 @@ class Settings(BaseSettings):
 
     # Snipe strategy (to be rewritten to 2-tier in PR C — keys retained for
     # transitional v8 snipe that ships in Phase A)
+    # Snipe v10 — 2-tier resolution-convergence (spec §4)
+    snipe_enabled: bool = True
     snipe_interval_seconds: int = 120
-    snipe_kelly_mult: float = 0.50
-    snipe_max_single_pct: float = 0.05
-    snipe_hours_max: float = 72.0
-    snipe_min_confidence: float = 0.90
-    snipe_min_net_edge: float = 0.02
     snipe_max_concurrent: int = 3
-    snipe_tier2_llm_max_hours: float = 48.0
-    snipe_tier3_llm_max_hours: float = 120.0
-    snipe_cooldown_hours: float = 4.0
-    snipe_reentry_threshold: float = 0.03
-    snipe_max_entries_per_market: int = 3
-    snipe_max_market_exposure_pct: float = 0.30
-    snipe_max_hold_hours: float = 8.0
-    snipe_odds_verification_enabled: bool = False   # forced False in v10 (odds_client deleted)
-    snipe_odds_min_consensus: float = 0.85
+    snipe_min_net_edge: float = 0.02
+    snipe_min_book_depth: float = 2000.0
+    snipe_gemini_daily_cap_usd: float = 2.0
+    snipe_t0_kelly_mult: float = 0.50    # T0: 0.50× Kelly
+    snipe_t0_max_single_pct: float = 0.10
+    snipe_t1_kelly_mult: float = 0.30    # T1: 0.30× Kelly (needs LLM verify)
+    snipe_t1_max_single_pct: float = 0.07
+    snipe_t1_min_confidence: float = 0.85
 
     # Live Sports v10 engine (spec §3)
     lg_enabled: bool = True
