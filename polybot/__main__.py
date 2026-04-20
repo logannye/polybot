@@ -26,7 +26,6 @@ from polybot.markets.price_history import PriceHistoryScanner
 from polybot.analysis.odds_client import OddsClient
 from polybot.strategies.cross_venue import CrossVenueStrategy
 from polybot.strategies.political import PoliticalStrategy
-from polybot.strategies.arbitrage import ArbitrageStrategy
 from polybot.strategies.live_game import LiveGameCloserStrategy
 from polybot.analysis.espn_client import ESPNClient
 
@@ -200,10 +199,6 @@ async def main():
         await odds_client.start()
         cv_strategy = CrossVenueStrategy(settings=settings, odds_client=odds_client)
         engine.add_strategy(cv_strategy)
-
-    if getattr(settings, 'arb_enabled', True):
-        arb_strategy = ArbitrageStrategy(settings=settings)
-        engine.add_strategy(arb_strategy)
 
     if getattr(settings, 'pol_enabled', True):
         pol_strategy = PoliticalStrategy(settings=settings)
