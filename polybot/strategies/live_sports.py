@@ -232,8 +232,11 @@ class LiveSportsStrategy(Strategy):
         """For one live game, find matching markets and enter if gate passes."""
         min_conf = float(getattr(self._settings, "lg_matcher_min_confidence", 0.95))
         active_threshold = get_active_wp_threshold(self._settings)
-        # Track per-game matcher funnel so we can log a summary if nothing matches
-        best_confidence = 0.0
+        # Track per-game matcher funnel so we can log a summary if nothing matches.
+        # Sentinel -1.0 guarantees we populate best_breakdown on the first
+        # iteration so the diagnostic log always carries a market snapshot
+        # even when every candidate scores exactly 0.0.
+        best_confidence = -1.0
         best_breakdown: dict = {}
         markets_classified = 0
         for market_dict in markets:
