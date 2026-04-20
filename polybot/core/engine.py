@@ -11,13 +11,15 @@ log = structlog.get_logger()
 
 
 class Engine:
-    def __init__(self, db, scanner, researcher, ensemble, executor, recorder,
+    def __init__(self, db, scanner, executor, recorder,
                  risk_manager, settings, email_notifier, position_manager, clob=None,
-                 portfolio_lock=None, trade_learner=None, price_history_scanner=None):
+                 portfolio_lock=None, trade_learner=None, price_history_scanner=None,
+                 researcher=None, ensemble=None):
+        # researcher/ensemble kept as kwargs for backward-compat with callers
+        # that still pass them (tests). v10 doesn't use them — they were
+        # dependencies of the deleted forecast strategy.
         self._db = db
         self._scanner = scanner
-        self._researcher = researcher
-        self._ensemble = ensemble
         self._executor = executor
         self._recorder = recorder
         self._risk = risk_manager

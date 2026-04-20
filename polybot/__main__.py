@@ -7,8 +7,6 @@ from polybot.core.config import Settings
 from polybot.core.engine import Engine
 from polybot.db.connection import Database
 from polybot.markets.scanner import PolymarketScanner
-from polybot.analysis.research import BraveResearcher
-from polybot.analysis.ensemble import EnsembleAnalyzer
 from polybot.trading.executor import OrderExecutor
 from polybot.trading.wallet import WalletManager
 from polybot.trading.risk import RiskManager
@@ -19,7 +17,6 @@ from polybot.notifications.email import EmailNotifier
 from polybot.trading.position_manager import ActivePositionManager
 from polybot.dashboard.app import create_app
 from polybot.strategies.snipe import ResolutionSnipeStrategy
-from polybot.strategies.forecast import EnsembleForecastStrategy
 from polybot.strategies.market_maker import MarketMakerStrategy
 from polybot.strategies.mean_reversion import MeanReversionStrategy
 from polybot.markets.price_history import PriceHistoryScanner
@@ -77,12 +74,6 @@ async def main():
         await db.execute("INSERT INTO system_state (bankroll) VALUES ($1)", settings.starting_bankroll)
     scanner = PolymarketScanner(api_key=settings.polymarket_api_key)
     await scanner.start()
-    researcher = BraveResearcher(api_key=settings.brave_api_key)
-    await researcher.start()
-    ensemble = EnsembleAnalyzer(
-        anthropic_key=settings.anthropic_api_key,
-        openai_key=settings.openai_api_key,
-        google_key=settings.google_api_key)
     wallet = WalletManager(private_key=settings.polymarket_private_key)
     clob = None
     if settings.polymarket_api_secret and settings.polymarket_api_passphrase:
@@ -144,7 +135,7 @@ async def main():
 
     price_history_scanner = None
     engine = Engine(
-        db=db, scanner=scanner, researcher=researcher, ensemble=ensemble,
+        db=db, scanner=scanner, researcher=None, ensemble=None,
         executor=executor, recorder=recorder, risk_manager=risk_manager,
         settings=settings, email_notifier=email_notifier,
         position_manager=position_manager, clob=clob,
@@ -154,10 +145,7 @@ async def main():
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
     engine.add_strategy(ResolutionSnipeStrategy(
-        settings=settings, ensemble=ensemble, odds_client=None))
-    if getattr(settings, 'forecast_enabled', True):
-        engine.add_strategy(EnsembleForecastStrategy(
-            settings=settings, ensemble=ensemble, researcher=researcher))
+        settings=settings, ensemble=None, odds_client=None))
 
     if settings.mm_enabled:
         mm_strategy = MarketMakerStrategy(
@@ -214,7 +202,7 @@ async def main():
                                 for t in open_trades])
         except Exception:
             pass
-        for client in [scanner, researcher, espn_client]:
+        for client in [scanner, espn_client]:
             if client is not None:
                 try:
                     await client.close()
