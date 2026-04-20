@@ -247,6 +247,15 @@ class PolymarketScanner:
     def get_all_cached_prices(self) -> dict[str, dict]:
         return self._price_cache
 
+    async def fetch_sports_markets(self) -> list[dict[str, Any]]:
+        """Return only markets in the 'sports' category. Used by Live Sports v10.
+
+        Thin wrapper over fetch_markets() + category filter. Avoids the
+        strategy having to scan all 3000+ Polymarket markets every cycle.
+        """
+        all_markets = await self.fetch_markets()
+        return [m for m in all_markets if m.get("category") == "sports"]
+
     async def fetch_order_book(self, token_id: str) -> dict[str, Any]:
         status, data = await self._get(f"{self._base_url}/book", {"token_id": token_id})
         if status != 200:
