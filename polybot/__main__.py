@@ -17,7 +17,6 @@ from polybot.notifications.email import EmailNotifier
 from polybot.trading.position_manager import ActivePositionManager
 from polybot.dashboard.app import create_app
 from polybot.strategies.snipe import ResolutionSnipeStrategy
-from polybot.strategies.market_maker import MarketMakerStrategy
 from polybot.strategies.mean_reversion import MeanReversionStrategy
 from polybot.markets.price_history import PriceHistoryScanner
 from polybot.strategies.live_game import LiveGameCloserStrategy
@@ -146,12 +145,6 @@ async def main():
 
     engine.add_strategy(ResolutionSnipeStrategy(
         settings=settings, ensemble=None, odds_client=None))
-
-    if settings.mm_enabled:
-        mm_strategy = MarketMakerStrategy(
-            settings=settings, clob=clob, scanner=scanner,
-            dry_run=settings.dry_run)
-        engine.add_strategy(mm_strategy)
 
     if getattr(settings, 'mr_enabled', False):
         mr_strategy = MeanReversionStrategy(settings=settings)
