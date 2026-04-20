@@ -515,28 +515,41 @@ class EnsembleForecastStrategy(Strategy):
                                    size=size, price=candidate.current_price, edge=kelly_result.edge))
 
     async def _compute_quant(self, candidate: MarketCandidate, ctx: TradingContext) -> QuantSignals | None:
+        # Polymarket's /book and /prices-history endpoints are keyed by token_id
+        # (YES or NO token), not the market's condition id. Use the YES token —
+        # YES/NO spreads mirror each other when there is real liquidity.
+        token_id = candidate.yes_token_id or candidate.no_token_id
+        if not token_id:
+            return QuantSignals(0, 0, 0, 0, 0)
+
         try:
-            price_history = await ctx.scanner.fetch_price_history(candidate.polymarket_id)
-            book = await ctx.scanner.fetch_order_book(candidate.polymarket_id)
+            price_history = await ctx.scanner.fetch_price_history(token_id)
+            book = await ctx.scanner.fetch_order_book(token_id)
         except Exception:
             return QuantSignals(0, 0, 0, 0, 0)
 
         bids = book.get("bids", [])
         asks = book.get("asks", [])
-        bid_depth = sum(float(b.get("size", 0)) for b in bids)
-        ask_depth = sum(float(a.get("size", 0)) for a in asks)
-        best_bid = float(bids[0]["price"]) if bids else candidate.current_price - 0.01
-        best_ask = float(asks[0]["price"]) if asks else candidate.current_price + 0.01
 
-        # Liquidity gate: skip illiquid markets before running expensive ensemble / analysis
-        # downstream. Mirrors executor dry-run spread reject so behavior is consistent
-        # across dry and live modes.
+        # Liquidity gate: skip markets we can't fill before running the expensive
+        # ensemble/analysis downstream. Mirrors executor dry-run spread reject so
+        # behavior is consistent across dry and live modes. Missing book = no
+        # liquidity; skip. Wide spread = no liquidity; skip.
         max_spread = getattr(self._settings, "forecast_max_spread", 0.15)
+        if not bids or not asks:
+            log.info("forecast_empty_book_skip", market=candidate.polymarket_id,
+                     token=token_id[:20])
+            return None
+        best_bid = float(bids[0]["price"])
+        best_ask = float(asks[0]["price"])
         raw_spread = best_ask - best_bid
-        if bids and asks and raw_spread > max_spread:
+        if raw_spread > max_spread:
             log.info("forecast_wide_spread_skip", market=candidate.polymarket_id,
                      spread=round(raw_spread, 4), max=max_spread)
             return None
+
+        bid_depth = sum(float(b.get("size", 0)) for b in bids)
+        ask_depth = sum(float(a.get("size", 0)) for a in asks)
 
         hours_remaining = max(
             0.0,
