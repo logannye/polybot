@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     forecast_category_filter_enabled: bool = True      # disable to skip category filtering
     forecast_yes_max_entry: float = 0.15       # only enter YES below this price (data: winners avg 0.098)
     forecast_no_min_entry: float = 0.60        # only enter NO above this yes_price (mid-range filter)
+    forecast_max_spread: float = 0.15          # skip candidates whose bid-ask spread exceeds this (matches dry_run_max_spread)
 
     # Learning system
     enable_proxy_trust_learning: bool = True
