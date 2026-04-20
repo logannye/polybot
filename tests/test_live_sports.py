@@ -86,7 +86,7 @@ def _base_settings():
 
 def _strategy_with_mocked_espn(live_games):
     espn = MagicMock()
-    espn.fetch_all = AsyncMock(return_value=live_games)
+    espn.fetch_all_live_games = AsyncMock(return_value=live_games)
     return LiveSportsStrategy(settings=_base_settings(), espn_client=espn)
 
 
