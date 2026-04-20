@@ -135,4 +135,7 @@ class Settings(BaseSettings):
     heartbeat_critical_seconds: int = 1800
     balance_divergence_pct: float = 0.05
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # "extra=ignore" so stale .env keys from deleted v10 strategies (forecast_*,
+    # mm_*, mr_*, cv_*, pol_*, arb_*) don't crash startup. .env cleanup is a
+    # separate follow-up.
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
