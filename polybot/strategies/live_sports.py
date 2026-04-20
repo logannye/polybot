@@ -143,7 +143,7 @@ class LiveSportsStrategy(Strategy):
         max_staleness_s = float(getattr(self._settings, "lg_max_staleness_s", 60.0))
         fetched_at = datetime.now(timezone.utc)
         try:
-            all_games = await self._espn.fetch_all()
+            all_games = await self._espn.fetch_all_live_games()
         except Exception as e:
             log.error("live_sports_espn_fetch_error", error=str(e))
             return
