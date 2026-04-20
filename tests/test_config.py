@@ -71,17 +71,23 @@ def test_v10_safeguard_defaults(monkeypatch):
 
 
 def test_v10_snipe_defaults(monkeypatch):
-    """Snipe settings preserved across v10 Phase A (rewritten in PR C)."""
+    """v10 Snipe 2-tier settings per spec §4."""
     for k, v in _base_env().items():
         monkeypatch.setenv(k, v)
     s = Settings(_env_file=None)
-    assert s.snipe_kelly_mult == 0.50
-    assert s.snipe_max_single_pct == 0.05
+    assert s.snipe_enabled is True
+    assert s.snipe_t0_kelly_mult == 0.50
+    assert s.snipe_t0_max_single_pct == 0.10
+    assert s.snipe_t1_kelly_mult == 0.30
+    assert s.snipe_t1_max_single_pct == 0.07
+    assert s.snipe_t1_min_confidence == 0.85
     assert s.snipe_max_concurrent == 3
-    assert s.snipe_hours_max == 72.0
-    assert s.snipe_min_confidence == 0.90
-    # Odds verification disabled after v10 Phase A (odds_client deleted)
-    assert s.snipe_odds_verification_enabled is False
+    assert s.snipe_min_book_depth == 2000.0
+    assert s.snipe_gemini_daily_cap_usd == 2.0
+    # Old T2/T3 keys should be gone
+    assert not hasattr(s, "snipe_tier2_llm_max_hours")
+    assert not hasattr(s, "snipe_hours_max")
+    assert not hasattr(s, "snipe_odds_verification_enabled")
 
 
 def test_v10_live_game_defaults(monkeypatch):

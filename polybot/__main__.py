@@ -20,6 +20,7 @@ from polybot.strategies.snipe import ResolutionSnipeStrategy
 from polybot.strategies.live_sports import LiveSportsStrategy
 from polybot.sports.espn_client import ESPNClient
 from polybot.sports.calibrator import OnlineCalibrator
+from polybot.analysis.gemini_client import GeminiClient
 
 structlog.configure(
     processors=[
@@ -142,8 +143,14 @@ async def main():
 
     log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
 
+    # Snipe v10 uses Gemini Flash directly for T1 verification
+    gemini_client = None
+    if settings.google_api_key:
+        gemini_client = GeminiClient(
+            api_key=settings.google_api_key,
+            cap_usd=float(getattr(settings, "snipe_gemini_daily_cap_usd", 2.0)))
     engine.add_strategy(ResolutionSnipeStrategy(
-        settings=settings, ensemble=None, odds_client=None))
+        settings=settings, gemini_client=gemini_client))
 
     if getattr(settings, 'lg_enabled', False):
         espn_client = ESPNClient(

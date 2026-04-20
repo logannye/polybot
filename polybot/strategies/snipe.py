@@ -1,346 +1,259 @@
+"""Snipe v10 — 2-tier resolution-convergence capital recycler (spec §4).
+
+Edge thesis: prediction markets at $0.96+ with a few hours to resolution
+haven't converged yet because the last 3 cents of drift are below most
+traders' attention threshold. Very high win rate, small edge per trade.
+Uncorrelated with Live Sports.
+
+Tiers:
+- T0: price ≥ 0.96 / ≤ 12h resolution / no verification / 0.50× Kelly / 10% cap
+- T1: price 0.88–0.96 / ≤ 8h resolution / Gemini Flash required / 0.30× / 7%
+
+Previous tiers T2/T3 deleted per spec — edge per trade was below
+realistic slippage + fees. Odds-based verification deleted (Odds API
+removed in Phase A).
+"""
+from __future__ import annotations
+
 import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Literal, Optional
+
 import structlog
-from datetime import datetime, timezone
+
 from polybot.strategies.base import Strategy, TradingContext
-from polybot.trading.risk import PortfolioState, TradeProposal, bankroll_kelly_adjustment
 from polybot.trading.kelly import compute_position_size
-from polybot.analysis.prompts import build_snipe_prompt, parse_snipe_response
-from polybot.notifications.email import format_trade_email
+from polybot.analysis.gemini_client import GeminiClient, GeminiResult
 
 log = structlog.get_logger()
 
+Tier = Literal[0, 1]
 
-def classify_snipe_tier(price: float, hours_remaining: float, max_hours: float = 120.0) -> int | None:
+
+@dataclass(frozen=True)
+class SnipeCandidate:
+    polymarket_id: str
+    yes_price: float
+    hours_remaining: float
+    tier: Tier
+    side: Literal["YES", "NO"]    # the side we'd BUY (high-probability side)
+    buy_price: float              # effective price of that side (yes_price or 1-yes_price)
+
+
+def classify_snipe(
+    yes_price: float, hours_remaining: float, *,
+    t0_min_price: float = 0.96, t0_max_hours: float = 12.0,
+    t1_min_price: float = 0.88, t1_max_hours: float = 8.0,
+) -> Optional[SnipeCandidate]:
+    """Classify a market into T0 or T1 (or None). Returns the canonical
+    side+buy_price so the strategy doesn't repeat the logic.
+
+    Prices below 0.5 trigger on the NO side mirror (so a market trading
+    at 0.04 YES = 0.96 NO, classified as T0 NO).
     """
-    Classify a market into snipe tiers based on price extremity and time remaining.
-
-    Tier 0: Near-certain outcome, no LLM needed
-    Tier 1: Likely resolved, LLM verification required
-    Tier 2: Strong lean, conservative sizing
-    Tier 3: Moderate lean, widest window, most conservative
-
-    Returns None if not a snipe candidate.
-    """
-    if hours_remaining > max_hours or hours_remaining <= 0:
+    if hours_remaining <= 0:
         return None
 
-    # Tier 0: Very extreme prices, close to resolution (high confidence)
-    if hours_remaining <= 24.0:
-        if price >= 0.95 or price <= 0.05:
-            return 0
+    # Normalize to "extreme-side price"
+    if yes_price >= 0.5:
+        extreme_price = yes_price
+        side: Literal["YES", "NO"] = "YES"
+    else:
+        extreme_price = 1.0 - yes_price
+        side = "NO"
 
-    # Tier 1: Extreme prices, moderate time window (LLM verify)
-    if hours_remaining <= 12.0:
-        if price >= 0.85 or price <= 0.15:
-            return 1
-
-    # Tier 2: Strong lean, wider window (conservative)
-    if hours_remaining <= 72.0:
-        if price >= 0.80 or price <= 0.20:
-            return 2
-
-    # Tier 3: Moderate lean, widest window (most conservative)
-    if hours_remaining <= 120.0:
-        if price >= 0.75 or price <= 0.25:
-            return 3
-
+    if extreme_price >= t0_min_price and hours_remaining <= t0_max_hours:
+        return SnipeCandidate(
+            polymarket_id="",   # filled by caller
+            yes_price=yes_price,
+            hours_remaining=hours_remaining,
+            tier=0, side=side, buy_price=extreme_price,
+        )
+    if (t1_min_price <= extreme_price < t0_min_price
+            and hours_remaining <= t1_max_hours):
+        return SnipeCandidate(
+            polymarket_id="",
+            yes_price=yes_price,
+            hours_remaining=hours_remaining,
+            tier=1, side=side, buy_price=extreme_price,
+        )
     return None
 
 
-def compute_snipe_edge(buy_price: float, fee_per_dollar: float = 0.0) -> float:
-    """
-    Compute net edge for a snipe trade.
-
-    For YES bets: edge = (1.0 - buy_price) - fee_per_dollar
-    fee_per_dollar is 0.0 for maker orders, or feeRate*(1-price) for takers.
-    """
+def compute_net_edge(buy_price: float, fee_per_dollar: float = 0.0) -> float:
+    """Binary snipe net edge: (1 - buy_price) - fees."""
     return (1.0 - buy_price) - fee_per_dollar
-
-
-def compute_tiered_kelly_scale(net_edge: float) -> float:
-    """Scale Kelly multiplier based on edge magnitude. Higher edge = larger position."""
-    if net_edge >= 0.05:
-        return 2.0
-    if net_edge >= 0.03:
-        return 1.5
-    return 1.0
-
-
-def check_snipe_cooldown(
-    polymarket_id: str,
-    current_price: float,
-    cooldowns: dict[str, dict],
-    cooldown_hours: float,
-    reentry_threshold: float,
-) -> bool:
-    """Return True if the market is clear to enter, False if blocked by cooldown."""
-    if polymarket_id not in cooldowns:
-        return True
-    entry = cooldowns[polymarket_id]
-    elapsed_hours = (datetime.now(timezone.utc) - entry["exit_time"]).total_seconds() / 3600
-    if elapsed_hours >= cooldown_hours:
-        return True
-    # Still in cooldown — check if price moved enough for re-entry
-    price_delta = abs(current_price - entry["exit_price"])
-    return price_delta >= reentry_threshold
 
 
 class ResolutionSnipeStrategy(Strategy):
     name = "snipe"
 
-    def __init__(self, settings, ensemble=None, odds_client=None):
-        self.interval_seconds = settings.snipe_interval_seconds
-        self.kelly_multiplier = settings.snipe_kelly_mult
-        self.max_single_pct = settings.snipe_max_single_pct
-        self._min_net_edge = settings.snipe_min_net_edge
-        self._min_confidence = settings.snipe_min_confidence
-        self._max_hours = settings.snipe_hours_max
-        self._use_maker = settings.use_maker_orders
-        self._ensemble = ensemble
-        self._cooldown_hours = settings.snipe_cooldown_hours
-        self._reentry_threshold = settings.snipe_reentry_threshold
-        self._max_entries_per_market = settings.snipe_max_entries_per_market
-        self._market_cooldowns: dict[str, dict] = {}
-        self._odds_client = odds_client
-        self._odds_verification_enabled = getattr(settings, 'snipe_odds_verification_enabled', False)
-        self._odds_min_consensus = getattr(settings, 'snipe_odds_min_consensus', 0.85)
-        self._max_concurrent = getattr(settings, 'snipe_max_concurrent', 3)
+    def __init__(self, settings, gemini_client: Optional[GeminiClient] = None):
+        self._settings = settings
+        self._gemini = gemini_client
+        self.interval_seconds = float(getattr(settings, "snipe_interval_seconds", 120))
+        # T0 and T1 have distinct Kelly fractions per spec §4
+        self._t0_kelly = float(getattr(settings, "snipe_t0_kelly_mult", 0.50))
+        self._t1_kelly = float(getattr(settings, "snipe_t1_kelly_mult", 0.30))
+        self._t0_max_single = float(getattr(settings, "snipe_t0_max_single_pct", 0.10))
+        self._t1_max_single = float(getattr(settings, "snipe_t1_max_single_pct", 0.07))
+        self._min_book_depth = float(getattr(settings, "snipe_min_book_depth", 2000.0))
+        self._max_concurrent = int(getattr(settings, "snipe_max_concurrent", 3))
+        # Backwards-compat for Strategy attributes — use T0 as "nominal"
+        self.kelly_multiplier = self._t0_kelly
+        self.max_single_pct = self._t0_max_single
 
     async def run_once(self, ctx: TradingContext) -> None:
-        enabled = await ctx.db.fetchval(
-            "SELECT enabled FROM strategy_performance WHERE strategy = 'snipe'")
-        if enabled is False:
+        # Enabled?
+        if not getattr(self._settings, "snipe_enabled", True):
             return
 
-        # Check concurrent position cap
-        open_snipe_count = await ctx.db.fetchval(
-            """SELECT COUNT(*) FROM trades
-               WHERE strategy = 'snipe'
-                 AND status IN ('open', 'filled', 'dry_run')""")
-        if (open_snipe_count or 0) >= self._max_concurrent:
-            log.info("snipe_max_concurrent_reached", open=open_snipe_count,
-                     max=self._max_concurrent)
+        # Max concurrent gate
+        open_count = await ctx.db.fetchval(
+            "SELECT COUNT(*) FROM trades WHERE strategy = 'snipe' "
+            "AND status IN ('open', 'filled', 'dry_run')")
+        if open_count and open_count >= self._max_concurrent:
+            log.info("snipe_max_concurrent_reached",
+                     open_count=open_count, max=self._max_concurrent)
             return
 
-        # Refresh per-market cooldowns from recently closed snipe trades
-        recent_exits = await ctx.db.fetch(
-            """SELECT m.polymarket_id, t.closed_at, t.exit_price
-               FROM trades t JOIN markets m ON t.market_id = m.id
-               WHERE t.strategy = 'snipe'
-                 AND t.status IN ('dry_run_resolved', 'closed')
-                 AND t.closed_at > NOW() - INTERVAL '24 hours'
-               ORDER BY t.closed_at DESC""")
-        for row in recent_exits:
-            pid = row["polymarket_id"]
-            if pid not in self._market_cooldowns or row["closed_at"] > self._market_cooldowns[pid]["exit_time"]:
-                self._market_cooldowns[pid] = {
-                    "exit_time": row["closed_at"],
-                    "exit_price": float(row["exit_price"]),
-                }
+        # Fetch markets
+        try:
+            all_markets = await ctx.scanner.fetch_markets()
+        except Exception as e:
+            log.error("snipe_fetch_markets_error", error=str(e))
+            return
 
-        # Load learned snipe parameters
-        snipe_learned = await ctx.db.fetchval(
-            "SELECT learned_params FROM strategy_performance WHERE strategy = 'snipe'")
-        if snipe_learned:
-            try:
-                import json
-                sp = json.loads(snipe_learned) if isinstance(snipe_learned, str) else snipe_learned
-                if sp.get("snipe_sample_size", 0) >= 5:
-                    learned_edge = sp.get("optimal_min_edge")
-                    if learned_edge is not None:
-                        self._min_net_edge = max(0.01, min(0.10, learned_edge))
-                        log.debug("snipe_learned_edge", min_edge=self._min_net_edge)
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        raw_markets = await ctx.scanner.fetch_markets()
         now = datetime.now(timezone.utc)
-
-        # Pre-fetch bankroll for cumulative exposure checks (avoids lock per candidate)
-        state_row = await ctx.db.fetchrow("SELECT bankroll FROM system_state WHERE id = 1")
-        bankroll_snapshot = float(state_row["bankroll"]) if state_row else 0.0
-        max_market_exposure_pct = getattr(ctx.settings, "snipe_max_market_exposure_pct", 0.30)
-
-        snipe_candidates = 0
-        for m in raw_markets:
-            hours_remaining = (m["resolution_time"] - now).total_seconds() / 3600
-            tier = classify_snipe_tier(m["yes_price"], hours_remaining, self._max_hours)
-            if tier is None:
+        for market in all_markets:
+            resolution_time = market.get("resolution_time")
+            if not resolution_time:
+                continue
+            hours_remaining = (resolution_time - now).total_seconds() / 3600.0
+            if hours_remaining <= 0:
                 continue
 
-            snipe_candidates += 1
-            log.info("snipe_candidate", market=m["polymarket_id"],
-                     price=m["yes_price"], hours=round(hours_remaining, 1), tier=tier)
+            yes_price = float(market.get("yes_price") or 0.5)
+            candidate = classify_snipe(yes_price, hours_remaining)
+            if candidate is None:
+                continue
+            # Fill in the polymarket_id (classify_snipe doesn't see it)
+            candidate = SnipeCandidate(
+                polymarket_id=market["polymarket_id"],
+                yes_price=candidate.yes_price,
+                hours_remaining=candidate.hours_remaining,
+                tier=candidate.tier, side=candidate.side,
+                buy_price=candidate.buy_price,
+            )
 
-            if m["yes_price"] >= 0.75:
-                side, buy_price = "YES", m["yes_price"]
-            elif m["yes_price"] <= 0.25:
-                side, buy_price = "NO", 1 - m["yes_price"]
-            else:
-                log.debug("snipe_rejected_price_range", market=m["polymarket_id"],
-                          price=m["yes_price"])
+            # Book depth
+            if float(market.get("book_depth", 0)) < self._min_book_depth:
                 continue
 
-            from polybot.trading.fees import get_fee_rate, compute_taker_fee_per_dollar
-            category = m.get("category", "unknown")
-            if self._use_maker:
-                fee_per_dollar = 0.0
-            else:
-                fee_per_dollar = compute_taker_fee_per_dollar(buy_price, get_fee_rate(category))
-            net_edge = compute_snipe_edge(buy_price, fee_per_dollar)
-            if net_edge < self._min_net_edge:
-                log.debug("snipe_rejected_edge", market=m["polymarket_id"],
-                          edge=round(net_edge, 4), min_edge=self._min_net_edge)
+            # Dedup — max_entries_per_market gate
+            existing = await ctx.db.fetchval(
+                "SELECT COUNT(*) FROM trades t JOIN markets m ON t.market_id = m.id "
+                "WHERE m.polymarket_id = $1 AND t.strategy='snipe' "
+                "AND t.status IN ('open', 'filled', 'dry_run')",
+                candidate.polymarket_id)
+            if existing and existing > 0:
                 continue
 
-            # Per-market cooldown check
-            if not check_snipe_cooldown(
-                m["polymarket_id"], buy_price, self._market_cooldowns,
-                self._cooldown_hours, self._reentry_threshold,
-            ):
-                log.debug("snipe_cooldown_blocked", market=m["polymarket_id"])
-                continue
-
-            # 24h entry cap per market
-            entries_24h = await ctx.db.fetchval(
-                """SELECT COUNT(*) FROM trades t JOIN markets m ON t.market_id = m.id
-                   WHERE m.polymarket_id = $1 AND t.strategy = 'snipe'
-                     AND t.opened_at > NOW() - INTERVAL '24 hours'""",
-                m["polymarket_id"])
-            if entries_24h and entries_24h >= self._max_entries_per_market:
-                log.debug("snipe_entry_cap", market=m["polymarket_id"],
-                          entries=entries_24h, max=self._max_entries_per_market)
-                continue
-
-            # Per-market cumulative USD exposure cap
-            cumulative_exposure = await ctx.db.fetchval(
-                """SELECT COALESCE(SUM(position_size_usd), 0) FROM trades t
-                   JOIN markets m2 ON t.market_id = m2.id
-                   WHERE m2.polymarket_id = $1 AND t.strategy = 'snipe'
-                     AND t.status IN ('open', 'filled', 'dry_run')""",
-                m["polymarket_id"])
-            max_market_exposure = bankroll_snapshot * max_market_exposure_pct
-            if float(cumulative_exposure) >= max_market_exposure:
-                log.debug("snipe_cumulative_cap", market=m["polymarket_id"],
-                          exposure=float(cumulative_exposure), max=round(max_market_exposure, 2))
-                continue
-
-            if tier in (1, 2, 3):
-                verified = False
-
-                # LLM verification path (odds path removed in v10 Phase A)
-                if self._ensemble:
-                    tier_max_hours = {1: 12.0, 2: getattr(ctx.settings, "snipe_tier2_llm_max_hours", 48.0), 3: getattr(ctx.settings, "snipe_tier3_llm_max_hours", 120.0)}
-                    if hours_remaining > tier_max_hours.get(tier, 12.0):
-                        log.info("snipe_rejected_far_future", market=m["polymarket_id"],
-                                 hours=round(hours_remaining, 1), tier=tier)
-                        continue
-                    prompt = build_snipe_prompt(m["question"], str(m["resolution_time"]), hours_remaining, m["yes_price"])
-                    try:
-                        response = await self._ensemble._google.aio.models.generate_content(
-                            model="gemini-2.5-flash", contents=prompt)
-                        parsed = parse_snipe_response(response.text)
-                        if not parsed or not parsed["determined"] or parsed["confidence"] < self._min_confidence:
-                            log.info("snipe_rejected_llm", market=m["polymarket_id"],
-                                     tier=tier, parsed=parsed)
-                            continue
-                        if parsed["outcome"] == "NO" and side == "YES":
-                            log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
-                                     side=side, llm_outcome=parsed["outcome"])
-                            continue
-                        if parsed["outcome"] == "YES" and side == "NO":
-                            log.info("snipe_rejected_llm_disagree", market=m["polymarket_id"],
-                                     side=side, llm_outcome=parsed["outcome"])
-                            continue
-                        verified = True
-                    except Exception as e:
-                        log.error("snipe_llm_error", error=str(e))
-                        continue
-
+            # T1 requires LLM verification
+            if candidate.tier == 1:
+                verified = await self._verify_via_gemini(candidate, market)
                 if not verified:
-                    log.debug("snipe_not_verified", market=m["polymarket_id"], tier=tier)
+                    log.debug("snipe_t1_rejected_by_llm",
+                              market=candidate.polymarket_id)
                     continue
 
-            async with ctx.portfolio_lock:
-                state_row = await ctx.db.fetchrow("SELECT * FROM system_state WHERE id = 1")
-                if not state_row:
-                    continue
-                bankroll = float(state_row["bankroll"])
-                kelly_adj = bankroll_kelly_adjustment(
-                    bankroll=bankroll, base_kelly=self.kelly_multiplier,
-                    post_breaker_until=state_row.get("post_breaker_until"),
-                    post_breaker_reduction=ctx.settings.post_breaker_kelly_reduction,
-                    survival_threshold=ctx.settings.bankroll_survival_threshold,
-                    growth_threshold=ctx.settings.bankroll_growth_threshold,
-                )
-                # Tier-dependent kelly scaling
-                tier_kelly_scale = {0: 1.0, 1: 0.85, 2: 0.55, 3: 0.30}
-                kelly_adj *= tier_kelly_scale.get(tier, 1.0)
-                # Tiered edge sizing: larger positions on higher edge
-                kelly_adj *= compute_tiered_kelly_scale(net_edge)
-                kelly_fraction = net_edge / (1 - buy_price) if buy_price < 1.0 else 0.0
-                size = compute_position_size(
-                    bankroll=bankroll, kelly_fraction=kelly_fraction, kelly_mult=kelly_adj,
-                    confidence_mult=1.0, max_single_pct=self.max_single_pct,
-                    min_trade_size=ctx.settings.min_trade_size)
-                if size <= 0:
-                    log.debug("snipe_rejected_size_zero", market=m["polymarket_id"])
-                    continue
+            await self._enter(ctx, market, candidate)
 
-                open_trades = await ctx.db.fetch("SELECT * FROM trades WHERE status = 'open'")
-                portfolio = PortfolioState(
-                    bankroll=bankroll, total_deployed=float(state_row["total_deployed"]),
-                    daily_pnl=float(state_row["daily_pnl"]),
-                    open_count=len(open_trades), category_deployed={},
-                    circuit_breaker_until=state_row.get("circuit_breaker_until"))
-                proposal = TradeProposal(size_usd=size, category=m.get("category", "unknown"),
-                                          book_depth=m.get("book_depth", 1000.0))
-                risk_result = ctx.risk_manager.check(portfolio, proposal, max_single_pct=self.max_single_pct)
-                if not risk_result.allowed:
-                    log.info("snipe_rejected_risk", market=m["polymarket_id"],
-                             reason=risk_result.reason)
-                    continue
+    async def _verify_via_gemini(self, candidate: SnipeCandidate, market: dict) -> bool:
+        if self._gemini is None:
+            return False
+        if not self._gemini.can_spend():
+            log.info("snipe_gemini_daily_cap_hit",
+                     spend_usd=round(self._gemini.current_spend(), 4))
+            return False
+        min_conf = float(getattr(self._settings, "snipe_t1_min_confidence", 0.85))
+        try:
+            result = await self._gemini.verify_snipe(
+                question=market.get("question", ""),
+                resolution_time_iso=str(market.get("resolution_time", "")),
+                hours_remaining=candidate.hours_remaining,
+                yes_price=candidate.yes_price,
+            )
+        except Exception as e:
+            log.error("snipe_gemini_error", error=str(e))
+            return False
+        expected_verdict = "YES_LOCKED" if candidate.side == "YES" else "NO_LOCKED"
+        return result.verdict == expected_verdict and result.confidence >= min_conf
 
-                # Upsert market record
-                market_id = await ctx.db.fetchval(
-                    """INSERT INTO markets (polymarket_id, question, category, resolution_time,
-                           current_price, volume_24h, book_depth)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)
-                       ON CONFLICT (polymarket_id) DO UPDATE SET
-                           current_price=$5, volume_24h=$6, book_depth=$7, last_updated=NOW()
-                       RETURNING id""",
-                    m["polymarket_id"], m["question"], m.get("category", "unknown"),
-                    m["resolution_time"], m["yes_price"],
-                    m.get("volume_24h"), m.get("book_depth"),
-                )
+    async def _enter(self, ctx: TradingContext, market: dict,
+                      candidate: SnipeCandidate) -> None:
+        net_edge = compute_net_edge(candidate.buy_price)
+        min_edge = float(getattr(self._settings, "snipe_min_net_edge", 0.02))
+        if net_edge < min_edge:
+            return
 
-                # Create analysis record for the snipe
-                # Store target probability (1.0 for YES, 0.0 for NO) — snipes
-                # assume the outcome will resolve as expected.
-                snipe_target_prob = 1.0 if side == "YES" else 0.0
-                analysis_id = await ctx.db.fetchval(
-                    """INSERT INTO analyses (market_id, model_estimates, ensemble_probability,
-                       ensemble_stdev, quant_signals, edge)
-                       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
-                    market_id, json.dumps([]), snipe_target_prob, 0.0, json.dumps({}), net_edge,
-                )
+        state = await ctx.db.fetchrow("SELECT bankroll FROM system_state WHERE id = 1")
+        if not state:
+            return
+        bankroll = float(state["bankroll"])
 
-                token_id = m.get("yes_token_id", "") if side == "YES" else m.get("no_token_id", "")
-                result = await ctx.executor.place_order(
-                    token_id=token_id, side=side, size_usd=size,
-                    price=buy_price, market_id=market_id,
-                    analysis_id=analysis_id, strategy=self.name,
-                    post_only=self._use_maker,
-                )
-                if not result:
-                    continue
+        kelly_mult = self._t0_kelly if candidate.tier == 0 else self._t1_kelly
+        max_single_pct = self._t0_max_single if candidate.tier == 0 else self._t1_max_single
 
-            log.info("snipe_trade", market=m["polymarket_id"], side=side, price=buy_price,
-                     edge=net_edge, size=size, tier=tier)
-            await ctx.email_notifier.send(
-                f"[POLYBOT] Trade executed: {m['question'][:60]}",
-                format_trade_email(event="executed", market=m["question"], side=side,
-                                   size=size, price=buy_price, edge=net_edge))
+        # Binary Kelly fraction = edge / odds_against. For buy_price p,
+        # odds_against = (1-p)/p. Kelly ≈ edge × p / (1-p) — simplified to
+        # compute_position_size below which handles the common case.
+        kelly_fraction = net_edge / (1.0 - candidate.buy_price) if candidate.buy_price < 1.0 else 0.0
+        size = compute_position_size(
+            bankroll=bankroll,
+            kelly_fraction=kelly_fraction,
+            kelly_mult=kelly_mult,
+            confidence_mult=1.0,
+            max_single_pct=max_single_pct,
+            min_trade_size=float(getattr(self._settings, "min_trade_size", 1.0)))
+        if size <= 0:
+            return
 
-        log.info("snipe_cycle_complete", markets_scanned=len(raw_markets),
-                 candidates=snipe_candidates)
+        market_id = await ctx.db.fetchval(
+            """INSERT INTO markets (polymarket_id, question, category, resolution_time,
+                   current_price, volume_24h, book_depth)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (polymarket_id) DO UPDATE SET
+                   current_price=$5, volume_24h=$6, book_depth=$7, last_updated=NOW()
+               RETURNING id""",
+            candidate.polymarket_id, market.get("question", ""),
+            market.get("category", "unknown"), market.get("resolution_time"),
+            candidate.yes_price, float(market.get("volume_24h", 0)),
+            float(market.get("book_depth", 0)))
+
+        token_id = market.get("yes_token_id") if candidate.side == "YES" \
+            else market.get("no_token_id")
+        if not token_id:
+            return
+
+        log.info("snipe_entry",
+                 market=candidate.polymarket_id, tier=candidate.tier,
+                 side=candidate.side, size=round(size, 2),
+                 price=round(candidate.buy_price, 4),
+                 edge=round(net_edge, 4),
+                 hours_remaining=round(candidate.hours_remaining, 1))
+
+        async with ctx.portfolio_lock:
+            await ctx.executor.place_order(
+                token_id=token_id, side=candidate.side,
+                size_usd=size, price=candidate.buy_price,
+                market_id=market_id, analysis_id=None, strategy=self.name,
+                kelly_inputs={
+                    "tier": candidate.tier,
+                    "buy_price": round(candidate.buy_price, 4),
+                    "hours_remaining": round(candidate.hours_remaining, 2),
+                    "net_edge": round(net_edge, 4),
+                    "kelly_fraction": round(kelly_fraction, 4),
+                },
+                post_only=True)   # maker-first — T0/T1 both prefer 0% fees
