@@ -17,8 +17,6 @@ from polybot.notifications.email import EmailNotifier
 from polybot.trading.position_manager import ActivePositionManager
 from polybot.dashboard.app import create_app
 from polybot.strategies.snipe import ResolutionSnipeStrategy
-from polybot.strategies.mean_reversion import MeanReversionStrategy
-from polybot.markets.price_history import PriceHistoryScanner
 from polybot.strategies.live_game import LiveGameCloserStrategy
 from polybot.analysis.espn_client import ESPNClient
 
@@ -145,18 +143,6 @@ async def main():
 
     engine.add_strategy(ResolutionSnipeStrategy(
         settings=settings, ensemble=None, odds_client=None))
-
-    if getattr(settings, 'mr_enabled', False):
-        mr_strategy = MeanReversionStrategy(settings=settings)
-        engine.add_strategy(mr_strategy)
-        price_history_scanner = PriceHistoryScanner(
-            scanner=scanner,
-            min_volume=settings.mr_min_volume_24h,
-            move_threshold=settings.mr_trigger_threshold,
-            max_markets=getattr(settings, 'mr_history_max_markets', 500),
-            concurrency=getattr(settings, 'mr_history_concurrency', 50),
-        )
-        engine._price_history_scanner = price_history_scanner
 
     if getattr(settings, 'lg_enabled', False):
         espn_client = ESPNClient(

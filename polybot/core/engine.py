@@ -13,11 +13,11 @@ log = structlog.get_logger()
 class Engine:
     def __init__(self, db, scanner, executor, recorder,
                  risk_manager, settings, email_notifier, position_manager, clob=None,
-                 portfolio_lock=None, trade_learner=None, price_history_scanner=None,
-                 researcher=None, ensemble=None):
-        # researcher/ensemble kept as kwargs for backward-compat with callers
-        # that still pass them (tests). v10 doesn't use them — they were
-        # dependencies of the deleted forecast strategy.
+                 portfolio_lock=None, trade_learner=None,
+                 researcher=None, ensemble=None, price_history_scanner=None):
+        # researcher/ensemble/price_history_scanner kept as kwargs for
+        # backward-compat with callers that still pass them (tests). v10 doesn't
+        # use them — they were dependencies of deleted strategies.
         self._db = db
         self._scanner = scanner
         self._executor = executor
@@ -35,7 +35,6 @@ class Engine:
         self._trade_learner = trade_learner
         self._last_heartbeats: dict[str, datetime] = {}
         self._last_self_assess: datetime | None = None
-        self._price_history_scanner = price_history_scanner
         self._capital_divergence_halted = False
         self._capital_divergence_ok_count = 0
         self._drawdown_cache: tuple[bool, float] | None = None
@@ -70,9 +69,6 @@ class Engine:
         if getattr(self._settings, 'enable_hourly_learning', True):
             tasks.append(self._run_periodic(self._hourly_learning, 3600))
         tasks.append(self._run_periodic(self._cleanup_stale_arbs, 3600))
-        if self._price_history_scanner:
-            scan_interval = getattr(self._settings, 'mr_history_scan_interval', 180)
-            tasks.append(self._run_periodic(self._scan_price_history, scan_interval))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):
@@ -695,22 +691,3 @@ class Engine:
 
         self._last_self_assess = now
         log.info("self_assessment_complete", kelly=new_kelly, edge=new_edge, max_dd=max_dd)
-
-    async def _scan_price_history(self):
-        """Periodic: scan for big moves via CLOB price history and inject into MR."""
-        if not self._price_history_scanner:
-            return
-        mr_strategy = next(
-            (s for s in self._strategies if s.name == "mean_reversion"), None)
-        if not mr_strategy:
-            return
-        try:
-            moves = await self._price_history_scanner.scan_for_moves()
-            for move in moves:
-                mr_strategy.inject_snapshots(
-                    market_id=move["polymarket_id"],
-                    price=move["yes_price"],
-                    old_price=move["reference_price"],
-                )
-        except Exception as e:
-            log.error("price_history_scan_error", error=str(e))
