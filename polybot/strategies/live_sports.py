@@ -36,6 +36,7 @@ from polybot.markets.sports_matcher import (
     LiveGame, PolymarketMarket, match_game_to_market,
     compute_match_confidence, classify_market_type,
 )
+from polybot.sports.margin_model import compute_cover_probability
 from polybot.trading.kelly import compute_position_size
 from polybot.learning.trade_outcome import record_outcome as record_trade_outcome
 
@@ -274,35 +275,38 @@ class LiveSportsStrategy(Strategy):
                 }
 
             match = match_game_to_market(live_game, market, min_confidence=min_conf)
-            if not match or match.market_type != "moneyline":
+            if not match:
                 continue
 
-            # Determine which side we want to buy
-            wp_leader_is_home = state.leader_is_home
-            trade_side: str
-            if match.side == "home":
-                # Market asks if home wins. We want YES if home is leading with high WP
-                trade_side = "YES" if wp_leader_is_home else "NO"
-                prob_trade_wins = calibrated_wp if wp_leader_is_home else (1.0 - calibrated_wp)
-            else:   # match.side == "away"
-                trade_side = "YES" if not wp_leader_is_home else "NO"
-                prob_trade_wins = calibrated_wp if not wp_leader_is_home else (1.0 - calibrated_wp)
+            if match.market_type == "moneyline":
+                entry = self._evaluate_moneyline(
+                    match=match, calibrated_wp=calibrated_wp,
+                    active_threshold=active_threshold, state=state,
+                    market_dict=market_dict)
+            elif match.market_type == "spread":
+                entry = self._evaluate_spread(
+                    match=match, state=state, market_dict=market_dict)
+            else:
+                continue   # total (O/U) markets deferred per spec
 
-            if prob_trade_wins < active_threshold:
+            if entry is None:
                 continue
 
-            # Entry gate — remaining checks
             ok = await self._entry_gate_ok(
-                ctx=ctx, market=market, trade_side=trade_side,
-                prob_trade_wins=prob_trade_wins, market_dict=market_dict)
+                ctx=ctx, market=market, trade_side=entry["trade_side"],
+                prob_trade_wins=entry["prob_trade_wins"],
+                market_dict=market_dict)
             if not ok:
                 continue
 
             await self._enter(
-                ctx=ctx, market=market, trade_side=trade_side,
-                prob_trade_wins=prob_trade_wins, raw_wp=raw_wp,
+                ctx=ctx, market=market, trade_side=entry["trade_side"],
+                prob_trade_wins=entry["prob_trade_wins"], raw_wp=raw_wp,
                 passes_live=passes_live, market_dict=market_dict,
-                match_bucket=bucket, live_game=live_game, state=state)
+                match_bucket=bucket, live_game=live_game, state=state,
+                market_type=match.market_type,
+                kelly_override=entry.get("kelly_override"),
+                extra_kelly_inputs=entry.get("extra_kelly_inputs") or {})
             return   # One entry per game per cycle — avoid racing on dedup
 
         # No match found in this cycle — log the best near-miss so we can
@@ -319,6 +323,89 @@ class LiveSportsStrategy(Strategy):
                 min_confidence=min_conf,
                 best_match=best_breakdown,
             )
+
+    def _evaluate_moneyline(self, match, calibrated_wp: float,
+                             active_threshold: float, state: GameState,
+                             market_dict: dict) -> Optional[dict]:
+        """Decide whether to enter the moneyline market. Returns an entry
+        dict or None."""
+        wp_leader_is_home = state.leader_is_home
+        if match.side == "home":
+            trade_side = "YES" if wp_leader_is_home else "NO"
+            prob = calibrated_wp if wp_leader_is_home else (1.0 - calibrated_wp)
+        else:
+            trade_side = "YES" if not wp_leader_is_home else "NO"
+            prob = calibrated_wp if not wp_leader_is_home else (1.0 - calibrated_wp)
+        if prob < active_threshold:
+            return None
+        return {"trade_side": trade_side, "prob_trade_wins": prob}
+
+    def _evaluate_spread(self, match, state: GameState,
+                          market_dict: dict) -> Optional[dict]:
+        """Decide whether to enter the spread market.
+
+        For a line like "Spread: Team (-1.5)":
+        - outcomes[0] = YES = Team covers -1.5 (wins by ≥2)
+        - outcomes[1] = NO  = opponent covers +1.5
+
+        We compute our P(Team covers) from the Gaussian margin model and
+        bet whichever side has the larger positive edge vs Polymarket.
+        Higher edge bar + reduced Kelly applied here because spread bets
+        have materially higher variance than moneylines.
+        """
+        if match.line is None:
+            return None
+        cover_prob = compute_cover_probability(
+            state=state, spread_line=float(match.line), cover_side=match.side)
+        if cover_prob is None:
+            return None
+
+        yes_price = float(market_dict.get("yes_price", 0.5))
+        no_price = float(market_dict.get("no_price", 0.5))
+        yes_edge = cover_prob - yes_price
+        no_edge = (1.0 - cover_prob) - no_price
+
+        spread_min_edge = float(getattr(self._settings, "lg_spread_min_edge", 0.06))
+        # Pick the better side, reject if below the (higher) spread edge bar
+        if yes_edge >= no_edge:
+            if yes_edge < spread_min_edge:
+                return None
+            trade_side = "YES"
+            prob = cover_prob
+        else:
+            if no_edge < spread_min_edge:
+                return None
+            trade_side = "NO"
+            prob = 1.0 - cover_prob
+
+        # Don't trade spread when the game is nearly over — the Gaussian
+        # collapses to deterministic, which means either 0% or 100% "edge"
+        # that's really just knowledge of the outcome.
+        from polybot.sports.margin_model import time_elapsed_fraction
+        if time_elapsed_fraction(state) > 0.95:
+            return None
+
+        kelly_mult_factor = float(
+            getattr(self._settings, "lg_spread_kelly_reduction", 0.5))
+        kelly_override = self.kelly_multiplier * kelly_mult_factor
+
+        log.info("live_sports_spread_candidate",
+                 market=market_dict.get("polymarket_id", "")[:12],
+                 line=round(float(match.line), 2), cover_side=match.side,
+                 cover_prob=round(cover_prob, 4), yes_edge=round(yes_edge, 4),
+                 no_edge=round(no_edge, 4), picked_side=trade_side)
+
+        return {
+            "trade_side": trade_side,
+            "prob_trade_wins": prob,
+            "kelly_override": kelly_override,
+            "extra_kelly_inputs": {
+                "spread_line": float(match.line),
+                "cover_side": match.side,
+                "cover_prob": round(cover_prob, 4),
+                "market_type": "spread",
+            },
+        }
 
     async def _entry_gate_ok(self, ctx: TradingContext, market: PolymarketMarket,
                                trade_side: str, prob_trade_wins: float,
@@ -354,8 +441,19 @@ class LiveSportsStrategy(Strategy):
     async def _enter(self, ctx: TradingContext, market: PolymarketMarket,
                       trade_side: str, prob_trade_wins: float, raw_wp: float,
                       passes_live: bool, market_dict: dict,
-                      match_bucket: str, live_game: LiveGame, state: GameState) -> None:
-        """Submit an entry order (maker-first via executor)."""
+                      match_bucket: str, live_game: LiveGame, state: GameState,
+                      market_type: str = "moneyline",
+                      kelly_override: Optional[float] = None,
+                      extra_kelly_inputs: Optional[dict] = None) -> None:
+        """Submit an entry order (maker-first via executor).
+
+        kelly_override: if provided, use this instead of self.kelly_multiplier.
+            Set by spread trading path to a reduced Kelly reflecting higher
+            variance in margin-based outcomes.
+        extra_kelly_inputs: additional kv pairs to persist into kelly_inputs
+            (e.g., spread_line, cover_side, cover_prob) so the outcome
+            recorder can tag the trade for later analysis.
+        """
         # Upsert market row
         market_id = await ctx.db.fetchval(
             """INSERT INTO markets (polymarket_id, question, category, resolution_time,
@@ -379,10 +477,11 @@ class LiveSportsStrategy(Strategy):
         edge = prob_trade_wins - poly_price
         # Kelly approximation: f* ≈ edge / odds for binary bets
         kelly_fraction = edge / (1.0 - poly_price) if poly_price < 1.0 else 0.0
+        effective_kelly_mult = kelly_override if kelly_override is not None else self.kelly_multiplier
         size = compute_position_size(
             bankroll=bankroll,
             kelly_fraction=kelly_fraction,
-            kelly_mult=self.kelly_multiplier,
+            kelly_mult=effective_kelly_mult,
             confidence_mult=1.0,
             max_single_pct=self.max_single_pct,
             min_trade_size=float(getattr(self._settings, "min_trade_size", 1.0)))
@@ -397,25 +496,32 @@ class LiveSportsStrategy(Strategy):
 
         log.info("live_sports_entry",
                  market=market.polymarket_id, side=trade_side, size=round(size, 2),
-                 edge=round(edge, 4), calibrated_wp=round(prob_trade_wins, 4),
+                 edge=round(edge, 4), probability=round(prob_trade_wins, 4),
                  raw_wp=round(raw_wp, 4), passes_live_threshold=passes_live,
-                 sport=state.sport, bucket=match_bucket)
+                 sport=state.sport, bucket=match_bucket,
+                 market_type=market_type, kelly_mult=round(effective_kelly_mult, 3))
+
+        kelly_inputs: dict = {
+            "calibrated_wp": round(prob_trade_wins, 4),
+            "raw_wp": round(raw_wp, 4),
+            "market_price": round(poly_price, 4),
+            "edge": round(edge, 4),
+            "kelly_fraction": round(kelly_fraction, 4),
+            "kelly_mult": round(effective_kelly_mult, 4),
+            "sport": state.sport,
+            "game_state_bucket": match_bucket,
+            "passes_live_threshold": passes_live,
+            "market_type": market_type,
+        }
+        if extra_kelly_inputs:
+            kelly_inputs.update(extra_kelly_inputs)
 
         async with ctx.portfolio_lock:
             await ctx.executor.place_order(
                 token_id=token_id, side=trade_side,
                 size_usd=size, price=poly_price,
                 market_id=market_id, analysis_id=None, strategy=self.name,
-                kelly_inputs={
-                    "calibrated_wp": round(prob_trade_wins, 4),
-                    "raw_wp": round(raw_wp, 4),
-                    "market_price": round(poly_price, 4),
-                    "edge": round(edge, 4),
-                    "kelly_fraction": round(kelly_fraction, 4),
-                    "sport": state.sport,
-                    "game_state_bucket": match_bucket,
-                    "passes_live_threshold": passes_live,
-                },
+                kelly_inputs=kelly_inputs,
                 post_only=True)    # maker-first
 
     async def _check_exits(self, ctx: TradingContext) -> None:
