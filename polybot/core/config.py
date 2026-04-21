@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     lg_emergency_exit_wp: float = 0.70         # exit if calibrated WP drops below
     lg_max_hold_hours: float = 6.0             # hard time stop
 
+    # Spread-market trading (higher variance than moneyline; conservative defaults)
+    lg_spread_min_edge: float = 0.06           # higher edge bar than moneyline's 0.04
+    lg_spread_kelly_reduction: float = 0.50    # multiply base Kelly by this for spread trades
+
     # Online calibrator (spec §5 Loop 2)
     sports_calibrator_min_obs: int = 30
     sports_calibrator_fallback_shrinkage: float = 0.10
