@@ -268,35 +268,81 @@ def _time_proximity_score(game: LiveGame, market: PolymarketMarket,
     return 0.0
 
 
+def _team_search_terms(raw: str, sport: str) -> list[str]:
+    """Return candidate strings to search for in the market question for
+    a given raw ESPN team name.
+
+    Polymarket uses short forms ('Raptors vs. Cavaliers') while ESPN sends
+    long forms ('Toronto Raptors'). The canonical team key bridges both.
+
+    Returns the canonical key first (highest-value), then the raw lowercase
+    name as fallback. Both are appended to preserve matching for teams
+    without a canonical mapping (e.g., soccer clubs in leagues without
+    explicit aliases).
+    """
+    terms: list[str] = []
+    canonical = normalize_team_name(raw, sport) if raw else None
+    if canonical:
+        terms.append(canonical.replace("_", " "))   # "trail_blazers" → "trail blazers"
+    raw_lower = (raw or "").lower().strip()
+    if raw_lower and raw_lower not in terms:
+        terms.append(raw_lower)
+    return terms
+
+
+def _team_appears_in(question_lower: str, terms: list[str]) -> bool:
+    return any(t and t in question_lower for t in terms)
+
+
 def _team_name_score(game: LiveGame, market: PolymarketMarket) -> float:
-    """Score based on whether both teams appear in the market question."""
+    """Score based on whether both teams appear in the market question.
+
+    Uses normalized canonical names so short Polymarket questions like
+    'Raptors vs. Cavaliers' match ESPN long-form 'Toronto Raptors' and
+    'Cleveland Cavaliers'. Falls through to raw-name substring matching
+    when canonical isn't available.
+    """
     question_lower = (market.question or "").lower()
-    home = (game.home_team or "").lower()
-    away = (game.away_team or "").lower()
+    home_terms = _team_search_terms(game.home_team or "", game.sport)
+    away_terms = _team_search_terms(game.away_team or "", game.sport)
     score = 0.0
-    if home and home in question_lower:
+    if _team_appears_in(question_lower, home_terms):
         score += 0.5
-    if away and away in question_lower:
+    if _team_appears_in(question_lower, away_terms):
         score += 0.5
     return score
 
 
+def _find_earliest_index(question_lower: str, terms: list[str]) -> int:
+    """Return the earliest index at which any of ``terms`` appears,
+    or -1 if none match."""
+    best = -1
+    for t in terms:
+        if not t:
+            continue
+        idx = question_lower.find(t)
+        if idx >= 0 and (best == -1 or idx < best):
+            best = idx
+    return best
+
+
 def _determine_side(game: LiveGame, market: PolymarketMarket,
                     market_type: MarketType) -> Optional[Literal["home", "away", "over", "under"]]:
-    """Figure out which side this market is asking about."""
+    """Figure out which side this market is asking about.
+
+    Returns 'home' if game.home_team appears first in the question, 'away'
+    if game.away_team appears first. Uses normalization-aware matching so
+    Polymarket short forms are discovered alongside ESPN long forms.
+    """
     q = (market.question or "").lower()
-    home = (game.home_team or "").lower()
-    away = (game.away_team or "").lower()
     if market_type == "total":
         if "over" in q:
             return "over"
         if "under" in q:
             return "under"
         return None
-    # moneyline / spread — which team is the market about?
-    # Take the first team mentioned in the question
-    home_idx = q.find(home) if home else -1
-    away_idx = q.find(away) if away else -1
+    home_idx = _find_earliest_index(q, _team_search_terms(game.home_team or "", game.sport))
+    away_idx = _find_earliest_index(q, _team_search_terms(game.away_team or "", game.sport))
     if home_idx == -1 and away_idx == -1:
         return None
     if away_idx == -1:
@@ -329,7 +375,13 @@ def compute_match_confidence(game: LiveGame,
     time_score = _time_proximity_score(game, market)
     slug_present = bool((market.slug or "").strip())
 
-    if slug_present:
+    # Reweight when slug adds no signal. This covers BOTH:
+    #  (a) Gamma /markets returns empty slug (observed for most markets)
+    #  (b) Gamma /events returns abbreviated slugs like "nba-tor-cle-2026"
+    #      that don't contain long-form team names
+    # In both cases the slug doesn't help, so we redistribute its 0.25
+    # weight to the name signal (already the dominant invariant).
+    if slug_present and slug_score > 0:
         w_name, w_slug, w_time = 0.55, 0.25, 0.20
     else:
         w_name, w_slug, w_time = 0.80, 0.0, 0.20

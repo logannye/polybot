@@ -105,11 +105,13 @@ def test_empty_slug_requires_proximity_window():
 
 # ---- slug-present path (backward-compatible) ----
 
-def test_slug_present_uses_original_weights():
+def test_slug_present_with_team_names_uses_original_weights():
+    """When slug CONTAINS the long-form team names (slug_score > 0), we
+    keep the original 0.55 weight."""
     game = _game()
     market = _market(
         question="Los Angeles Dodgers vs. New York Yankees",
-        slug="dodgers-vs-yankees-2026",   # slug populated
+        slug="los angeles dodgers vs new york yankees",   # has team names
         hours_from_now=3.0,
     )
     _, breakdown = compute_match_confidence(game, market)
