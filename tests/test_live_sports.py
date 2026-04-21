@@ -99,7 +99,11 @@ def _mock_ctx(scanner_markets=None, existing_trades=0):
                                   if "SELECT COUNT(*)" in str(args[0]) else 1)
     ctx.db.fetchrow = AsyncMock(return_value={"bankroll": 2000.0, "total_deployed": 0.0})
     ctx.db.fetch = AsyncMock(return_value=[])   # no open trades
+    # Use a concrete class to ensure hasattr() for fetch_live_sports_events
+    # evaluates truthy (otherwise MagicMock auto-creates it and strategy
+    # uses that path — which is what we want here).
     ctx.scanner = AsyncMock()
+    ctx.scanner.fetch_live_sports_events = AsyncMock(return_value=scanner_markets or [])
     ctx.scanner.fetch_sports_markets = AsyncMock(return_value=scanner_markets or [])
     ctx.executor = AsyncMock()
     ctx.portfolio_lock = asyncio.Lock()

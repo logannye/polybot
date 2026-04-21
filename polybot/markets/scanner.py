@@ -13,6 +13,79 @@ CATEGORY_TAGS = {"politics", "geopolitics", "crypto", "sports", "finance",
                  "business", "tech", "culture", "weather", "world"}
 
 
+def _maybe_json_list(value: Any) -> list:
+    """Polymarket's Gamma API serializes several list fields as JSON strings
+    (clobTokenIds, outcomes, outcomePrices). Parse defensively."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except (ValueError, TypeError):
+            return []
+    return []
+
+
+def _parse_isoformat(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _flatten_event_to_markets(event: dict) -> list[dict[str, Any]]:
+    """Convert a Gamma event dict into a list of market dicts matching the
+    schema Live Sports v10 expects.
+
+    Filters applied:
+    - market.active == True
+    - market.closed == False
+    - market.acceptingOrders != False  (permits None for historical records)
+    - exactly 2 outcomes, 2 prices, 2 token IDs
+    """
+    event_slug = event.get("slug", "") or ""
+    out: list[dict[str, Any]] = []
+    for m in (event.get("markets") or []):
+        if not m.get("active") or m.get("closed"):
+            continue
+        if m.get("acceptingOrders") is False:
+            continue
+        outcomes = _maybe_json_list(m.get("outcomes"))
+        prices = _maybe_json_list(m.get("outcomePrices"))
+        token_ids = _maybe_json_list(m.get("clobTokenIds"))
+        if len(outcomes) != 2 or len(prices) != 2 or len(token_ids) != 2:
+            continue
+        try:
+            yes_price = float(prices[0])
+            no_price = float(prices[1])
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "polymarket_id": m.get("conditionId") or m.get("id") or "",
+            "question": m.get("question", "") or "",
+            # Event-level slug (carries team abbrevs + date) rather than
+            # market-level slug (often empty or overly generic).
+            "slug": event_slug,
+            "resolution_time": _parse_isoformat(m.get("endDate")),
+            "category": "sports",
+            "outcomes": outcomes,
+            "yes_token_id": str(token_ids[0]),
+            "no_token_id": str(token_ids[1]),
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "volume_24h": float(m.get("volume") or 0.0),
+            "book_depth": float(m.get("liquidity") or 0.0),
+        })
+    return out
+
+
 def parse_gamma_market(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Parse a market from the Gamma API (active-only, server-side filtered)."""
     if not raw.get("active") or raw.get("closed"):
@@ -252,9 +325,78 @@ class PolymarketScanner:
 
         Thin wrapper over fetch_markets() + category filter. Avoids the
         strategy having to scan all 3000+ Polymarket markets every cycle.
+
+        NOTE (2026-04-20): Gamma /markets?active=true does NOT return live
+        in-play game moneylines. Use fetch_live_sports_events() for those.
+        This method kept for backward compat + non-live (futures) markets.
         """
         all_markets = await self.fetch_markets()
         return [m for m in all_markets if m.get("category") == "sports"]
+
+    # Mapping of ESPN sport keys → Gamma tag_slug for the /events endpoint.
+    # `la-liga` is Gamma's slug format (hyphenated) vs ESPN's `laliga`.
+    _SPORT_TAG_SLUGS: dict[str, str] = {
+        "mlb": "mlb",
+        "nba": "nba",
+        "nhl": "nhl",
+        "ncaab": "ncaab",
+        "ucl": "ucl",
+        "epl": "epl",
+        "laliga": "la-liga",
+        "bundesliga": "bundesliga",
+        "mls": "mls",
+    }
+
+    async def fetch_live_sports_events(
+        self, sports: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch live-game moneyline markets via Gamma's /events endpoint.
+
+        Polymarket's per-game live markets are exposed as EVENTS tagged by
+        sport (tag_slug=mlb/nba/nhl/...), not as top-level markets. Each
+        event contains one or more markets (moneyline + spread + total).
+        This method flattens events → one dict per market with the
+        canonical schema Live Sports expects:
+            polymarket_id, question, slug, resolution_time, category,
+            yes_token_id, no_token_id, yes_price, no_price,
+            outcomes, volume_24h, book_depth
+
+        Event-level slug (e.g. `nba-tor-cle-2026-04-20`) is used because
+        it is populated (Gamma's /markets slugs are empty in practice)
+        AND carries team abbreviations + game date.
+
+        Markets with outcomes other than 2 teams, or with acceptingOrders
+        False, are skipped.
+        """
+        if self._session is None or self._session.closed:
+            log.warning("scanner_session_recreated")
+            self._session = aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {self._api_key}",
+                         "User-Agent": "polybot/2.1"})
+        selected_sports = sports or list(self._SPORT_TAG_SLUGS.keys())
+        results: list[dict[str, Any]] = []
+        for sport in selected_sports:
+            tag_slug = self._SPORT_TAG_SLUGS.get(sport, sport)
+            try:
+                status, data = await self._get(
+                    f"{GAMMA_BASE_URL}/events",
+                    {"active": "true", "closed": "false",
+                     "tag_slug": tag_slug, "limit": 100,
+                     "order": "endDate", "ascending": "true"})
+            except aiohttp.ClientError as e:
+                log.error("gamma_events_client_error",
+                          tag_slug=tag_slug, error=str(e))
+                continue
+            if status != 200 or not isinstance(data, list):
+                log.warning("gamma_events_bad_response",
+                            tag_slug=tag_slug, status=status)
+                continue
+            for event in data:
+                results.extend(_flatten_event_to_markets(event))
+        log.info("fetched_live_sports_events",
+                 sports_requested=len(selected_sports),
+                 markets_returned=len(results))
+        return results
 
     async def fetch_order_book(self, token_id: str) -> dict[str, Any]:
         status, data = await self._get(f"{self._base_url}/book", {"token_id": token_id})

@@ -162,11 +162,16 @@ class LiveSportsStrategy(Strategy):
             return
 
         # Step 4 — for each eligible game, find matching Polymarket markets
-        # Fetch Polymarket candidates once per cycle
+        # via /events?tag_slug={sport} which carries live-game moneylines.
+        # Fall back to the /markets-based endpoint only if the new method
+        # isn't available (shouldn't happen post-merge).
         try:
-            markets = await ctx.scanner.fetch_sports_markets()
+            if hasattr(ctx.scanner, "fetch_live_sports_events"):
+                markets = await ctx.scanner.fetch_live_sports_events()
+            else:
+                markets = await ctx.scanner.fetch_sports_markets()
         except AttributeError:
-            log.warning("live_sports_scanner_missing_fetch_sports_markets")
+            log.warning("live_sports_scanner_missing_sports_endpoint")
             return
 
         # Visibility into sports-market supply — how many markets in the
