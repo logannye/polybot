@@ -50,7 +50,7 @@ async def refit_kelly_scalers(
         try:
             outcomes = await db.fetch(
                 """SELECT pnl, predicted_prob FROM trade_outcome
-                   WHERE strategy = $1 AND closed_at > NOW() - $2""",
+                   WHERE strategy = $1 AND closed_at > NOW() - $2::interval""",
                 strategy, window,
             )
             scaler, avg_pred = compute_from_outcomes(
