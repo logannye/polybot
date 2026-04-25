@@ -150,7 +150,7 @@ class LiveSportsStrategy(Strategy):
         rows = await db.fetch(
             """SELECT sport, bucket_key, predicted_prob, realized_outcome
                FROM sport_calibration
-               WHERE observed_at > NOW() - $1
+               WHERE observed_at > NOW() - $1::interval
                ORDER BY observed_at ASC""",
             timedelta(days=window_days),
         )
