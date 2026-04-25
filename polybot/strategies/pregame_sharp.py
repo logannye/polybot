@@ -53,12 +53,17 @@ class PregameSharpStrategy(Strategy):
         if not sports:
             return
         all_pregames: list[tuple[dict, str]] = []
+        # Per-sport raw counts so the cycle log distinguishes "no pregame
+        # events at all" from "events fetched but none in the 15-60 min
+        # window". Critical for debugging off-hours.
+        per_sport_fetched: dict[str, int] = {}
         for sport in sports:
             try:
                 events = await self._espn.fetch_pregame_events(sport)
             except Exception as e:
                 log.warning("pregame_espn_fetch_error", sport=sport, error=str(e))
                 continue
+            per_sport_fetched[sport] = len(events)
             for ev in events:
                 start = ev.get("start_time")
                 if not isinstance(start, datetime):
@@ -69,7 +74,8 @@ class PregameSharpStrategy(Strategy):
 
         log.info("pregame_cycle",
                  events_in_window=len(all_pregames),
-                 sports_checked=len(sports))
+                 sports_checked=len(sports),
+                 per_sport_fetched=per_sport_fetched)
 
         if not all_pregames:
             return

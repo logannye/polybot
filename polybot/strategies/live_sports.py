@@ -190,7 +190,15 @@ class LiveSportsStrategy(Strategy):
         # Step 3 — filter to games we can potentially trade
         eligible_games = [g for g in all_games if g.get("status") == "in_progress"]
         if not eligible_games:
-            log.info("live_sports_no_live_games")
+            # Surface status breakdown so "no live games" is distinguishable
+            # from "ESPN returned nothing" — the former is normal off-hours,
+            # the latter signals a fetch problem worth investigating.
+            status_counts: dict[str, int] = {}
+            for g in all_games:
+                status_counts[g.get("status", "unknown")] = (
+                    status_counts.get(g.get("status", "unknown"), 0) + 1)
+            log.info("live_sports_no_live_games",
+                     total_fetched=len(all_games), status_counts=status_counts)
             return
 
         # Step 4 — for each eligible game, find matching Polymarket markets

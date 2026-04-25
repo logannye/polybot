@@ -142,7 +142,11 @@ class Settings(BaseSettings):
     pg_min_minutes_to_start: int = 15
     pg_max_minutes_to_start: int = 60
     pg_max_bpi_staleness_s: float = 21600.0    # 6h
-    pg_sports: str = "mlb,nba,nhl,ncaab"        # soccer pregame predictor often empty
+    # Mirror lg_sports — pregame fetch is cheap and parse_pregame_summary
+    # returns None gracefully when ESPN's predictor is empty (common for
+    # soccer). Restricting to US sports earlier missed European weekend
+    # fixtures that are in the live_sports universe.
+    pg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
 
     # Online calibrator (spec §5 Loop 2)
     sports_calibrator_min_obs: int = 30
