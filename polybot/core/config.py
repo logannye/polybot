@@ -98,7 +98,8 @@ class Settings(BaseSettings):
     lg_min_edge: float = 0.04                  # min 4% edge vs Polymarket price
     lg_min_win_prob: float = 0.85              # LIVE only: trade when calibrated WP ≥ this. Hardcoded floor = 0.80 (cannot be bypassed by config).
     lg_min_win_prob_dryrun: float = 0.65       # DRY-RUN only: looser gate for data collection. Floor = 0.55.
-    lg_min_book_depth: float = 10000.0         # min $10K liquidity at entry
+    lg_min_book_depth: float = 10000.0         # min $10K liquidity at entry (live)
+    lg_min_book_depth_dryrun: float = 1000.0   # DRY-RUN only: looser gate for flow observation. Floor = $500.
     lg_max_concurrent: int = 6                 # max concurrent live_sports positions
     lg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
     lg_max_staleness_s: float = 60.0           # reject data older than 60s
