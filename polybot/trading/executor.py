@@ -55,6 +55,17 @@ class OrderExecutor:
                         log.info("dryrun_spread_reject", token_id=token_id[:20],
                                  spread=round(summary["spread"], 4), max=max_spread,
                                  strategy=strategy)
+                        # Observation log — what the trade WOULD have looked like
+                        # if the spread gate weren't blocking. Lets us measure
+                        # would-be trade flow during dry-run without dropping the
+                        # post-mortem safeguard.
+                        log.info("dryrun_observation",
+                                 strategy=strategy, side=side, size_usd=size_usd,
+                                 intended_price=price, best_bid=summary.get("best_bid"),
+                                 best_ask=summary.get("best_ask"),
+                                 spread=round(summary["spread"], 4),
+                                 reject_reason="spread_too_wide",
+                                 kelly_inputs=kelly_inputs)
                         return None
                     # Fill at best ask (what you'd actually pay), with simulated fee
                     if side in ("YES", "NO"):
@@ -64,6 +75,10 @@ class OrderExecutor:
                         shares = self._wallet.compute_shares(size_usd, effective_price)
                 else:
                     log.info("dryrun_no_book", token_id=token_id[:20], strategy=strategy)
+                    log.info("dryrun_observation",
+                             strategy=strategy, side=side, size_usd=size_usd,
+                             intended_price=price, reject_reason="no_book",
+                             kelly_inputs=kelly_inputs)
                     return None
             except Exception as e:
                 log.debug("dryrun_book_check_failed", error=str(e)[:60])

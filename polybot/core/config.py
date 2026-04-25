@@ -117,6 +117,16 @@ class Settings(BaseSettings):
     lg_total_min_edge: float = 0.05            # between moneyline's 0.04 and spread's 0.06
     lg_total_kelly_reduction: float = 0.50     # multiply base Kelly by this for total trades
 
+    # Snipe dry-run relaxations (v11.0d) — live caps unchanged.
+    # The 12h spec ceiling is structurally empty in current Polymarket
+    # (~0 markets at p≥0.96 with t≤12h); dry-run window opens to 7d so
+    # the observation pipeline sees what the strategy would do.
+    snipe_t0_max_hours: float = 12.0           # live ceiling (spec §4)
+    snipe_t1_max_hours: float = 8.0
+    snipe_t0_max_hours_dryrun: float = 168.0   # 7d for observation
+    snipe_t1_max_hours_dryrun: float = 168.0
+    snipe_min_book_depth_dryrun: float = 500.0  # parity with live_sports/pregame dry-run floor
+
     # Pregame Sharp-Line (v11.0b)
     pg_enabled: bool = True
     pg_interval_seconds: float = 60.0
