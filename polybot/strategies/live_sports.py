@@ -37,6 +37,7 @@ from polybot.markets.sports_matcher import (
     compute_match_confidence, classify_market_type,
 )
 from polybot.sports.margin_model import compute_cover_probability
+from polybot.sports.totals_model import compute_total_probability
 from polybot.trading.kelly import compute_position_size
 from polybot.learning.trade_outcome import record_outcome as record_trade_outcome
 
@@ -286,8 +287,11 @@ class LiveSportsStrategy(Strategy):
             elif match.market_type == "spread":
                 entry = self._evaluate_spread(
                     match=match, state=state, market_dict=market_dict)
+            elif match.market_type == "total":
+                entry = self._evaluate_total(
+                    match=match, state=state, market_dict=market_dict)
             else:
-                continue   # total (O/U) markets deferred per spec
+                continue
 
             if entry is None:
                 continue
@@ -404,6 +408,75 @@ class LiveSportsStrategy(Strategy):
                 "cover_side": match.side,
                 "cover_prob": round(cover_prob, 4),
                 "market_type": "spread",
+            },
+        }
+
+    def _evaluate_total(self, match, state: GameState,
+                         market_dict: dict) -> Optional[dict]:
+        """Decide whether to enter the total (O/U) market.
+
+        For a line like "Total: 8.5":
+        - outcomes[0] = YES = Over (final combined > 8.5)
+        - outcomes[1] = NO  = Under (final combined < 8.5)
+
+        Compute P(over) from the Gaussian totals model and pick whichever
+        side has the larger positive edge vs Polymarket. Higher edge bar
+        and reduced Kelly applied — totals have lower per-period variance
+        than spreads but the line is set by the same retail flow that
+        misprices spread markets.
+        """
+        if match.line is None:
+            return None
+        # Matcher returns side ∈ {"over","under"} for total markets, but the
+        # actual side selection is driven by edge comparison below.
+        p_over = compute_total_probability(
+            state=state, line=float(match.line), side="over")
+        if p_over is None:
+            return None
+
+        yes_price = float(market_dict.get("yes_price", 0.5))
+        no_price = float(market_dict.get("no_price", 0.5))
+        # Convention: YES = over, NO = under
+        yes_edge = p_over - yes_price
+        no_edge = (1.0 - p_over) - no_price
+
+        total_min_edge = float(getattr(self._settings, "lg_total_min_edge", 0.05))
+        if yes_edge >= no_edge:
+            if yes_edge < total_min_edge:
+                return None
+            trade_side = "YES"
+            prob = p_over
+        else:
+            if no_edge < total_min_edge:
+                return None
+            trade_side = "NO"
+            prob = 1.0 - p_over
+
+        # Don't trade total when the game is nearly over — the Gaussian
+        # collapses to deterministic, which means either 0% or 100% "edge"
+        # that's really just knowledge of the outcome.
+        from polybot.sports.margin_model import time_elapsed_fraction
+        if time_elapsed_fraction(state) > 0.95:
+            return None
+
+        kelly_mult_factor = float(
+            getattr(self._settings, "lg_total_kelly_reduction", 0.5))
+        kelly_override = self.kelly_multiplier * kelly_mult_factor
+
+        log.info("live_sports_total_candidate",
+                 market=market_dict.get("polymarket_id", "")[:12],
+                 line=round(float(match.line), 2),
+                 p_over=round(p_over, 4), yes_edge=round(yes_edge, 4),
+                 no_edge=round(no_edge, 4), picked_side=trade_side)
+
+        return {
+            "trade_side": trade_side,
+            "prob_trade_wins": prob,
+            "kelly_override": kelly_override,
+            "extra_kelly_inputs": {
+                "total_line": float(match.line),
+                "p_over": round(p_over, 4),
+                "market_type": "total",
             },
         }
 

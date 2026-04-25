@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     lg_spread_min_edge: float = 0.06           # higher edge bar than moneyline's 0.04
     lg_spread_kelly_reduction: float = 0.50    # multiply base Kelly by this for spread trades
 
+    # Totals (O/U) market trading — lower per-period variance than spreads but
+    # set by the same retail flow that misprices spreads, so still half-Kelly.
+    lg_total_min_edge: float = 0.05            # between moneyline's 0.04 and spread's 0.06
+    lg_total_kelly_reduction: float = 0.50     # multiply base Kelly by this for total trades
+
     # Online calibrator (spec §5 Loop 2)
     sports_calibrator_min_obs: int = 30
     sports_calibrator_fallback_shrinkage: float = 0.10
