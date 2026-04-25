@@ -493,12 +493,17 @@ class LiveSportsStrategy(Strategy):
                       market=market.polymarket_id, edge=round(edge, 4))
             return False
 
-        # 2. book depth
-        min_depth = float(getattr(self._settings, "lg_min_book_depth", 10000.0))
+        # 2. book depth — relaxed in dry-run for flow observation; floor at $500
+        if getattr(self._settings, "dry_run", False):
+            min_depth = max(500.0, float(getattr(
+                self._settings, "lg_min_book_depth_dryrun", 1000.0)))
+        else:
+            min_depth = float(getattr(self._settings, "lg_min_book_depth", 10000.0))
         book_depth = float(market_dict.get("book_depth", 0))
         if book_depth < min_depth:
             log.debug("live_sports_insufficient_depth",
-                      market=market.polymarket_id, depth=book_depth)
+                      market=market.polymarket_id, depth=book_depth,
+                      min_depth=min_depth)
             return False
 
         # 3. no existing position in this market
