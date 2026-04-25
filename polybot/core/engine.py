@@ -454,23 +454,28 @@ class Engine:
 
     async def _hourly_learning(self):
         """Hourly learning cycle: recompute adaptive parameters."""
-        if not self._trade_learner:
-            return
+        if self._trade_learner:
+            try:
+                await self._trade_learner.compute_optimal_thresholds()
+            except Exception as e:
+                log.error("hourly_learning_thresholds_error", error=str(e))
 
-        try:
-            await self._trade_learner.compute_optimal_thresholds()
-        except Exception as e:
-            log.error("hourly_learning_thresholds_error", error=str(e))
+            try:
+                await self._trade_learner.compute_snipe_params()
+            except Exception as e:
+                log.error("hourly_learning_snipe_error", error=str(e))
 
-        try:
-            await self._trade_learner.compute_snipe_params()
-        except Exception as e:
-            log.error("hourly_learning_snipe_error", error=str(e))
+            try:
+                await self._hourly_kelly_edge_adjust()
+            except Exception as e:
+                log.error("hourly_kelly_edge_error", error=str(e))
 
+        # v11.0c — orchestrate Kelly scaler + edge decay + calibrator refit
         try:
-            await self._hourly_kelly_edge_adjust()
+            from polybot.learning.learning_cycle import run_hourly_cycle
+            await run_hourly_cycle(self._db, self._strategies)
         except Exception as e:
-            log.error("hourly_kelly_edge_error", error=str(e))
+            log.error("hourly_learning_v11c_error", error=str(e))
 
         log.info("hourly_learning_complete")
 

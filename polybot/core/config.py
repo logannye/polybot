@@ -117,6 +117,23 @@ class Settings(BaseSettings):
     lg_total_min_edge: float = 0.05            # between moneyline's 0.04 and spread's 0.06
     lg_total_kelly_reduction: float = 0.50     # multiply base Kelly by this for total trades
 
+    # Pregame Sharp-Line (v11.0b)
+    pg_enabled: bool = True
+    pg_interval_seconds: float = 60.0
+    pg_kelly_mult: float = 0.40
+    pg_max_single_pct: float = 0.12
+    pg_min_edge: float = 0.04
+    pg_min_book_depth: float = 5000.0
+    pg_min_book_depth_dryrun: float = 1000.0   # DRY-RUN only relaxation. Floor $500.
+    pg_matcher_min_confidence: float = 0.95
+    pg_min_calibrated_wp: float = 0.60
+    pg_emergency_exit_wp: float = 0.50
+    pg_take_profit_price: float = 0.95
+    pg_min_minutes_to_start: int = 15
+    pg_max_minutes_to_start: int = 60
+    pg_max_bpi_staleness_s: float = 21600.0    # 6h
+    pg_sports: str = "mlb,nba,nhl,ncaab"        # soccer pregame predictor often empty
+
     # Online calibrator (spec §5 Loop 2)
     sports_calibrator_min_obs: int = 30
     sports_calibrator_fallback_shrinkage: float = 0.10
