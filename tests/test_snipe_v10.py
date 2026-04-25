@@ -99,9 +99,15 @@ def _base_settings():
     s.snipe_t0_max_single_pct = 0.10
     s.snipe_t1_max_single_pct = 0.07
     s.snipe_min_book_depth = 2000.0
+    s.snipe_min_book_depth_dryrun = 500.0
     s.snipe_max_concurrent = 3
     s.snipe_t1_min_confidence = 0.85
     s.snipe_min_net_edge = 0.02
+    s.snipe_t0_max_hours = 12.0
+    s.snipe_t1_max_hours = 8.0
+    s.snipe_t0_max_hours_dryrun = 168.0
+    s.snipe_t1_max_hours_dryrun = 168.0
+    s.dry_run = False                   # tests assume live unless explicitly set
     s.min_trade_size = 1.0
     return s
 
@@ -259,6 +265,89 @@ async def test_snipe_disabled_skips():
     markets = [{
         "polymarket_id": "0x1", "yes_price": 0.97,
         "resolution_time": datetime.now(timezone.utc) + timedelta(hours=3),
+    }]
+    strategy = ResolutionSnipeStrategy(settings=s)
+    ctx = _ctx(markets)
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
+
+
+# ---- v11 dry-run window relaxation ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_snipe_dryrun_relaxes_t0_time_window():
+    """Dry-run lifts the 12h ceiling to 168h so observation captures the
+    long-tail markets that dominate current Polymarket structure."""
+    s = _base_settings()
+    s.dry_run = True   # <-- toggles relaxation
+    markets = [{
+        "polymarket_id": "0x" + "a" * 40,
+        "question": "?", "yes_price": 0.97, "no_price": 0.03,
+        "book_depth": 5000.0, "volume_24h": 10000.0,
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=72),  # 3d
+        "category": "politics",
+        "yes_token_id": "tok-yes", "no_token_id": "tok-no",
+    }]
+    strategy = ResolutionSnipeStrategy(settings=s)
+    ctx = _ctx(markets)
+    await strategy.run_once(ctx)
+    # Live would skip (h=72 > 12), dry-run enters
+    ctx.executor.place_order.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_snipe_live_still_enforces_12h_ceiling():
+    """Live mode keeps the conservative spec ceiling — 72h market rejected."""
+    s = _base_settings()
+    s.dry_run = False
+    markets = [{
+        "polymarket_id": "0x" + "b" * 40,
+        "question": "?", "yes_price": 0.97, "no_price": 0.03,
+        "book_depth": 5000.0, "volume_24h": 10000.0,
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=72),
+        "category": "politics",
+        "yes_token_id": "tok-yes", "no_token_id": "tok-no",
+    }]
+    strategy = ResolutionSnipeStrategy(settings=s)
+    ctx = _ctx(markets)
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_snipe_dryrun_relaxes_book_depth_floor():
+    """Dry-run accepts \\$500 minimum book depth so observation isn't
+    blocked on books below the live \\$2K floor."""
+    s = _base_settings()
+    s.dry_run = True
+    markets = [{
+        "polymarket_id": "0x" + "c" * 40,
+        "question": "?", "yes_price": 0.97, "no_price": 0.03,
+        "book_depth": 800.0,  # below live $2K, above dry-run $500
+        "volume_24h": 5000.0,
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=4),
+        "category": "politics",
+        "yes_token_id": "tok-yes", "no_token_id": "tok-no",
+    }]
+    strategy = ResolutionSnipeStrategy(settings=s)
+    ctx = _ctx(markets)
+    await strategy.run_once(ctx)
+    ctx.executor.place_order.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_snipe_dryrun_book_depth_floor_still_applies():
+    """\\$500 floor is hard — \\$200 ghost-book market still rejected in dry-run."""
+    s = _base_settings()
+    s.dry_run = True
+    markets = [{
+        "polymarket_id": "0x" + "d" * 40,
+        "question": "?", "yes_price": 0.97, "no_price": 0.03,
+        "book_depth": 200.0,   # below dry-run floor
+        "volume_24h": 5000.0,
+        "resolution_time": datetime.now(timezone.utc) + timedelta(hours=4),
+        "category": "politics",
+        "yes_token_id": "tok-yes", "no_token_id": "tok-no",
     }]
     strategy = ResolutionSnipeStrategy(settings=s)
     ctx = _ctx(markets)

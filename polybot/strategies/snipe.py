@@ -98,11 +98,36 @@ class ResolutionSnipeStrategy(Strategy):
         self._t1_kelly = float(getattr(settings, "snipe_t1_kelly_mult", 0.30))
         self._t0_max_single = float(getattr(settings, "snipe_t0_max_single_pct", 0.10))
         self._t1_max_single = float(getattr(settings, "snipe_t1_max_single_pct", 0.07))
-        self._min_book_depth = float(getattr(settings, "snipe_min_book_depth", 2000.0))
         self._max_concurrent = int(getattr(settings, "snipe_max_concurrent", 3))
         # Backwards-compat for Strategy attributes — use T0 as "nominal"
         self.kelly_multiplier = self._t0_kelly
         self.max_single_pct = self._t0_max_single
+
+    @property
+    def _min_book_depth(self) -> float:
+        """Live: \\$2K. Dry-run: configurable lower (default \\$500), so the
+        observation pipeline sees what fills would look like on tighter
+        books. Floor: \\$500 to filter ghost-book noise."""
+        if getattr(self._settings, "dry_run", False):
+            return max(500.0, float(getattr(
+                self._settings, "snipe_min_book_depth_dryrun", 500.0)))
+        return float(getattr(self._settings, "snipe_min_book_depth", 2000.0))
+
+    @property
+    def _t0_max_hours(self) -> float:
+        """Live: 12h per spec §4. Dry-run: configurable longer window
+        (default 168h / 7d) so observation captures the long-tail
+        near-certain markets that dominate current Polymarket structure.
+        Live capital still bounded by the conservative spec ceiling."""
+        if getattr(self._settings, "dry_run", False):
+            return float(getattr(self._settings, "snipe_t0_max_hours_dryrun", 168.0))
+        return float(getattr(self._settings, "snipe_t0_max_hours", 12.0))
+
+    @property
+    def _t1_max_hours(self) -> float:
+        if getattr(self._settings, "dry_run", False):
+            return float(getattr(self._settings, "snipe_t1_max_hours_dryrun", 168.0))
+        return float(getattr(self._settings, "snipe_t1_max_hours", 8.0))
 
     async def run_once(self, ctx: TradingContext) -> None:
         # Enabled?
@@ -126,17 +151,33 @@ class ResolutionSnipeStrategy(Strategy):
             return
 
         now = datetime.now(timezone.utc)
+        # Telemetry counters per cycle
+        n_no_resolution = 0
+        n_past_resolution = 0
+        n_classify_none = 0
+        n_depth_below = 0
+        n_dup = 0
+        n_t1_llm_rejected = 0
+        n_candidates_t0 = 0
+        n_candidates_t1 = 0
+        n_entered = 0
         for market in all_markets:
             resolution_time = market.get("resolution_time")
             if not resolution_time:
+                n_no_resolution += 1
                 continue
             hours_remaining = (resolution_time - now).total_seconds() / 3600.0
             if hours_remaining <= 0:
+                n_past_resolution += 1
                 continue
 
             yes_price = float(market.get("yes_price") or 0.5)
-            candidate = classify_snipe(yes_price, hours_remaining)
+            candidate = classify_snipe(
+                yes_price, hours_remaining,
+                t0_max_hours=self._t0_max_hours,
+                t1_max_hours=self._t1_max_hours)
             if candidate is None:
+                n_classify_none += 1
                 continue
             # Fill in the polymarket_id (classify_snipe doesn't see it)
             candidate = SnipeCandidate(
@@ -146,9 +187,14 @@ class ResolutionSnipeStrategy(Strategy):
                 tier=candidate.tier, side=candidate.side,
                 buy_price=candidate.buy_price,
             )
+            if candidate.tier == 0:
+                n_candidates_t0 += 1
+            else:
+                n_candidates_t1 += 1
 
             # Book depth
             if float(market.get("book_depth", 0)) < self._min_book_depth:
+                n_depth_below += 1
                 continue
 
             # Dedup — max_entries_per_market gate
@@ -158,17 +204,29 @@ class ResolutionSnipeStrategy(Strategy):
                 "AND t.status IN ('open', 'filled', 'dry_run')",
                 candidate.polymarket_id)
             if existing and existing > 0:
+                n_dup += 1
                 continue
 
             # T1 requires LLM verification
             if candidate.tier == 1:
                 verified = await self._verify_via_gemini(candidate, market)
                 if not verified:
+                    n_t1_llm_rejected += 1
                     log.debug("snipe_t1_rejected_by_llm",
                               market=candidate.polymarket_id)
                     continue
 
             await self._enter(ctx, market, candidate)
+            n_entered += 1
+
+        log.info("snipe_cycle",
+                 markets_scanned=len(all_markets),
+                 candidates_t0=n_candidates_t0, candidates_t1=n_candidates_t1,
+                 entered=n_entered, depth_below=n_depth_below, dup=n_dup,
+                 t1_llm_rejected=n_t1_llm_rejected,
+                 no_resolution=n_no_resolution, past_resolution=n_past_resolution,
+                 t0_max_hours=self._t0_max_hours,
+                 min_depth=self._min_book_depth)
 
     async def _verify_via_gemini(self, candidate: SnipeCandidate, market: dict) -> bool:
         if self._gemini is None:
