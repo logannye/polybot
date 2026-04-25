@@ -255,3 +255,73 @@ class TestSportURLs:
     def test_soccer_leagues_present(self):
         for league in ["ucl", "epl", "laliga", "bundesliga", "mls"]:
             assert league in SPORT_URLS, f"{league} missing from SPORT_URLS"
+
+
+class TestPregameParsers:
+    """Coverage for v11.0b parsers."""
+
+    def test_pregame_scoreboard_extracts_scheduled_games(self):
+        from polybot.sports.espn_client import parse_espn_pregame_scoreboard
+        data = {"events": [
+            {"id": "1", "name": "A vs B", "shortName": "A @ B",
+             "date": "2026-04-25T19:30:00Z",
+             "status": {"type": {"name": "STATUS_SCHEDULED"}},
+             "competitions": [{"competitors": [
+                 {"homeAway": "home", "team": {"displayName": "A Team"}},
+                 {"homeAway": "away", "team": {"displayName": "B Team"}},
+             ]}]},
+            {"id": "2", "name": "C vs D",
+             "status": {"type": {"name": "STATUS_IN_PROGRESS"}},
+             "competitions": [{"competitors": []}]},
+        ]}
+        games = parse_espn_pregame_scoreboard(data, "mlb")
+        assert len(games) == 1
+        assert games[0]["espn_id"] == "1"
+        assert games[0]["home_team"] == "A Team"
+        assert games[0]["away_team"] == "B Team"
+        assert games[0]["start_time"] is not None
+
+    def test_pregame_scoreboard_skips_final_and_in_progress(self):
+        from polybot.sports.espn_client import parse_espn_pregame_scoreboard
+        data = {"events": [
+            {"id": "1", "status": {"type": {"name": "STATUS_FINAL"}},
+             "competitions": [{"competitors": []}]},
+        ]}
+        assert parse_espn_pregame_scoreboard(data, "mlb") == []
+
+    def test_pregame_summary_extracts_predictor_pct(self):
+        from polybot.sports.espn_client import parse_pregame_summary
+        data = {
+            "predictor": {
+                "homeTeam": {"id": "1", "gameProjection": "62.8"},
+                "awayTeam": {"id": "2", "gameProjection": "37.2"},
+            },
+            "pickcenter": [{"overUnder": 8.5, "spread": -1.5}],
+        }
+        result = parse_pregame_summary(data)
+        assert result is not None
+        assert result["home_win_prob"] == pytest.approx(0.628)
+        assert result["total_line"] == 8.5
+        assert result["spread_line"] == -1.5
+
+    def test_pregame_summary_returns_none_when_predictor_missing(self):
+        from polybot.sports.espn_client import parse_pregame_summary
+        assert parse_pregame_summary({}) is None
+        assert parse_pregame_summary({"predictor": {}}) is None
+        assert parse_pregame_summary({"predictor": {"homeTeam": {}}}) is None
+
+    def test_pregame_summary_returns_none_on_invalid_proj(self):
+        from polybot.sports.espn_client import parse_pregame_summary
+        assert parse_pregame_summary(
+            {"predictor": {"homeTeam": {"gameProjection": "150.0"}}}) is None
+        assert parse_pregame_summary(
+            {"predictor": {"homeTeam": {"gameProjection": "garbage"}}}) is None
+
+    def test_pregame_summary_handles_missing_pickcenter(self):
+        from polybot.sports.espn_client import parse_pregame_summary
+        data = {"predictor": {"homeTeam": {"gameProjection": "55.0"}}}
+        result = parse_pregame_summary(data)
+        assert result is not None
+        assert result["home_win_prob"] == pytest.approx(0.55)
+        assert result["total_line"] is None
+        assert result["spread_line"] is None

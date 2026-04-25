@@ -164,6 +164,13 @@ async def main():
             settings=settings, espn_client=espn_client, calibrator=calibrator)
         engine.add_strategy(live_sports_strategy)
 
+        # v11.0b Pregame Sharp-Line — reuses the same ESPN client.
+        if getattr(settings, 'pg_enabled', True):
+            from polybot.strategies.pregame_sharp import PregameSharpStrategy
+            pregame_strategy = PregameSharpStrategy(
+                settings=settings, espn_client=espn_client)
+            engine.add_strategy(pregame_strategy)
+
     app = create_app(db)
     dashboard_server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=8080, log_level="warning"))

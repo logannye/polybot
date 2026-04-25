@@ -139,6 +139,33 @@ class LiveSportsStrategy(Strategy):
         self.kelly_multiplier = float(getattr(settings, "lg_kelly_mult", 0.50))
         self.max_single_pct = float(getattr(settings, "lg_max_single_pct", 0.20))
 
+    async def refit_calibrator(self, db, *, window_days: int = 90) -> None:
+        """v11.0c hook — reload last ``window_days`` of sport_calibration
+        observations and refit isotonic curves. Replaces the in-process
+        calibrator atomically so live evaluations always see a complete fit.
+        """
+        rows = await db.fetch(
+            """SELECT sport, bucket_key, predicted_prob, realized_outcome
+               FROM sport_calibration
+               WHERE observed_at > NOW() - $1::interval
+               ORDER BY observed_at ASC""",
+            f"{window_days} days",
+        )
+        new_calibrator = OnlineCalibrator(
+            min_obs_for_fit=int(getattr(
+                self._settings, "sports_calibrator_min_obs", 30)),
+            fallback_shrinkage=float(getattr(
+                self._settings, "sports_calibrator_fallback_shrinkage", 0.10)),
+        )
+        new_calibrator.load_observations(
+            [(r["sport"], r["bucket_key"], float(r["predicted_prob"]),
+              int(r["realized_outcome"])) for r in rows])
+        new_calibrator.fit_all()
+        self._calibrator = new_calibrator
+        log.info("live_sports_calibrator_refit",
+                 n_observations=len(rows),
+                 n_buckets=len(new_calibrator.fitted_buckets()))
+
     async def run_once(self, ctx: TradingContext) -> None:
         """One cycle: fetch ESPN → match markets → enter passes + manage exits."""
         # Step 1 — check exits first so capital is freed before new entries

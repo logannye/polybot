@@ -1,4 +1,11 @@
-"""ESPN scoreboard client — fetches live MLB, NBA, and NHL game data."""
+"""ESPN scoreboard client — fetches live MLB, NBA, and NHL game data.
+
+Also exposes pregame BPI / matchup-predictor probabilities via the
+/summary endpoint for the v11.0b PregameSharpStrategy.
+"""
+
+from datetime import datetime, timezone
+from typing import Optional
 
 import aiohttp
 import structlog
@@ -17,12 +24,25 @@ SPORT_URLS: dict[str, str] = {
     "mls": "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard",
 }
 
+# ESPN /summary endpoints accept ?event=ID and return predictor + odds.
+# Path matches the scoreboard URL minus the trailing /scoreboard.
+SUMMARY_URLS: dict[str, str] = {
+    sport: url.rsplit("/scoreboard", 1)[0] + "/summary"
+    for sport, url in SPORT_URLS.items()
+}
+
 # ESPN status names that should be included (non-scheduled)
 STATUS_MAP: dict[str, str] = {
     "STATUS_IN_PROGRESS": "in_progress",
     "STATUS_HALFTIME": "in_progress",
     "STATUS_FINAL": "final",
     "STATUS_END_PERIOD": "in_progress",
+}
+
+# Pre-game statuses — relevant for v11.0b PregameSharpStrategy
+PREGAME_STATUS_MAP: dict[str, str] = {
+    "STATUS_SCHEDULED": "scheduled",
+    "STATUS_PRE_GAME": "scheduled",
 }
 
 _TIMEOUT = aiohttp.ClientTimeout(total=10)
@@ -165,3 +185,121 @@ class ESPNClient:
             all_games.extend(games)
         log.info("espn_client.fetch_all_complete", total_games=len(all_games))
         return all_games
+
+    async def fetch_pregame_events(self, sport: str) -> list[dict]:
+        """Return scheduled (not-yet-started) games for ``sport``.
+
+        Each dict has espn_id, sport, name, home_team, away_team,
+        start_time (UTC datetime), plus the raw status string. Used by
+        v11.0b PregameSharpStrategy to identify upcoming games to fetch
+        BPI predictions for.
+        """
+        if self._session is None or self._session.closed:
+            raise RuntimeError("ESPNClient not started — call await client.start() first")
+        url = SPORT_URLS.get(sport)
+        if url is None:
+            return []
+        try:
+            async with self._session.get(url) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except aiohttp.ClientError as exc:
+            log.warning("espn_client.pregame_http_error", sport=sport, error=str(exc))
+            return []
+        return parse_espn_pregame_scoreboard(data, sport)
+
+    async def fetch_pregame_summary(self, sport: str, event_id: str
+                                     ) -> Optional[dict]:
+        """Fetch the per-event /summary and extract the predictor data.
+
+        Returns a dict with home_win_prob (0-1), total_line (or None),
+        spread_line (or None), fetched_at (UTC), or None on any failure.
+        """
+        if self._session is None or self._session.closed:
+            raise RuntimeError("ESPNClient not started — call await client.start() first")
+        url = SUMMARY_URLS.get(sport)
+        if url is None:
+            return None
+        try:
+            async with self._session.get(
+                url, params={"event": event_id}, timeout=_TIMEOUT
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except aiohttp.ClientError as exc:
+            log.warning("espn_client.summary_http_error",
+                        sport=sport, event=event_id, error=str(exc))
+            return None
+        return parse_pregame_summary(data)
+
+
+def parse_espn_pregame_scoreboard(data: dict, sport: str) -> list[dict]:
+    """Extract scheduled (not-yet-started) games from a scoreboard response."""
+    out: list[dict] = []
+    for event in data.get("events", []):
+        status_block = event.get("status", {})
+        status_name = status_block.get("type", {}).get("name", "")
+        if status_name not in PREGAME_STATUS_MAP:
+            continue
+
+        competitions = event.get("competitions", [])
+        competitors = competitions[0].get("competitors", []) if competitions else []
+        home_team = away_team = ""
+        for comp in competitors:
+            team = comp.get("team", {})
+            display_name = team.get("displayName", "")
+            if comp.get("homeAway") == "home":
+                home_team = display_name
+            elif comp.get("homeAway") == "away":
+                away_team = display_name
+
+        start_iso = event.get("date") or competitions[0].get("date") if competitions else None
+        start_time = _parse_espn_iso(start_iso)
+
+        out.append({
+            "espn_id": event.get("id", ""),
+            "sport": sport,
+            "name": event.get("name", ""),
+            "short_name": event.get("shortName", ""),
+            "home_team": home_team,
+            "away_team": away_team,
+            "start_time": start_time,
+            "status": PREGAME_STATUS_MAP[status_name],
+        })
+    return out
+
+
+def parse_pregame_summary(data: dict) -> Optional[dict]:
+    """Extract predictor + closing-line fields from a /summary response."""
+    predictor = data.get("predictor") or {}
+    home_proj = predictor.get("homeTeam", {}).get("gameProjection")
+    if home_proj is None:
+        # Some sports / dates lack predictor data entirely.
+        return None
+    try:
+        home_win_prob = float(home_proj) / 100.0
+    except (TypeError, ValueError):
+        return None
+    if not 0.0 <= home_win_prob <= 1.0:
+        return None
+
+    pickcenter = data.get("pickcenter") or []
+    pc0 = pickcenter[0] if pickcenter else {}
+    total_line = pc0.get("overUnder")
+    spread_line = pc0.get("spread")
+
+    return {
+        "home_win_prob": home_win_prob,
+        "total_line": float(total_line) if total_line is not None else None,
+        "spread_line": float(spread_line) if spread_line is not None else None,
+        "fetched_at": datetime.now(timezone.utc),
+    }
+
+
+def _parse_espn_iso(value) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
