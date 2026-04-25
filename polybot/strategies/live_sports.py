@@ -143,13 +143,16 @@ class LiveSportsStrategy(Strategy):
         """v11.0c hook — reload last ``window_days`` of sport_calibration
         observations and refit isotonic curves. Replaces the in-process
         calibrator atomically so live evaluations always see a complete fit.
+
+        asyncpg note: pass ``timedelta`` rather than a string because
+        ``$N::interval`` rejects str parameters under this driver.
         """
         rows = await db.fetch(
             """SELECT sport, bucket_key, predicted_prob, realized_outcome
                FROM sport_calibration
-               WHERE observed_at > NOW() - $1::interval
+               WHERE observed_at > NOW() - $1
                ORDER BY observed_at ASC""",
-            f"{window_days} days",
+            timedelta(days=window_days),
         )
         new_calibrator = OnlineCalibrator(
             min_obs_for_fit=int(getattr(

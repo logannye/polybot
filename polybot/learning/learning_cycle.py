@@ -8,6 +8,10 @@ Wires the v10 spec § 5 Loop 2 deferred items:
 All three are independent. Errors in one don't block the others; each is
 wrapped in try/except and logged. Per-strategy progress is returned so the
 engine can surface metrics.
+
+Implementation note: asyncpg rejects string interval parameters under
+``$N::interval`` casts; we pass ``timedelta`` objects instead, which the
+driver maps to PostgreSQL's interval type natively.
 """
 from __future__ import annotations
 
@@ -41,12 +45,13 @@ async def refit_kelly_scalers(
     cascade. Returns ``{strategy: (scaler, avg_predicted_prob)}``.
     """
     results: dict[str, tuple[float, Optional[float]]] = {}
+    window = timedelta(days=window_days)
     for strategy in strategies:
         try:
             outcomes = await db.fetch(
                 """SELECT pnl, predicted_prob FROM trade_outcome
-                   WHERE strategy = $1 AND closed_at > NOW() - $2::interval""",
-                strategy, f"{window_days} days",
+                   WHERE strategy = $1 AND closed_at > NOW() - $2""",
+                strategy, window,
             )
             scaler, avg_pred = compute_from_outcomes(
                 outcomes, cold_start_n=cold_start_n)
