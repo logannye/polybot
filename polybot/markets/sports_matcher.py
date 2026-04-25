@@ -340,7 +340,11 @@ def _determine_side(game: LiveGame, market: PolymarketMarket,
             return "over"
         if "under" in q:
             return "under"
-        return None
+        # Polymarket convention for "X vs Y: O/U N.N" markets: YES = Over,
+        # NO = Under. The strategy's _evaluate_total picks the side based
+        # on edge, so we return "over" as a sentinel — which side the
+        # market labels as "side" doesn't determine which side we trade.
+        return "over"
     home_idx = _find_earliest_index(q, _team_search_terms(game.home_team or "", game.sport))
     away_idx = _find_earliest_index(q, _team_search_terms(game.away_team or "", game.sport))
     if home_idx == -1 and away_idx == -1:

@@ -241,6 +241,33 @@ def test_all_nba_variants_unique_canonical():
             seen[v] = canonical
 
 
+def test_match_total_market_with_ou_notation_returns_match():
+    """Polymarket "Athletics vs. Texas Rangers: O/U 7.5" markets don't
+    contain literal 'over'/'under', but they ARE total markets and the
+    matcher must return a MatchResult so the strategy can evaluate them.
+    Regression test for the bug found 2026-04-24 where these markets were
+    silently rejected at _determine_side, causing zero MLB trades since
+    v10 deployed despite high-confidence matcher classifications."""
+    game = LiveGame(
+        sport="mlb", home_team="Athletics", away_team="Texas Rangers",
+        game_id="123", start_time=datetime.now(timezone.utc),
+        score_home=2, score_away=1, status="in_progress",
+    )
+    market = _make_market(
+        question="Athletics vs. Texas Rangers: O/U 7.5",
+        slug="mlb-athletics-rangers-2026", hours_from_now=2.0,
+    )
+    # Use 0.80 floor — slug-scoring partial match drops confidence below
+    # the production 0.95 floor for this fixture, but the bug is at
+    # _determine_side, not at confidence. Confidence-floor enforcement is
+    # tested separately in test_confidence_floor_is_enforced.
+    result = match_game_to_market(game, market, min_confidence=0.80)
+    assert result is not None
+    assert result.market_type == "total"
+    assert result.line == 7.5
+    assert result.side in ("over", "under")
+
+
 def test_confidence_floor_is_enforced():
     """Passing min_confidence=0.99 rejects a 0.95-match."""
     game = _make_game(hours_from_now=0.0)
