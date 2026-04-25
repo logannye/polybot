@@ -67,6 +67,10 @@ class PregameSharpStrategy(Strategy):
                     continue
                 all_pregames.append((ev, sport))
 
+        log.info("pregame_cycle",
+                 events_in_window=len(all_pregames),
+                 sports_checked=len(sports))
+
         if not all_pregames:
             return
 
