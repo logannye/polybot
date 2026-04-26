@@ -60,20 +60,61 @@ def _has_grounding(s: str) -> bool:
     )
 
 
+# Phrases that indicate the verifier is reasoning about a *future-undetermined*
+# outcome rather than a *mechanically locked* one. Observed in production at
+# T+1h: NO_LOCKED@conf=1.0 verdicts where the reason says the event "has not
+# yet occurred" or "could still occur" — the verifier is conflating the prior
+# (unlikely event) with a lock (impossible event). These verdicts are
+# structurally wrong and must be demoted to UNCERTAIN.
+#
+# A genuinely locked NO requires evidence the YES outcome is IMPOSSIBLE
+# (deadline passed without occurrence, structural prerequisite missing,
+# resolution criterion already failed). Phrases below indicate the LLM is
+# arguing from "hasn't happened" to "won't happen" — which is the prior, not
+# a lock.
+_NON_LOCK_PATTERNS = re.compile(
+    r"(has\s+not\s+(?:yet\s+)?(?:occurred|happened|passed|been|taken\s+place))"
+    r"|(?:is|are|remains?)\s+(?:still\s+)?in\s+the\s+future"
+    r"|(?:could|may|might)\s+(?:still|yet)\s+(?:occur|happen|come|be)"
+    r"|(?:still|yet)\s+(?:to|could)\s+(?:occur|happen|come)"
+    r"|remaining\s+\d+(?:\.\d+)?\s+(?:hours?|minutes?|days?|weeks?)"
+    r"|(?:has|have)\s+not\s+(?:yet\s+)?(?:been\s+)?(?:resolved|determined|decided|announced|confirmed)"
+    r"|(?:not\s+)?yet\s+(?:passed|elapsed|reached|known)"
+    r"|outcome\s+(?:is\s+)?(?:not\s+)?(?:yet\s+)?(?:known|determined|decided|certain)"
+    r"|(?:event|outcome|result|condition)s?\s+(?:could|can|may|might)\s+still",
+    re.IGNORECASE)
+
+
 def validate_reason(reason: str, *, min_chars: int = 30) -> tuple[bool, str]:
     """Pure function. Returns (ok, rejection_reason).
 
-    A reason is OK if it is at least `min_chars` long AND either contains a
-    concrete grounding token OR contains no hedge words.
+    Three independent gates, in order:
+      1. Length floor (`min_chars`).
+      2. Hedge-without-grounding: bans "seems/likely/probably" unless a
+         concrete grounding token (digit, ALL-CAPS abbreviation, month) is
+         also present.
+      3. Non-lock semantic: bans phrasings that describe a *future-but-
+         not-yet-determined* outcome. These are the prior, not a lock.
 
-    "Trump conceded at 8:14pm ET" → ok (digits + AM/PM)
-    "AP called the race for X" → ok (AP)
-    "Game ended 7-2 in the 9th" → ok (score + 9th)
-    "Seems likely the favorite wins" → reject (hedge, no grounding)
-    "Race over" → reject (too short)
+    Examples:
+      "Trump conceded at 8:14pm ET" → ok
+      "AP called the race for X candidate" → ok
+      "FOMC has no scheduled meeting in April 2026" → ok (genuine lock —
+         structural prerequisite missing, no future-tense hedge)
+      "The election has not yet occurred" → reject (non_lock_phrasing)
+      "April 30, 2026 is in the future, the event could still occur"
+         → reject (non_lock_phrasing)
+      "Seems likely the favorite wins" → reject (hedge, no grounding)
+      "Race over" → reject (too short)
     """
     if not reason or len(reason.strip()) < min_chars:
         return False, "reason_too_short"
+    # Non-lock phrasing is checked FIRST: it's the most specific structural
+    # error (the LLM is reasoning from "hasn't happened" to "won't happen"),
+    # and it's strictly worse than a hedge — a hedge with grounding can still
+    # be a real lock, but non-lock phrasing always indicates wrong reasoning.
+    if _NON_LOCK_PATTERNS.search(reason):
+        return False, "non_lock_phrasing"
     has_hedge = bool(_HEDGE_WORDS.search(reason))
     has_grounding = _has_grounding(reason)
     if has_hedge and not has_grounding:
@@ -152,18 +193,35 @@ class GeminiClient:
 
         prompt = (
             "You are verifying whether a Polymarket prediction market is "
-            "MECHANICALLY LOCKED — i.e. the outcome is already determined "
-            "by a known, verifiable real-world event, and the market price "
-            "just hasn't converged yet.\n\n"
+            "MECHANICALLY LOCKED. A market is LOCKED only if ONE of:\n"
+            "  (a) the YES outcome has already provably occurred — return "
+            "YES_LOCKED;\n"
+            "  (b) the YES outcome is now provably IMPOSSIBLE before "
+            "resolution (deadline passed without occurrence, structural "
+            "prerequisite missing, or resolution criterion already failed) "
+            "— return NO_LOCKED.\n\n"
+            "CRITICAL DISAMBIGUATION:\n"
+            "An event that 'has not yet occurred' or 'could still occur' "
+            "or 'is in the future' is NOT locked. The market price already "
+            "reflects the prior — your job is to spot the cases where the "
+            "outcome is now CERTAIN, not where it is merely unlikely.\n\n"
+            "Examples:\n"
+            "  GOOD NO_LOCKED: 'There is no FOMC meeting scheduled in April "
+            "2026, so a rate cut at that meeting is impossible.' (structural "
+            "prerequisite missing)\n"
+            "  GOOD YES_LOCKED: 'AP called the race for Smith at 8:14pm ET; "
+            "concession speech delivered.' (event has occurred)\n"
+            "  BAD (must return UNCERTAIN): 'The election has not yet "
+            "occurred' or 'The resolution date is in the future' or 'The "
+            "event could still occur within remaining hours.' These describe "
+            "the prior, not a lock.\n\n"
             "Return ONLY a JSON object with these exact fields:\n"
             "  - verdict: one of YES_LOCKED, NO_LOCKED, UNCERTAIN\n"
             "  - confidence: float in [0.0, 1.0]\n"
-            "  - reason: a SHORT (1-2 sentences) sentence stating the "
-            "CONCRETE grounding — a date, score, name, vote count, source, "
-            "etc. Do not use words like 'seems', 'likely', 'probably' "
-            "without grounding. Do not speculate.\n\n"
-            "If you don't have concrete real-world evidence the outcome is "
-            "decided, return UNCERTAIN with confidence below 0.5.\n\n"
+            "  - reason: ONE sentence stating the CONCRETE grounding — what "
+            "happened, when, where, who said so. If you cannot articulate a "
+            "specific real-world event that locks the outcome, return "
+            "UNCERTAIN with confidence below 0.5.\n\n"
             f"Question: {question}\n"
             f"Resolution time (UTC): {resolution_time_iso}\n"
             f"Hours remaining: {hours_remaining:.1f}\n"
