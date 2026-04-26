@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     dry_run_realistic: bool = True
     dry_run_taker_fee_pct: float = 0.02
     dry_run_max_spread: float = 0.15
+    # v12.2: maker-fill simulation — match deployed behavior (post_only=True).
+    # When true + post_only, fill at limit price with 0% fee, no spread cap.
+    # Set false to stress-test against worst-case taker fills.
+    dry_run_assume_maker_fill: bool = True
 
     # ── Bankroll & deployment ─────────────────────────────────────────
     starting_bankroll: float = 2000.0
@@ -36,13 +40,23 @@ class Settings(BaseSettings):
     snipe_max_concurrent: int = 4
     snipe_max_total_deployed_pct: float = 0.20
 
-    # Entry gates
-    snipe_min_price: float = 0.96             # buy threshold (mirrors ≤0.04 to NO)
+    # Entry gates — v12.2 widened universe.
+    # Pre-v12.2 the floor was 0.96; data showed the universe at 0.96+ was
+    # dominated by 0.998+ markets that are negative-EV after fees even at
+    # 100% accuracy. 0.92 floor expands the universe to markets with real
+    # gross edge (8%+) where the verifier+killswitch combo can actually
+    # produce learning signal. The variance is higher, so per-trade caps
+    # in the sizing tiers shrink to compensate.
+    snipe_min_price: float = 0.92             # was 0.96 in v12.0–v12.1
     snipe_max_hours: float = 12.0             # live ceiling
     snipe_max_hours_dryrun: float = 168.0     # 7d for observation
-    snipe_min_net_edge: float = 0.02
+    snipe_min_net_edge: float = 0.02          # legacy; superseded by tier floors
     snipe_min_book_depth: float = 1000.0
     snipe_min_book_depth_dryrun: float = 500.0
+    # v12.2: bypass dry-run spread cap for snipe trades. Snipe holds to
+    # resolution (no exit transaction), so spread is irrelevant for exit;
+    # the spread cap was a v10 inheritance for round-trip strategies.
+    snipe_skip_spread_gate: bool = True
 
     # Sizing — tiered by verifier confidence (v12.1).
     # The static snipe_min_net_edge floor is now interpreted as the LOW-tier
@@ -51,22 +65,31 @@ class Settings(BaseSettings):
     snipe_kelly_mult: float = 0.25
     snipe_max_single_pct: float = 0.05      # legacy; equals low-tier cap
 
-    # High-confidence tier: structurally locked + 0.99+ confidence. Trade
-    # even at razor-thin edges (e.g. price=0.998 → edge=0.002), but cap each
-    # trade at 1% of bankroll. Worst-case: -0.998% per false positive.
+    # Tier floors and caps re-tuned for v12.2's wider universe (price ≥0.92).
+    # At 0.92 entry, gross edge is 8% but a wrong call loses 92% of position,
+    # so per-trade caps shrink and edge floors rise vs the v12.1 values
+    # (which were calibrated for 0.96+ where wrong-call loss is ≤4%).
+    #
+    # Worst-case single-trade loss (cap × max_buy_price = cap × 0.92):
+    #   high: 0.005 × 0.92 = 0.46% bankroll
+    #   mid:  0.010 × 0.92 = 0.92% bankroll
+    #   low:  0.020 × 0.92 = 1.84% bankroll
+    # Killswitch (97% / 50) catches systematic mispricing within ~1 day.
+
+    # High-confidence tier: conf ≥0.99. 2% min edge (price ≤0.98).
     snipe_tier_high_min_conf: float = 0.99
-    snipe_tier_high_min_edge: float = 0.002
-    snipe_tier_high_max_pct: float = 0.01
+    snipe_tier_high_min_edge: float = 0.02
+    snipe_tier_high_max_pct: float = 0.005
 
-    # Mid-confidence tier: 0.97-0.99. Real edge needed.
+    # Mid-confidence tier: conf 0.97–0.99. 4% min edge (price ≤0.96).
     snipe_tier_mid_min_conf: float = 0.97
-    snipe_tier_mid_min_edge: float = 0.01
-    snipe_tier_mid_max_pct: float = 0.02
+    snipe_tier_mid_min_edge: float = 0.04
+    snipe_tier_mid_max_pct: float = 0.01
 
-    # Low-confidence tier: 0.95-0.97. Treat like v12 default snipe.
+    # Low-confidence tier: conf 0.95–0.97. 6% min edge (price ≤0.94).
     snipe_tier_low_min_conf: float = 0.95
-    snipe_tier_low_min_edge: float = 0.02
-    snipe_tier_low_max_pct: float = 0.05
+    snipe_tier_low_min_edge: float = 0.06
+    snipe_tier_low_max_pct: float = 0.02
 
     # Verifier
     snipe_min_verifier_confidence: float = 0.95

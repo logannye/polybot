@@ -21,14 +21,24 @@ def test_settings_loads_defaults(monkeypatch):
     assert s.starting_bankroll == 2000.0
     assert s.dry_run is True
     assert s.snipe_enabled is True
-    assert s.snipe_min_price == 0.96
+    # v12.2: dropped from 0.96 to 0.92
+    assert s.snipe_min_price == 0.92
     assert s.snipe_kelly_mult == 0.25
-    assert s.snipe_max_single_pct == 0.05
     assert s.snipe_min_verifier_confidence == 0.95
     assert s.killswitch_window == 50
     assert s.killswitch_min_hit_rate == 0.97
     assert s.killswitch_min_n == 50
     assert s.live_deployment_stage == "dry_run"
+    # v12.2 maker-fill simulation defaults on
+    assert s.dry_run_assume_maker_fill is True
+    assert s.snipe_skip_spread_gate is True
+    # v12.2 retuned tiers
+    assert s.snipe_tier_high_min_edge == 0.02
+    assert s.snipe_tier_high_max_pct == 0.005
+    assert s.snipe_tier_mid_min_edge == 0.04
+    assert s.snipe_tier_mid_max_pct == 0.01
+    assert s.snipe_tier_low_min_edge == 0.06
+    assert s.snipe_tier_low_max_pct == 0.02
 
 
 def test_settings_ignores_legacy_env_keys(monkeypatch):
