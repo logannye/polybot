@@ -146,13 +146,18 @@ class GeminiClient:
 
     def __init__(self, api_key: str, cap_usd: float = 2.0,
                  model: str = "gemini-2.5-flash",
-                 min_reason_chars: int = 30):
+                 min_reason_chars: int = 30,
+                 cache=None):
+        """`cache` is an optional VerifierCache. When provided, repeat
+        verifications of the same market within TTL skip the LLM call.
+        """
         self._api_key = api_key
         self._cap_usd = cap_usd
         self._model = model
         self._min_reason_chars = min_reason_chars
         self._spend = DailySpendTracker()
         self._client = None
+        self._cache = cache
 
     def _ensure_client(self):
         if self._client is None:
@@ -178,6 +183,7 @@ class GeminiClient:
     async def verify_snipe(
         self, question: str, resolution_time_iso: str,
         hours_remaining: float, yes_price: float,
+        polymarket_id: str = "",
     ) -> GeminiResult:
         """Verify whether a market is mechanically locked.
 
@@ -186,7 +192,20 @@ class GeminiClient:
           - LLM call failure
           - malformed JSON response
           - reason fails grounding check (`validate_reason`)
+
+        If a `cache` was supplied at construction and `polymarket_id` is
+        provided, lookup is attempted first. On a hit we skip the LLM call
+        entirely. On a miss we make the call and store the result.
         """
+        # Cache lookup before anything else (including spend cap), since a
+        # cached verdict consumes no budget.
+        if self._cache is not None and polymarket_id:
+            cached = self._cache.lookup(
+                polymarket_id, yes_price=yes_price,
+                hours_remaining=hours_remaining)
+            if cached is not None:
+                return cached
+
         if not self.can_spend():
             return GeminiResult(verdict="UNCERTAIN", confidence=0.0,
                                 reason="daily_spend_cap_hit")
@@ -244,9 +263,18 @@ class GeminiClient:
                 log.info("verifier_reason_rejected",
                          verdict=result.verdict, why=why,
                          reason=(result.reason or "")[:120])
-                return GeminiResult(
+                result = GeminiResult(
                     verdict="UNCERTAIN", confidence=0.0,
                     reason=f"grounding_failed:{why}|{result.reason[:120]}")
+
+        # Cache the (possibly demoted) result so the next cycle's lookup
+        # short-circuits. Even UNCERTAIN responses are worth caching — they
+        # mean the LLM declined to lock, and that decision is stable until
+        # price/hours drift past invalidation thresholds.
+        if self._cache is not None and polymarket_id:
+            self._cache.store(
+                polymarket_id, result,
+                yes_price=yes_price, hours_remaining=hours_remaining)
         return result
 
 

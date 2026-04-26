@@ -44,14 +44,39 @@ class Settings(BaseSettings):
     snipe_min_book_depth: float = 1000.0
     snipe_min_book_depth_dryrun: float = 500.0
 
-    # Sizing (static — no scaler in v12)
+    # Sizing — tiered by verifier confidence (v12.1).
+    # The static snipe_min_net_edge floor is now interpreted as the LOW-tier
+    # floor; mid- and high-confidence verdicts get tighter floors and tighter
+    # per-trade caps so a single false-positive can't blow up bankroll.
     snipe_kelly_mult: float = 0.25
-    snipe_max_single_pct: float = 0.05
+    snipe_max_single_pct: float = 0.05      # legacy; equals low-tier cap
+
+    # High-confidence tier: structurally locked + 0.99+ confidence. Trade
+    # even at razor-thin edges (e.g. price=0.998 → edge=0.002), but cap each
+    # trade at 1% of bankroll. Worst-case: -0.998% per false positive.
+    snipe_tier_high_min_conf: float = 0.99
+    snipe_tier_high_min_edge: float = 0.002
+    snipe_tier_high_max_pct: float = 0.01
+
+    # Mid-confidence tier: 0.97-0.99. Real edge needed.
+    snipe_tier_mid_min_conf: float = 0.97
+    snipe_tier_mid_min_edge: float = 0.01
+    snipe_tier_mid_max_pct: float = 0.02
+
+    # Low-confidence tier: 0.95-0.97. Treat like v12 default snipe.
+    snipe_tier_low_min_conf: float = 0.95
+    snipe_tier_low_min_edge: float = 0.02
+    snipe_tier_low_max_pct: float = 0.05
 
     # Verifier
     snipe_min_verifier_confidence: float = 0.95
     snipe_min_verifier_reason_chars: int = 30
     snipe_gemini_daily_cap_usd: float = 2.0
+
+    # Verifier cache (v12.1): kills 60x duplicate LLM calls per market.
+    snipe_cache_ttl_seconds: float = 1800.0     # 30 min
+    snipe_cache_price_drift: float = 0.01
+    snipe_cache_hours_drift: float = 1.0
 
     # ── Hit-rate killswitch (the only adaptive component) ─────────────
     killswitch_window: int = 50

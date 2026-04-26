@@ -22,6 +22,7 @@ from polybot.notifications.email import EmailNotifier
 from polybot.dashboard.app import create_app
 from polybot.strategies.snipe import ResolutionSnipeStrategy
 from polybot.analysis.gemini_client import GeminiClient
+from polybot.analysis.verifier_cache import VerifierCache
 
 structlog.configure(
     processors=[
@@ -147,10 +148,15 @@ async def main():
 
     gemini_client = None
     if settings.google_api_key:
+        verifier_cache = VerifierCache(
+            ttl_seconds=settings.snipe_cache_ttl_seconds,
+            price_drift_threshold=settings.snipe_cache_price_drift,
+            hours_drift_threshold=settings.snipe_cache_hours_drift)
         gemini_client = GeminiClient(
             api_key=settings.google_api_key,
             cap_usd=settings.snipe_gemini_daily_cap_usd,
-            min_reason_chars=settings.snipe_min_verifier_reason_chars)
+            min_reason_chars=settings.snipe_min_verifier_reason_chars,
+            cache=verifier_cache)
 
     engine.add_strategy(ResolutionSnipeStrategy(
         settings=settings, gemini_client=gemini_client))

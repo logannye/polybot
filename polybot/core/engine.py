@@ -492,6 +492,38 @@ class Engine:
         signals_24h = await self._db.fetchval(
             "SELECT COUNT(*) FROM shadow_signal "
             "WHERE signaled_at > NOW() - INTERVAL '24 hours'")
+
+        # v12.1: per-tier verifier accuracy from resolved shadow signals.
+        # Joins shadow_signal (with verifier_confidence) against itself
+        # filtered to resolved rows. Tiers match the snipe sizing tiers.
+        accuracy = await self._db.fetch(
+            """SELECT
+                  CASE
+                      WHEN verifier_confidence >= 0.99 THEN 'high'
+                      WHEN verifier_confidence >= 0.97 THEN 'mid'
+                      WHEN verifier_confidence >= 0.95 THEN 'low'
+                      ELSE 'sub_low'
+                  END AS tier,
+                  COUNT(*) AS n,
+                  COUNT(*) FILTER (
+                      WHERE (verifier_verdict = 'YES_LOCKED' AND resolved_outcome = 1)
+                         OR (verifier_verdict = 'NO_LOCKED'  AND resolved_outcome = 0)
+                  ) AS correct,
+                  COUNT(*) FILTER (WHERE verifier_verdict = 'UNCERTAIN') AS uncertain
+               FROM shadow_signal
+               WHERE resolved_at IS NOT NULL
+                 AND verifier_confidence IS NOT NULL
+               GROUP BY tier
+               ORDER BY tier""")
+        per_tier = {}
+        for row in accuracy:
+            n = int(row["n"])
+            correct = int(row["correct"])
+            per_tier[row["tier"]] = {
+                "n": n, "correct": correct,
+                "hit_rate": round(correct / n, 4) if n else None,
+            }
+
         log.info("hourly_summary",
                  bankroll=float(state["bankroll"]),
                  total_deployed=float(state["total_deployed"]),
@@ -503,4 +535,5 @@ class Engine:
                                    if state["rolling_hit_rate"] is not None else None),
                  rolling_hit_rate_n=int(state["rolling_hit_rate_n"]),
                  killswitch_tripped=bool(state["killswitch_tripped_at"]),
-                 deployment_stage=state["live_deployment_stage"])
+                 deployment_stage=state["live_deployment_stage"],
+                 verifier_accuracy_per_tier=per_tier)
