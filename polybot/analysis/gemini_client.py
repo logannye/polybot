@@ -1,17 +1,17 @@
-"""Thin async Gemini Flash client with daily spend cap.
+"""Gemini Flash client for Snipe T1 verification (v12 hardened).
 
-v10 spec §4 — Snipe T1 verification uses Gemini Flash and must halt
-snipe for the rest of the UTC day if daily spend exceeds ``cap_usd``
-(default $2).
+Schema-strict response with grounding requirement: the verifier must
+articulate a *concrete* reason a market is locked (a date, name, score,
+quote, vote count, etc.). Hand-wavy reasons ("seems likely", "probably")
+without grounding are auto-rejected before the result is returned.
 
-The client is deliberately minimal:
-- one method ``verify_snipe`` returning ``(verdict, confidence)``
-- internal daily spend tracker keyed by UTC date
-- no retry logic — we fail the verification on error (safer than
-  accidentally approving a bad trade)
+Daily spend is capped to prevent runaway cost; on cap-hit we return
+UNCERTAIN so the caller skips the trade.
 """
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -27,11 +27,58 @@ Verdict = Literal["YES_LOCKED", "NO_LOCKED", "UNCERTAIN"]
 class GeminiResult:
     verdict: Verdict
     confidence: float
+    reason: str = ""
 
 
-# Approximate per-call cost (input+output tokens for Flash 2.5 pricing circa
-# April 2026). Used for the daily spend accumulator.
 APPROX_COST_PER_CALL_USD = 0.0015
+
+# Words that, in absence of concrete grounding, indicate the verifier is
+# guessing rather than verifying. We don't reject the words themselves —
+# we reject reasons that have these AND lack any concrete grounding token.
+_HEDGE_WORDS = re.compile(
+    r"\b(seems?|likely|probably|possibly|might|could|appears?)\b",
+    re.IGNORECASE)
+
+# Concrete grounding tokens: digits, dates, score patterns, percentages.
+# Case-sensitive on its own so [A-Z]{2,} actually means caps.
+_GROUNDING_NUMERIC = re.compile(
+    r"\d+(?:\.\d+)?%?"           # numbers / percents
+    r"|\b\d{1,2}:\d{2}\b"        # times / scores
+)
+_GROUNDING_CAPS = re.compile(r"\b[A-Z]{2,}\b")    # AP, ESPN, NBA, EU
+_GROUNDING_DATE = re.compile(
+    r"\b(?:January|February|March|April|May|June|July|August|"
+    r"September|October|November|December|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b",
+    re.IGNORECASE)
+
+
+def _has_grounding(s: str) -> bool:
+    return bool(
+        _GROUNDING_NUMERIC.search(s)
+        or _GROUNDING_CAPS.search(s)
+        or _GROUNDING_DATE.search(s)
+    )
+
+
+def validate_reason(reason: str, *, min_chars: int = 30) -> tuple[bool, str]:
+    """Pure function. Returns (ok, rejection_reason).
+
+    A reason is OK if it is at least `min_chars` long AND either contains a
+    concrete grounding token OR contains no hedge words.
+
+    "Trump conceded at 8:14pm ET" → ok (digits + AM/PM)
+    "AP called the race for X" → ok (AP)
+    "Game ended 7-2 in the 9th" → ok (score + 9th)
+    "Seems likely the favorite wins" → reject (hedge, no grounding)
+    "Race over" → reject (too short)
+    """
+    if not reason or len(reason.strip()) < min_chars:
+        return False, "reason_too_short"
+    has_hedge = bool(_HEDGE_WORDS.search(reason))
+    has_grounding = _has_grounding(reason)
+    if has_hedge and not has_grounding:
+        return False, "hedge_without_grounding"
+    return True, ""
 
 
 @dataclass
@@ -54,19 +101,20 @@ class DailySpendTracker:
 
 
 class GeminiClient:
-    """Minimal Gemini Flash client for snipe T1 verification."""
+    """Snipe T1 verifier with structured schema response and grounding gate."""
 
     def __init__(self, api_key: str, cap_usd: float = 2.0,
-                 model: str = "gemini-2.5-flash"):
+                 model: str = "gemini-2.5-flash",
+                 min_reason_chars: int = 30):
         self._api_key = api_key
         self._cap_usd = cap_usd
         self._model = model
+        self._min_reason_chars = min_reason_chars
         self._spend = DailySpendTracker()
-        self._client = None    # lazy-init on first call
+        self._client = None
 
     def _ensure_client(self):
         if self._client is None:
-            # Import lazily so tests can run without google-genai installed
             from google import genai
             self._client = genai.Client(api_key=self._api_key)
 
@@ -90,47 +138,74 @@ class GeminiClient:
         self, question: str, resolution_time_iso: str,
         hours_remaining: float, yes_price: float,
     ) -> GeminiResult:
-        """Ask Gemini: is this market resolved or about to resolve?
+        """Verify whether a market is mechanically locked.
 
-        Returns a GeminiResult. If the spend cap is hit, returns UNCERTAIN
-        with confidence=0 so the caller skips the trade.
+        Returns UNCERTAIN with confidence=0 on:
+          - daily spend cap hit
+          - LLM call failure
+          - malformed JSON response
+          - reason fails grounding check (`validate_reason`)
         """
         if not self.can_spend():
-            return GeminiResult(verdict="UNCERTAIN", confidence=0.0)
+            return GeminiResult(verdict="UNCERTAIN", confidence=0.0,
+                                reason="daily_spend_cap_hit")
 
         prompt = (
-            "You are verifying a prediction-market snipe. Given the question "
-            "and context below, return JSON with:\n"
-            "- verdict: YES_LOCKED / NO_LOCKED / UNCERTAIN\n"
-            "- confidence: 0.0-1.0\n\n"
+            "You are verifying whether a Polymarket prediction market is "
+            "MECHANICALLY LOCKED — i.e. the outcome is already determined "
+            "by a known, verifiable real-world event, and the market price "
+            "just hasn't converged yet.\n\n"
+            "Return ONLY a JSON object with these exact fields:\n"
+            "  - verdict: one of YES_LOCKED, NO_LOCKED, UNCERTAIN\n"
+            "  - confidence: float in [0.0, 1.0]\n"
+            "  - reason: a SHORT (1-2 sentences) sentence stating the "
+            "CONCRETE grounding — a date, score, name, vote count, source, "
+            "etc. Do not use words like 'seems', 'likely', 'probably' "
+            "without grounding. Do not speculate.\n\n"
+            "If you don't have concrete real-world evidence the outcome is "
+            "decided, return UNCERTAIN with confidence below 0.5.\n\n"
             f"Question: {question}\n"
-            f"Resolution time: {resolution_time_iso}\n"
+            f"Resolution time (UTC): {resolution_time_iso}\n"
             f"Hours remaining: {hours_remaining:.1f}\n"
-            f"Current YES price: {yes_price:.3f}\n\n"
-            "Return ONLY the JSON object, no explanation."
+            f"Current YES price: {yes_price:.3f}\n"
         )
         text = await self._generate(prompt)
         self._spend.accumulate(APPROX_COST_PER_CALL_USD)
         if not text:
-            return GeminiResult(verdict="UNCERTAIN", confidence=0.0)
-        return _parse_verdict(text)
+            return GeminiResult(verdict="UNCERTAIN", confidence=0.0,
+                                reason="llm_call_failed")
+        result = _parse_verdict(text)
+
+        # Apply grounding gate. If verdict was YES/NO_LOCKED but the reason
+        # is hedge-without-grounding or too short, demote to UNCERTAIN. We
+        # keep the raw reason in the returned result for the shadow log.
+        if result.verdict in ("YES_LOCKED", "NO_LOCKED"):
+            ok, why = validate_reason(result.reason,
+                                       min_chars=self._min_reason_chars)
+            if not ok:
+                log.info("verifier_reason_rejected",
+                         verdict=result.verdict, why=why,
+                         reason=(result.reason or "")[:120])
+                return GeminiResult(
+                    verdict="UNCERTAIN", confidence=0.0,
+                    reason=f"grounding_failed:{why}|{result.reason[:120]}")
+        return result
 
 
 def _parse_verdict(text: str) -> GeminiResult:
-    """Parse Gemini JSON response. Permissive — return UNCERTAIN on malformed."""
-    import json
-    import re
-
-    # Strip markdown code fences if present
+    """Parse Gemini response. Returns UNCERTAIN on malformed JSON."""
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(),
                      flags=re.MULTILINE)
     try:
         data = json.loads(cleaned)
-        verdict = data.get("verdict", "UNCERTAIN").upper()
+        verdict = str(data.get("verdict", "UNCERTAIN")).upper()
         if verdict not in ("YES_LOCKED", "NO_LOCKED", "UNCERTAIN"):
             verdict = "UNCERTAIN"
         confidence = float(data.get("confidence", 0.0))
         confidence = max(0.0, min(1.0, confidence))
-        return GeminiResult(verdict=verdict, confidence=confidence)   # type: ignore
+        reason = str(data.get("reason", ""))[:500]
+        return GeminiResult(verdict=verdict, confidence=confidence,    # type: ignore
+                            reason=reason)
     except (json.JSONDecodeError, ValueError, TypeError):
-        return GeminiResult(verdict="UNCERTAIN", confidence=0.0)
+        return GeminiResult(verdict="UNCERTAIN", confidence=0.0,
+                            reason="malformed_json")
