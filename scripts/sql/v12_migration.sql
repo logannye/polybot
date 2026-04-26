@@ -42,7 +42,10 @@ ALTER TABLE system_state
     ADD COLUMN IF NOT EXISTS rolling_hit_rate       numeric(5,4),
     ADD COLUMN IF NOT EXISTS rolling_hit_rate_n     integer NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS killswitch_tripped_at  timestamptz,
-    ADD COLUMN IF NOT EXISTS killswitch_reason      text;
+    ADD COLUMN IF NOT EXISTS killswitch_reason      text,
+    -- Persisted deployment stage so killswitch demotions survive restart.
+    -- Pre-v12 this lived only in config; v12 promotes/demotes are durable.
+    ADD COLUMN IF NOT EXISTS live_deployment_stage  text NOT NULL DEFAULT 'dry_run';
 
 -- 4. Ensure 'snipe' strategy_performance row exists (idempotent).
 INSERT INTO strategy_performance (strategy)
