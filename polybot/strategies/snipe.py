@@ -72,6 +72,45 @@ def compute_net_edge(buy_price: float, fee_per_dollar: float = 0.0) -> float:
     return (1.0 - buy_price) - fee_per_dollar
 
 
+@dataclass(frozen=True)
+class SizingTier:
+    """Per-trade edge floor + bankroll cap, selected by verifier confidence."""
+    name: str            # "high" | "mid" | "low"
+    min_edge: float
+    max_pct: float
+
+
+def select_tier(verifier_confidence: float, settings) -> Optional[SizingTier]:
+    """Pure-function tier dispatch. Returns None if confidence is below the
+    low-tier floor (verdict should be UNCERTAIN already, but defensive).
+
+    The tier assigns BOTH the edge floor (lower for higher confidence — we
+    trust the verifier more so we can take thinner edges) AND the bankroll
+    cap (lower for higher confidence on thin edges — a thin-edge mistake on
+    a bigger position is catastrophic, so we shrink the bet).
+    """
+    high_conf = float(getattr(settings, "snipe_tier_high_min_conf", 0.99))
+    mid_conf = float(getattr(settings, "snipe_tier_mid_min_conf", 0.97))
+    low_conf = float(getattr(settings, "snipe_tier_low_min_conf", 0.95))
+
+    if verifier_confidence >= high_conf:
+        return SizingTier(
+            name="high",
+            min_edge=float(getattr(settings, "snipe_tier_high_min_edge", 0.002)),
+            max_pct=float(getattr(settings, "snipe_tier_high_max_pct", 0.01)))
+    if verifier_confidence >= mid_conf:
+        return SizingTier(
+            name="mid",
+            min_edge=float(getattr(settings, "snipe_tier_mid_min_edge", 0.01)),
+            max_pct=float(getattr(settings, "snipe_tier_mid_max_pct", 0.02)))
+    if verifier_confidence >= low_conf:
+        return SizingTier(
+            name="low",
+            min_edge=float(getattr(settings, "snipe_tier_low_min_edge", 0.02)),
+            max_pct=float(getattr(settings, "snipe_tier_low_max_pct", 0.05)))
+    return None
+
+
 class ResolutionSnipeStrategy(Strategy):
     name = "snipe"
 
@@ -261,6 +300,7 @@ class ResolutionSnipeStrategy(Strategy):
                 resolution_time_iso=str(market.get("resolution_time", "")),
                 hours_remaining=candidate.hours_remaining,
                 yes_price=candidate.yes_price,
+                polymarket_id=candidate.polymarket_id,
             )
         except Exception as e:
             log.error("snipe_gemini_error", error=str(e))
@@ -269,9 +309,20 @@ class ResolutionSnipeStrategy(Strategy):
 
     async def _enter(self, ctx: TradingContext, market: dict,
                       candidate: SnipeCandidate, verifier: GeminiResult) -> None:
+        # Tier dispatch: pick the (min_edge, max_pct) pair that matches the
+        # verifier's confidence. Higher confidence → thinner edge allowed and
+        # smaller per-trade cap (so a single false positive can't blow up).
+        tier = select_tier(verifier.confidence, self._settings)
+        if tier is None:
+            return    # below low-tier confidence floor (defensive — verdict
+                      # should already be UNCERTAIN at this point)
+
         net_edge = compute_net_edge(candidate.buy_price)
-        min_edge = float(getattr(self._settings, "snipe_min_net_edge", 0.02))
-        if net_edge < min_edge:
+        if net_edge < tier.min_edge:
+            log.debug("snipe_below_tier_edge_floor",
+                      tier=tier.name, edge=round(net_edge, 4),
+                      floor=tier.min_edge,
+                      market=candidate.polymarket_id[:18])
             return
 
         state = await ctx.db.fetchrow("SELECT bankroll FROM system_state WHERE id = 1")
@@ -287,7 +338,7 @@ class ResolutionSnipeStrategy(Strategy):
             kelly_fraction=kelly_fraction,
             kelly_mult=self.kelly_multiplier,
             confidence_mult=1.0,
-            max_single_pct=self.max_single_pct,
+            max_single_pct=tier.max_pct,
             min_trade_size=float(getattr(self._settings, "min_trade_size", 1.0)))
         if size <= 0:
             return
@@ -311,7 +362,8 @@ class ResolutionSnipeStrategy(Strategy):
 
         log.info("snipe_entry",
                  market=candidate.polymarket_id, side=candidate.side,
-                 size=round(size, 2), price=round(candidate.buy_price, 4),
+                 tier=tier.name, size=round(size, 2),
+                 price=round(candidate.buy_price, 4),
                  edge=round(net_edge, 4),
                  hours_remaining=round(candidate.hours_remaining, 1),
                  verifier_confidence=round(verifier.confidence, 3),
@@ -329,5 +381,7 @@ class ResolutionSnipeStrategy(Strategy):
                     "kelly_fraction": round(kelly_fraction, 4),
                     "verifier_confidence": round(verifier.confidence, 3),
                     "verifier_reason": verifier.reason[:200],
+                    "tier": tier.name,
+                    "tier_max_pct": tier.max_pct,
                 },
                 post_only=True)
