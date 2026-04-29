@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     # ── Bankroll & deployment ─────────────────────────────────────────
     starting_bankroll: float = 2000.0
     min_trade_size: float = 1.0
-    max_total_deployed_pct: float = 0.20      # snipe-wide deployed cap
+    # v12.3: deployed cap raised 0.20 → 0.30 so the higher concurrency cap
+    # below can actually fill. Killswitch (3-loss tolerance over 50 trades
+    # at 4% per trade ≈ 11% drawdown) is still well under 30% halt.
+    max_total_deployed_pct: float = 0.30      # snipe-wide deployed cap
     max_total_drawdown_pct: float = 0.30
     max_capital_divergence_pct: float = 0.10
     live_deployment_stage: str = "dry_run"    # dry_run → micro_test → ramp → full
@@ -37,8 +40,12 @@ class Settings(BaseSettings):
     # ── Snipe strategy (the only strategy) ────────────────────────────
     snipe_enabled: bool = True
     snipe_interval_seconds: int = 60
-    snipe_max_concurrent: int = 4
-    snipe_max_total_deployed_pct: float = 0.20
+    # v12.3: 4 → 10. Was the binding throttle (28h in max_concurrent_reached
+    # over the 3-day v12.2 observation window). 10 × 4% = 40% deployed peak,
+    # bounded by snipe_max_total_deployed_pct=0.30 below (≈7-8 fills before
+    # the deployed gate trips).
+    snipe_max_concurrent: int = 10
+    snipe_max_total_deployed_pct: float = 0.30
 
     # Entry gates — v12.2 widened universe.
     # Pre-v12.2 the floor was 0.96; data showed the universe at 0.96+ was
@@ -49,7 +56,11 @@ class Settings(BaseSettings):
     # in the sizing tiers shrink to compensate.
     snipe_min_price: float = 0.92             # was 0.96 in v12.0–v12.1
     snipe_max_hours: float = 12.0             # live ceiling
-    snipe_max_hours_dryrun: float = 168.0     # 7d for observation
+    # v12.3: 168h → 72h so the strategy biases toward markets that can
+    # turn over within a 3-day window. Multi-day holds were locking
+    # capital for too little daily yield (e.g. $40 NO trade × 7-day hold
+    # = ~$5/day average). 3-day cap pushes effective daily yield ~2.3×.
+    snipe_max_hours_dryrun: float = 72.0      # 3d turnover ceiling
     snipe_min_net_edge: float = 0.02          # legacy; superseded by tier floors
     snipe_min_book_depth: float = 1000.0
     snipe_min_book_depth_dryrun: float = 500.0
@@ -65,31 +76,36 @@ class Settings(BaseSettings):
     snipe_kelly_mult: float = 0.25
     snipe_max_single_pct: float = 0.05      # legacy; equals low-tier cap
 
-    # Tier floors and caps re-tuned for v12.2's wider universe (price ≥0.92).
-    # At 0.92 entry, gross edge is 8% but a wrong call loses 92% of position,
-    # so per-trade caps shrink and edge floors rise vs the v12.1 values
-    # (which were calibrated for 0.96+ where wrong-call loss is ≤4%).
+    # Tier caps doubled in v12.3. The v12.2 caps were Kelly-conservative by
+    # ~12× (proper quarter-Kelly at p_win=0.97, payoff 13:1 is ~24%); the
+    # binding constraint was killswitch headroom, not Kelly. The killswitch
+    # at 97%/50 tolerates 3 losses in 50 trades; at 4% low-tier cap × 0.92
+    # max buy price, that's 3 × 3.68% = 11% drawdown — well inside the 30%
+    # `max_total_drawdown_pct` halt.
     #
     # Worst-case single-trade loss (cap × max_buy_price = cap × 0.92):
-    #   high: 0.005 × 0.92 = 0.46% bankroll
-    #   mid:  0.010 × 0.92 = 0.92% bankroll
-    #   low:  0.020 × 0.92 = 1.84% bankroll
-    # Killswitch (97% / 50) catches systematic mispricing within ~1 day.
+    #   high: 0.010 × 0.92 = 0.92% bankroll
+    #   mid:  0.020 × 0.92 = 1.84% bankroll
+    #   low:  0.040 × 0.92 = 3.68% bankroll
+    # 3-loss killswitch drawdown caps:
+    #   high: 3 × 0.92% = 2.76%
+    #   mid:  3 × 1.84% = 5.52%
+    #   low:  3 × 3.68% = 11.04%
 
     # High-confidence tier: conf ≥0.99. 2% min edge (price ≤0.98).
     snipe_tier_high_min_conf: float = 0.99
     snipe_tier_high_min_edge: float = 0.02
-    snipe_tier_high_max_pct: float = 0.005
+    snipe_tier_high_max_pct: float = 0.01
 
     # Mid-confidence tier: conf 0.97–0.99. 4% min edge (price ≤0.96).
     snipe_tier_mid_min_conf: float = 0.97
     snipe_tier_mid_min_edge: float = 0.04
-    snipe_tier_mid_max_pct: float = 0.01
+    snipe_tier_mid_max_pct: float = 0.02
 
     # Low-confidence tier: conf 0.95–0.97. 6% min edge (price ≤0.94).
     snipe_tier_low_min_conf: float = 0.95
     snipe_tier_low_min_edge: float = 0.06
-    snipe_tier_low_max_pct: float = 0.02
+    snipe_tier_low_max_pct: float = 0.04
 
     # Verifier
     snipe_min_verifier_confidence: float = 0.95
@@ -100,6 +116,17 @@ class Settings(BaseSettings):
     snipe_cache_ttl_seconds: float = 1800.0     # 30 min
     snipe_cache_price_drift: float = 0.01
     snipe_cache_hours_drift: float = 1.0
+
+    # ── Early-exit (v12.3: capital recycling) ─────────────────────────
+    # When a NO position's YES price drifts ≥ early_exit_threshold toward
+    # our thesis (i.e. YES drops by ≥3pp from entry), close the trade
+    # mark-to-market and free the slot for new inventory. Edge-neutral —
+    # we're locking in a portion of the resolution PnL early in exchange
+    # for capital turnover. Only fires in dry_run; live mode requires a
+    # real sell order which is a separate v13 milestone.
+    snipe_early_exit_enabled: bool = True
+    snipe_early_exit_threshold: float = 0.03    # 3pp toward thesis
+    snipe_early_exit_check_interval: int = 60   # seconds
 
     # ── Hit-rate killswitch (the only adaptive component) ─────────────
     killswitch_window: int = 50

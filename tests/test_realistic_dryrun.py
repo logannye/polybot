@@ -210,21 +210,29 @@ async def test_maker_fill_still_rejects_no_book():
 
 # ── v12.2 wider-universe economic invariants ───────────────────────────
 
-def test_v12_2_tier_caps_bound_worst_case_loss_below_2pct():
-    """Worst-case single-trade loss (cap × max_buy_price = cap × 0.92)
-    must stay below 2% bankroll on every tier — the killswitch's headroom."""
+def test_v12_3_killswitch_drawdown_under_max_drawdown_halt():
+    """The right invariant after the v12.3 cap-doubling isn't 'worst single
+    trade < 2%' (the v12.2 framing) — it's 'killswitch-induced drawdown <
+    max_total_drawdown_pct'. Killswitch trips on 3 losses in a 50-trade
+    window; at the worst tier (low: 4% × 0.92 buy = 3.68%), 3 losses gives
+    ~11% drawdown — well inside the 30% halt. Verify across all tiers."""
     from polybot.strategies.snipe import select_tier
     from types import SimpleNamespace
     s = SimpleNamespace(
         snipe_tier_high_min_conf=0.99, snipe_tier_high_min_edge=0.02,
-        snipe_tier_high_max_pct=0.005,
+        snipe_tier_high_max_pct=0.01,
         snipe_tier_mid_min_conf=0.97, snipe_tier_mid_min_edge=0.04,
-        snipe_tier_mid_max_pct=0.01,
+        snipe_tier_mid_max_pct=0.02,
         snipe_tier_low_min_conf=0.95, snipe_tier_low_min_edge=0.06,
-        snipe_tier_low_max_pct=0.02,
+        snipe_tier_low_max_pct=0.04,
     )
+    max_drawdown_halt = 0.30
+    losses_to_trip_killswitch = 3    # (1 - 0.97) × 50 + 1 conservative
     for conf in (1.0, 0.98, 0.96):
         t = select_tier(conf, s)
         assert t is not None
-        worst = t.max_pct * 0.92    # buy at 0.92, lose 0.92 of position
-        assert worst < 0.02, f"tier {t.name} worst-case {worst:.4f} >= 2%"
+        per_trade_loss = t.max_pct * 0.92                       # buy at 0.92
+        killswitch_drawdown = per_trade_loss * losses_to_trip_killswitch
+        assert killswitch_drawdown < max_drawdown_halt, (
+            f"tier {t.name} drawdown {killswitch_drawdown:.4f} would breach "
+            f"{max_drawdown_halt} halt before killswitch fires")

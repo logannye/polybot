@@ -32,13 +32,20 @@ def test_settings_loads_defaults(monkeypatch):
     # v12.2 maker-fill simulation defaults on
     assert s.dry_run_assume_maker_fill is True
     assert s.snipe_skip_spread_gate is True
-    # v12.2 retuned tiers
+    # v12.3 retuned tiers (caps doubled — killswitch absorbs variance)
     assert s.snipe_tier_high_min_edge == 0.02
-    assert s.snipe_tier_high_max_pct == 0.005
+    assert s.snipe_tier_high_max_pct == 0.01
     assert s.snipe_tier_mid_min_edge == 0.04
-    assert s.snipe_tier_mid_max_pct == 0.01
+    assert s.snipe_tier_mid_max_pct == 0.02
     assert s.snipe_tier_low_min_edge == 0.06
-    assert s.snipe_tier_low_max_pct == 0.02
+    assert s.snipe_tier_low_max_pct == 0.04
+    # v12.3 throughput levers
+    assert s.snipe_max_concurrent == 10
+    assert s.snipe_max_total_deployed_pct == 0.30
+    assert s.max_total_deployed_pct == 0.30
+    assert s.snipe_max_hours_dryrun == 72.0
+    assert s.snipe_early_exit_enabled is True
+    assert s.snipe_early_exit_threshold == 0.03
 
 
 def test_settings_ignores_legacy_env_keys(monkeypatch):

@@ -86,6 +86,9 @@ class Engine:
         tasks.append(self._run_periodic(self._health_check,
                                          self._settings.health_check_interval))
         tasks.append(self._run_periodic(self._resolution_monitor, 60))
+        if getattr(self._settings, 'snipe_early_exit_enabled', False):
+            interval = int(getattr(self._settings, 'snipe_early_exit_check_interval', 60))
+            tasks.append(self._run_periodic(self._early_exit_monitor, interval))
         if not self._settings.dry_run and self._clob:
             tasks.append(self._run_periodic(self._fill_monitor, 30))
             tasks.append(self._run_periodic(self._check_capital_divergence, 60))
@@ -454,6 +457,65 @@ class Engine:
         log.info("trade_resolved", trade_id=trade["id"], outcome=outcome,
                  pnl=round(pnl, 4), strategy=trade.get("strategy"),
                  verifier_confidence=verifier_conf)
+
+    async def _early_exit_monitor(self):
+        """Close open snipe positions whose YES price has drifted toward our
+        thesis by `snipe_early_exit_threshold` (default 3pp). Recycles the
+        concurrency slot so capital can be redeployed into fresh inventory
+        instead of waiting up to 3 days for resolution.
+
+        Edge-neutral: we exit at the current market mark, locking in the
+        portion of PnL the market has already converged to. Resolution PnL
+        is just the integral of these incremental moves; converting some
+        of that "future PnL" into "today PnL" raises throughput at the cost
+        of one mark-to-market spread per round-trip (zero in dry_run).
+        """
+        threshold = float(getattr(self._settings, 'snipe_early_exit_threshold', 0.03))
+        open_trades = await self._db.fetch(
+            """SELECT t.*, m.polymarket_id, m.question
+               FROM trades t JOIN markets m ON t.market_id = m.id
+               WHERE t.strategy = 'snipe'
+                 AND t.status IN ('dry_run', 'filled')""")
+        if not open_trades:
+            return
+
+        for trade in open_trades:
+            cached = self._scanner.get_cached_price(trade["polymarket_id"])
+            if not cached:
+                continue
+            current_yes = cached.get("yes_price")
+            if current_yes is None:
+                continue
+            current_yes = float(current_yes)
+            entry = float(trade["entry_price"])
+            side = trade["side"]
+
+            # Move toward thesis: YES drops if we're NO, rises if we're YES.
+            if side == "NO":
+                pp_toward_thesis = entry - current_yes
+            else:    # YES
+                pp_toward_thesis = current_yes - entry
+
+            if pp_toward_thesis < threshold:
+                continue
+
+            # Convert to YES-priced exit. The executor's exit_position uses
+            # `pnl = shares * ((1-exit) - (1-entry))` for NO and
+            # `pnl = shares * (exit - entry)` for YES. Both formulas take a
+            # YES-priced exit, so we pass current_yes directly.
+            try:
+                pnl = await self._executor.exit_position(
+                    trade_id=trade["id"],
+                    exit_price=current_yes,
+                    exit_reason="early_exit")
+                log.info("early_exit_closed",
+                         trade_id=trade["id"], side=side, entry=entry,
+                         current_yes=round(current_yes, 4),
+                         move_pp=round(pp_toward_thesis, 4),
+                         pnl=round(float(pnl or 0), 4))
+            except Exception as e:
+                log.error("early_exit_failed",
+                          trade_id=trade["id"], error=str(e))
 
     async def _reconcile_capital(self):
         """Ensure system_state.total_deployed matches actual open positions."""
