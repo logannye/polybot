@@ -181,20 +181,63 @@ async def test_exit_position_computes_pnl_yes():
 
 
 @pytest.mark.asyncio
-async def test_exit_position_computes_pnl_no():
-    """exit_position should compute correct PnL for NO trades."""
+async def test_exit_position_computes_pnl_no_winning():
+    """NO trade wins when YES drifts DOWN. Convention everywhere in the
+    codebase: exit_price is the YES price for both sides. Pre-v12.3 this
+    function silently inverted PnL on NO closes (regression caught by the
+    early-exit monitor's first deploy)."""
     db = AsyncMock()
     db.fetchrow = AsyncMock(return_value={
-        "id": 2, "status": "dry_run", "side": "NO", "entry_price": 0.40,
-        "shares": 25.0, "position_size_usd": 10.0, "strategy": "snipe",
+        "id": 2, "status": "dry_run", "side": "NO", "entry_price": 0.93,
+        "shares": 43.0, "position_size_usd": 40.0, "strategy": "snipe",
         "market_id": 1,
     })
     db.execute = AsyncMock()
     wallet = MagicMock()
     executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
-    # NO entry at 0.40, now NO is worth 0.50 → PnL = 25 * (0.50 - 0.40) = 2.50
-    pnl = await executor.exit_position(trade_id=2, exit_price=0.50, exit_reason="take_profit")
-    assert pnl == pytest.approx(2.50)
+    # NO entry at YES=0.93, YES drops to 0.90 → NO winning
+    # PnL = 43 * ((1-0.90) - (1-0.93)) = 43 * 0.03 = +1.29
+    pnl = await executor.exit_position(trade_id=2, exit_price=0.90, exit_reason="early_exit")
+    assert pnl == pytest.approx(1.29)
+
+
+@pytest.mark.asyncio
+async def test_exit_position_computes_pnl_no_losing():
+    """NO trade loses when YES rises. Symmetric to the winning case —
+    same exit_price convention, sign flips."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "id": 99, "status": "dry_run", "side": "NO", "entry_price": 0.93,
+        "shares": 43.0, "position_size_usd": 40.0, "strategy": "snipe",
+        "market_id": 1,
+    })
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    # NO entry at YES=0.93, YES rises to 0.96 → NO losing
+    # PnL = 43 * ((1-0.96) - (1-0.93)) = 43 * -0.03 = -1.29
+    pnl = await executor.exit_position(trade_id=99, exit_price=0.96, exit_reason="early_exit")
+    assert pnl == pytest.approx(-1.29)
+
+
+@pytest.mark.asyncio
+async def test_exit_position_no_resolution_pnl_matches_close_resolved():
+    """Regression: exit_position(NO at 0.93, exit=0.0) MUST return the same
+    +shares*0.93 PnL that _close_resolved_trade(outcome=0) computes for the
+    same NO trade. If these diverge, dry_run vs resolution PnL won't agree."""
+    db = AsyncMock()
+    db.fetchrow = AsyncMock(return_value={
+        "id": 100, "status": "dry_run", "side": "NO", "entry_price": 0.93,
+        "shares": 43.0, "position_size_usd": 40.0, "strategy": "snipe",
+        "market_id": 1,
+    })
+    db.execute = AsyncMock()
+    wallet = MagicMock()
+    executor = OrderExecutor(scanner=MagicMock(), wallet=wallet, db=db, fill_timeout_seconds=120)
+    # NO trade resolves NO (YES=0). Should equal the resolution path:
+    #   shares × ((1-0) - (1-0.93)) = 43 × 0.93 = 39.99
+    pnl = await executor.exit_position(trade_id=100, exit_price=0.0, exit_reason="resolution")
+    assert pnl == pytest.approx(39.99)
 
 
 @pytest.mark.asyncio

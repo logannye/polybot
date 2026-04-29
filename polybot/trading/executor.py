@@ -185,8 +185,15 @@ class OrderExecutor:
         position_size = float(trade["position_size_usd"])
         strategy = trade.get("strategy", "forecast")
 
-        # PnL: exit_price is the share value we're selling at
-        pnl = shares * (exit_price - entry_price)
+        # PnL: exit_price is the YES-priced mark (matches close_position +
+        # _close_resolved_trade convention). For YES we win when YES rises;
+        # for NO we win when YES falls. Pre-v12.3 this was side-agnostic
+        # (`shares * (exit - entry)`), which silently inverted PnL on every
+        # NO-side close. Surfaced by the v12.3 early-exit monitor.
+        if side == "YES":
+            pnl = shares * (exit_price - entry_price)
+        else:
+            pnl = shares * ((1.0 - exit_price) - (1.0 - entry_price))
 
         now = datetime.now(timezone.utc)
         closed_status = "dry_run_resolved" if trade["status"] == "dry_run" else "closed"
