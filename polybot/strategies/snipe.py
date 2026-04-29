@@ -175,6 +175,25 @@ class ResolutionSnipeStrategy(Strategy):
             log.error("snipe_fetch_markets_error", error=str(e))
             return
 
+        # v12.4: Build the set of `group_slug` values currently held by an
+        # open snipe position. Markets sharing a group_slug are bracket
+        # markets on the same news event (e.g. all "Q1 2026 GDP" buckets);
+        # opening multiple positions on them creates phantom diversification
+        # — one news event drives correlated PnL across all of them.
+        held_group_slugs: set[str] = set()
+        if getattr(self._settings, "snipe_correlation_filter_enabled", True):
+            held_rows = await ctx.db.fetch(
+                """SELECT m.polymarket_id FROM trades t
+                   JOIN markets m ON m.id = t.market_id
+                   WHERE t.strategy='snipe'
+                     AND t.status IN ('open','filled','dry_run')""")
+            for row in held_rows:
+                cached = ctx.scanner.get_cached_price(row["polymarket_id"])
+                if cached:
+                    g = cached.get("group_slug")
+                    if g:
+                        held_group_slugs.add(g)
+
         now = datetime.now(timezone.utc)
         n_classify_none = 0
         n_past_resolution = 0
@@ -219,6 +238,10 @@ class ResolutionSnipeStrategy(Strategy):
                 cand.polymarket_id)
             already_in = bool(existing and existing > 0)
 
+            # v12.4 correlation gate: same news event already held.
+            market_group = market.get("group_slug")
+            event_held = bool(market_group and market_group in held_group_slugs)
+
             # Verify with Gemini regardless of depth/dup gates so the shadow
             # log captures the verifier's read on every candidate.
             verifier_result = await self._verify(cand, market)
@@ -235,6 +258,8 @@ class ResolutionSnipeStrategy(Strategy):
                 reject_reason = "depth_below_floor"
             elif already_in:
                 reject_reason = "position_already_open"
+            elif event_held:
+                reject_reason = "event_group_already_held"
             elif not verified:
                 reject_reason = (f"verifier:{verifier_result.verdict}@"
                                  f"{verifier_result.confidence:.2f}")
@@ -267,11 +292,16 @@ class ResolutionSnipeStrategy(Strategy):
             if already_in:
                 n_dup += 1
                 continue
+            if event_held:
+                continue
             if not verified:
                 continue
 
             await self._enter(ctx, market, cand, verifier_result)
             n_entered += 1
+            # Reserve this group_slug so the same cycle can't double-enter.
+            if market_group:
+                held_group_slugs.add(market_group)
 
         log.info("snipe_cycle",
                  markets_scanned=len(all_markets),

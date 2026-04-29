@@ -117,16 +117,39 @@ class Settings(BaseSettings):
     snipe_cache_price_drift: float = 0.01
     snipe_cache_hours_drift: float = 1.0
 
-    # ── Early-exit (v12.3: capital recycling) ─────────────────────────
-    # When a NO position's YES price drifts ≥ early_exit_threshold toward
-    # our thesis (i.e. YES drops by ≥3pp from entry), close the trade
-    # mark-to-market and free the slot for new inventory. Edge-neutral —
-    # we're locking in a portion of the resolution PnL early in exchange
-    # for capital turnover. Only fires in dry_run; live mode requires a
-    # real sell order which is a separate v13 milestone.
+    # ── Exit rules (v12.4: asymmetric upside) ─────────────────────────
+    # Three exit triggers, evaluated in priority order each cycle:
+    #
+    #   1. STOP-LOSS — within the first `stop_loss_window_hours` of entry,
+    #      if the YES price has moved ≥ `stop_loss_adverse_pp` AGAINST our
+    #      thesis, close at mark. Caps per-trade loss at ~5% of position
+    #      instead of 100% on the rare verifier-wrong call.
+    #
+    #   2. TAKE-PROFIT — when the move toward our thesis has captured
+    #      ≥ `early_exit_capture_pct` (default 80%) of the max-possible
+    #      move (entry → 0 for NO, entry → 1 for YES), close at mark.
+    #      The 3-day v12.3 data showed verifier-correct trades moving
+    #      80+pp in 1-3d; capturing 75% in 1-2d beats holding 7d to
+    #      resolution by ~3× in time-yield.
+    #
+    #   3. TIME-STOP — any open trade past `max_hold_hours` closes at
+    #      mark. Forces unrealized into realized; frees the slot.
+    #
+    # Combined, these turn the win/loss size ratio from ~1:1 (full +93%
+    # vs full -100% per position) to ~15:1 (+75% vs -5%).
     snipe_early_exit_enabled: bool = True
-    snipe_early_exit_threshold: float = 0.03    # 3pp toward thesis
     snipe_early_exit_check_interval: int = 60   # seconds
+    snipe_early_exit_capture_pct: float = 0.80  # take-profit at 80% of max move
+    snipe_max_hold_hours: float = 48.0          # time-stop ceiling
+    snipe_stop_loss_adverse_pp: float = 0.05    # 5pp adverse → cut
+    snipe_stop_loss_window_hours: float = 2.0   # window for stop-loss eligibility
+
+    # v12.4: prevent ≥1 position per news event. Markets that share a
+    # `group_slug` in Gamma (e.g. "Q1 2026 GDP" bracket markets) are driven
+    # by the same underlying outcome, so opening multiple positions on
+    # them creates phantom diversification — one news event triggers
+    # correlated PnL across all of them. Off → on by default in v12.4.
+    snipe_correlation_filter_enabled: bool = True
 
     # ── Hit-rate killswitch (the only adaptive component) ─────────────
     killswitch_window: int = 50

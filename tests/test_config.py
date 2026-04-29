@@ -45,7 +45,12 @@ def test_settings_loads_defaults(monkeypatch):
     assert s.max_total_deployed_pct == 0.30
     assert s.snipe_max_hours_dryrun == 72.0
     assert s.snipe_early_exit_enabled is True
-    assert s.snipe_early_exit_threshold == 0.03
+    # v12.4 exit rules
+    assert s.snipe_early_exit_capture_pct == 0.80
+    assert s.snipe_max_hold_hours == 48.0
+    assert s.snipe_stop_loss_adverse_pp == 0.05
+    assert s.snipe_stop_loss_window_hours == 2.0
+    assert s.snipe_correlation_filter_enabled is True
 
 
 def test_settings_ignores_legacy_env_keys(monkeypatch):

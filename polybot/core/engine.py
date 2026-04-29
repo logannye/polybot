@@ -459,18 +459,25 @@ class Engine:
                  verifier_confidence=verifier_conf)
 
     async def _early_exit_monitor(self):
-        """Close open snipe positions whose YES price has drifted toward our
-        thesis by `snipe_early_exit_threshold` (default 3pp). Recycles the
-        concurrency slot so capital can be redeployed into fresh inventory
-        instead of waiting up to 3 days for resolution.
+        """v12.4: Three exit rules, priority-ordered per trade per cycle:
 
-        Edge-neutral: we exit at the current market mark, locking in the
-        portion of PnL the market has already converged to. Resolution PnL
-        is just the integral of these incremental moves; converting some
-        of that "future PnL" into "today PnL" raises throughput at the cost
-        of one mark-to-market spread per round-trip (zero in dry_run).
+          1. STOP-LOSS — `move_toward_thesis ≤ -stop_loss_adverse_pp` AND
+             `age_hours ≤ stop_loss_window_hours`. Caps per-trade downside.
+          2. TAKE-PROFIT — `move_toward_thesis / max_possible_move ≥
+             early_exit_capture_pct`. Locks in most of the eventual PnL
+             without waiting for resolution.
+          3. TIME-STOP — `age_hours ≥ max_hold_hours`. Forces realization.
+
+        `move_toward_thesis` is signed: positive = our way, negative = adverse.
+        For NO: `entry - current_yes`. For YES: `current_yes - entry`.
+        Max possible toward-thesis move: `entry` (NO → 0) or `1 - entry`
+        (YES → 1).
         """
-        threshold = float(getattr(self._settings, 'snipe_early_exit_threshold', 0.03))
+        capture_pct = float(getattr(self._settings, 'snipe_early_exit_capture_pct', 0.80))
+        max_hold_hours = float(getattr(self._settings, 'snipe_max_hold_hours', 48.0))
+        sl_adverse_pp = float(getattr(self._settings, 'snipe_stop_loss_adverse_pp', 0.05))
+        sl_window_hours = float(getattr(self._settings, 'snipe_stop_loss_window_hours', 2.0))
+
         open_trades = await self._db.fetch(
             """SELECT t.*, m.polymarket_id, m.question
                FROM trades t JOIN markets m ON t.market_id = m.id
@@ -479,39 +486,58 @@ class Engine:
         if not open_trades:
             return
 
+        now = datetime.now(timezone.utc)
         for trade in open_trades:
-            cached = self._scanner.get_cached_price(trade["polymarket_id"])
-            if not cached:
-                continue
-            current_yes = cached.get("yes_price")
-            if current_yes is None:
-                continue
-            current_yes = float(current_yes)
             entry = float(trade["entry_price"])
             side = trade["side"]
+            opened_at = trade["opened_at"]
+            age_hours = (now - opened_at).total_seconds() / 3600.0
 
-            # Move toward thesis: YES drops if we're NO, rises if we're YES.
-            if side == "NO":
-                pp_toward_thesis = entry - current_yes
-            else:    # YES
-                pp_toward_thesis = current_yes - entry
+            # Need a current mark for stop-loss + take-profit decisions.
+            # Time-stop fires regardless of whether we have a price (we
+            # exit at entry as a fallback — net-zero but frees the slot).
+            cached = self._scanner.get_cached_price(trade["polymarket_id"])
+            current_yes = (float(cached["yes_price"])
+                           if cached and cached.get("yes_price") is not None
+                           else None)
 
-            if pp_toward_thesis < threshold:
+            move_toward = None
+            capture_ratio = None
+            if current_yes is not None:
+                if side == "NO":
+                    move_toward = entry - current_yes
+                    max_move = entry
+                else:
+                    move_toward = current_yes - entry
+                    max_move = 1.0 - entry
+                capture_ratio = (move_toward / max_move) if max_move > 0 else 0.0
+
+            exit_reason: str | None = None
+            if (move_toward is not None
+                    and age_hours <= sl_window_hours
+                    and move_toward <= -sl_adverse_pp):
+                exit_reason = "stop_loss"
+            elif capture_ratio is not None and capture_ratio >= capture_pct:
+                exit_reason = "take_profit"
+            elif age_hours >= max_hold_hours:
+                exit_reason = "time_stop"
+            if exit_reason is None:
                 continue
 
-            # Convert to YES-priced exit. The executor's exit_position uses
-            # `pnl = shares * ((1-exit) - (1-entry))` for NO and
-            # `pnl = shares * (exit - entry)` for YES. Both formulas take a
-            # YES-priced exit, so we pass current_yes directly.
+            exit_price = current_yes if current_yes is not None else entry
             try:
                 pnl = await self._executor.exit_position(
-                    trade_id=trade["id"],
-                    exit_price=current_yes,
-                    exit_reason="early_exit")
-                log.info("early_exit_closed",
-                         trade_id=trade["id"], side=side, entry=entry,
-                         current_yes=round(current_yes, 4),
-                         move_pp=round(pp_toward_thesis, 4),
+                    trade_id=trade["id"], exit_price=exit_price,
+                    exit_reason=exit_reason)
+                log.info("trade_early_closed",
+                         trade_id=trade["id"], reason=exit_reason,
+                         side=side, entry=entry,
+                         exit_price=round(exit_price, 4),
+                         move_toward=(round(move_toward, 4)
+                                      if move_toward is not None else None),
+                         capture_ratio=(round(capture_ratio, 3)
+                                        if capture_ratio is not None else None),
+                         age_hours=round(age_hours, 2),
                          pnl=round(float(pnl or 0), 4))
             except Exception as e:
                 log.error("early_exit_failed",
