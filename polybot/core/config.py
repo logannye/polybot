@@ -56,11 +56,12 @@ class Settings(BaseSettings):
     # in the sizing tiers shrink to compensate.
     snipe_min_price: float = 0.92             # was 0.96 in v12.0–v12.1
     snipe_max_hours: float = 12.0             # live ceiling
-    # v12.3: 168h → 72h so the strategy biases toward markets that can
-    # turn over within a 3-day window. Multi-day holds were locking
-    # capital for too little daily yield (e.g. $40 NO trade × 7-day hold
-    # = ~$5/day average). 3-day cap pushes effective daily yield ~2.3×.
-    snipe_max_hours_dryrun: float = 72.0      # 3d turnover ceiling
+    # v12.4.1 (2026-04-30): reverted 72h → 168h. The 72h entry filter
+    # crushed the universe (~14-100× fewer signaling markets) without
+    # adding value, because the v12.4 48h time-stop AT EXIT already
+    # caps hold duration. Restricting at both entry AND exit was
+    # redundant; the entry restriction was strictly destructive.
+    snipe_max_hours_dryrun: float = 168.0     # 7d entry ceiling, 48h exit cap
     snipe_min_net_edge: float = 0.02          # legacy; superseded by tier floors
     snipe_min_book_depth: float = 1000.0
     snipe_min_book_depth_dryrun: float = 500.0

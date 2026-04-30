@@ -43,7 +43,7 @@ def test_settings_loads_defaults(monkeypatch):
     assert s.snipe_max_concurrent == 10
     assert s.snipe_max_total_deployed_pct == 0.30
     assert s.max_total_deployed_pct == 0.30
-    assert s.snipe_max_hours_dryrun == 72.0
+    assert s.snipe_max_hours_dryrun == 168.0
     assert s.snipe_early_exit_enabled is True
     # v12.4 exit rules
     assert s.snipe_early_exit_capture_pct == 0.80
