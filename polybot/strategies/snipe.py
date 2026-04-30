@@ -203,6 +203,7 @@ class ResolutionSnipeStrategy(Strategy):
         n_verifier_rejected = 0
         n_signal = 0
         n_entered = 0
+        n_inner_rejected = 0    # passed run_once gates but rejected inside _enter
 
         for market in all_markets:
             resolution_time = market.get("resolution_time")
@@ -297,15 +298,19 @@ class ResolutionSnipeStrategy(Strategy):
             if not verified:
                 continue
 
-            await self._enter(ctx, market, cand, verifier_result)
-            n_entered += 1
-            # Reserve this group_slug so the same cycle can't double-enter.
-            if market_group:
-                held_group_slugs.add(market_group)
+            placed = await self._enter(ctx, market, cand, verifier_result)
+            if placed:
+                n_entered += 1
+                # Reserve this group_slug so the same cycle can't double-enter.
+                if market_group:
+                    held_group_slugs.add(market_group)
+            else:
+                n_inner_rejected += 1
 
         log.info("snipe_cycle",
                  markets_scanned=len(all_markets),
                  signals=n_signal, entered=n_entered,
+                 inner_rejected=n_inner_rejected,
                  verifier_rejected=n_verifier_rejected,
                  depth_below=n_depth_below, dup=n_dup,
                  no_resolution=n_no_resolution,
@@ -338,14 +343,13 @@ class ResolutionSnipeStrategy(Strategy):
                                 reason=f"exception:{str(e)[:80]}")
 
     async def _enter(self, ctx: TradingContext, market: dict,
-                      candidate: SnipeCandidate, verifier: GeminiResult) -> None:
-        # Tier dispatch: pick the (min_edge, max_pct) pair that matches the
-        # verifier's confidence. Higher confidence → thinner edge allowed and
-        # smaller per-trade cap (so a single false positive can't blow up).
+                      candidate: SnipeCandidate, verifier: GeminiResult) -> bool:
+        """Returns True iff an order was actually placed; False if any inner
+        gate (tier-edge, bankroll, sizing, missing token_id) rejected it.
+        Used by the cycle counter so `entered=N` reflects real placements."""
         tier = select_tier(verifier.confidence, self._settings)
         if tier is None:
-            return    # below low-tier confidence floor (defensive — verdict
-                      # should already be UNCERTAIN at this point)
+            return False    # below low-tier confidence floor (defensive)
 
         net_edge = compute_net_edge(candidate.buy_price)
         if net_edge < tier.min_edge:
@@ -353,11 +357,11 @@ class ResolutionSnipeStrategy(Strategy):
                       tier=tier.name, edge=round(net_edge, 4),
                       floor=tier.min_edge,
                       market=candidate.polymarket_id[:18])
-            return
+            return False
 
         state = await ctx.db.fetchrow("SELECT bankroll FROM system_state WHERE id = 1")
         if not state:
-            return
+            return False
         bankroll = float(state["bankroll"])
 
         # Binary Kelly: edge / (1 - p_buy).
@@ -371,7 +375,7 @@ class ResolutionSnipeStrategy(Strategy):
             max_single_pct=tier.max_pct,
             min_trade_size=float(getattr(self._settings, "min_trade_size", 1.0)))
         if size <= 0:
-            return
+            return False
 
         market_id = await ctx.db.fetchval(
             """INSERT INTO markets (polymarket_id, question, category, resolution_time,
@@ -388,7 +392,7 @@ class ResolutionSnipeStrategy(Strategy):
         token_id = (market.get("yes_token_id") if candidate.side == "YES"
                     else market.get("no_token_id"))
         if not token_id:
-            return
+            return False
 
         log.info("snipe_entry",
                  market=candidate.polymarket_id, side=candidate.side,
@@ -415,3 +419,4 @@ class ResolutionSnipeStrategy(Strategy):
                     "tier_max_pct": tier.max_pct,
                 },
                 post_only=True)
+        return True
