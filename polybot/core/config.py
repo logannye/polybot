@@ -47,14 +47,16 @@ class Settings(BaseSettings):
     snipe_max_concurrent: int = 10
     snipe_max_total_deployed_pct: float = 0.30
 
-    # Entry gates — v12.2 widened universe.
-    # Pre-v12.2 the floor was 0.96; data showed the universe at 0.96+ was
-    # dominated by 0.998+ markets that are negative-EV after fees even at
-    # 100% accuracy. 0.92 floor expands the universe to markets with real
-    # gross edge (8%+) where the verifier+killswitch combo can actually
-    # produce learning signal. The variance is higher, so per-trade caps
-    # in the sizing tiers shrink to compensate.
-    snipe_min_price: float = 0.92             # was 0.96 in v12.0–v12.1
+    # Entry gates — v12.4.3 expanded universe further (0.92 → 0.85).
+    # The 0.92 floor missed the highest-EV opportunity: verifier-confirmed
+    # structural locks where the market HASN'T YET converged. Yesterday's
+    # 4/4 trades were all 0.927-0.935 (post-convergence). At 0.85 entry,
+    # gross edge is 0.15 (vs 0.07 at 0.93) — 2.3× per-dollar EV at the
+    # same verifier accuracy. Verifier prompt is price-agnostic so
+    # accuracy should generalize, but band is empirically unvalidated.
+    # Per-trade worst-case at 0.85 × 4% = 3.4% bankroll (vs 3.68% at
+    # 0.92), still inside the 30% drawdown halt.
+    snipe_min_price: float = 0.85             # was 0.92 in v12.2-v12.4
     snipe_max_hours: float = 12.0             # live ceiling
     # v12.4.1 (2026-04-30): reverted 72h → 168h. The 72h entry filter
     # crushed the universe (~14-100× fewer signaling markets) without

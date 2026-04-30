@@ -21,8 +21,10 @@ def test_settings_loads_defaults(monkeypatch):
     assert s.starting_bankroll == 2000.0
     assert s.dry_run is True
     assert s.snipe_enabled is True
-    # v12.2: dropped from 0.96 to 0.92
-    assert s.snipe_min_price == 0.92
+    # v12.4.3: 0.92 → 0.85 to capture pre-convergence locks (yesterday's
+    # 4/4 winners were all 0.927-0.935, post-convergence; 0.85 admits
+    # markets the verifier locks BEFORE the price has fully converged)
+    assert s.snipe_min_price == 0.85
     assert s.snipe_kelly_mult == 0.25
     assert s.snipe_min_verifier_confidence == 0.95
     assert s.killswitch_window == 50
