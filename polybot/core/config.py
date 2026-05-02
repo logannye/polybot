@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     # When true + post_only, fill at limit price with 0% fee, no spread cap.
     # Set false to stress-test against worst-case taker fills.
     dry_run_assume_maker_fill: bool = True
+    # v12.5: maker-fill realism gate. The pre-v12.5 simulation always
+    # filled maker orders at the limit price. Phase 0 audit (2026-05-02)
+    # showed this was wildly optimistic — the LOCKED markets we'd been
+    # simulating profitably had bid 0.001 / ask 0.999 (no real liquidity).
+    # Real maker fills require best_ask close enough to our limit that
+    # a small market move could match. Reject when:
+    #   best_ask - our_limit > dry_run_maker_fill_tolerance
+    # Default 0.02 (2pp): permits realistic small moves, rejects wide
+    # books where no one is selling near our price.
+    dry_run_maker_fill_tolerance: float = 0.02
 
     # ── Bankroll & deployment ─────────────────────────────────────────
     starting_bankroll: float = 2000.0

@@ -68,17 +68,43 @@ class OrderExecutor:
                     return None
 
                 if assume_maker:
-                    # Maker mode: post_only at our limit price. We're the
-                    # passive side — the spread doesn't apply because we're
-                    # not crossing it. Fill at our intended price with 0%
-                    # fee. This is the OPTIMISTIC (deployed-behavior)
-                    # counterfactual; real-world fill rate is a separate
-                    # measurement, recorded as `dryrun_maker_fill` events.
+                    # Maker mode: post_only at our limit price.
+                    # v12.5 realism gate: a maker buy at limit X only fills
+                    # if a seller comes down to (or below) X. Best_ask is
+                    # our proxy for "how close is the cheapest seller to
+                    # our limit?" — if best_ask >> X, no realistic fill.
+                    # The pre-v12.5 simulation ignored this and always
+                    # filled, producing fictional PnL on markets where
+                    # the real book had bid 0.001 / ask 0.999 (no
+                    # tradeable counter-party near our price).
+                    best_ask = summary.get("best_ask")
+                    tolerance = float(getattr(
+                        self._settings, "dry_run_maker_fill_tolerance", 0.02))
+                    if best_ask is None:
+                        log.info("dryrun_no_ask",
+                                 token_id=token_id[:20], strategy=strategy)
+                        return None
+                    gap = float(best_ask) - float(price)
+                    if gap > tolerance:
+                        log.info("dryrun_maker_unfillable",
+                                 token_id=token_id[:20], strategy=strategy,
+                                 limit=price, best_ask=float(best_ask),
+                                 gap=round(gap, 4), tolerance=tolerance)
+                        log.info("dryrun_observation",
+                                 strategy=strategy, side=side, size_usd=size_usd,
+                                 intended_price=price,
+                                 best_bid=summary.get("best_bid"),
+                                 best_ask=float(best_ask),
+                                 spread=round(summary.get("spread", 0.0), 4),
+                                 reject_reason="maker_unfillable",
+                                 kelly_inputs=kelly_inputs)
+                        return None
                     log.info("dryrun_maker_fill",
                              token_id=token_id[:20], strategy=strategy,
                              side=side, price=price, size_usd=size_usd,
                              best_bid=summary.get("best_bid"),
-                             best_ask=summary.get("best_ask"),
+                             best_ask=float(best_ask),
+                             gap=round(gap, 4),
                              spread=round(summary.get("spread", 0.0), 4))
                     # effective_price stays at `price`, fee = 0
                 else:

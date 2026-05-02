@@ -14,7 +14,8 @@ def _make_book(best_bid: str, best_ask: str):
     return book
 
 
-def _make_executor(db, clob, realistic=True, max_spread=0.15, fee=0.02):
+def _make_executor(db, clob, realistic=True, max_spread=0.15, fee=0.02,
+                   maker_fill_tolerance=0.02):
     """Helper to create an executor with realistic dry-run settings."""
     from polybot.trading.executor import OrderExecutor
     scanner = MagicMock()
@@ -30,6 +31,7 @@ def _make_executor(db, clob, realistic=True, max_spread=0.15, fee=0.02):
     settings.dry_run_realistic = realistic
     settings.dry_run_max_spread = max_spread
     settings.dry_run_taker_fee_pct = fee
+    settings.dry_run_maker_fill_tolerance = maker_fill_tolerance
     executor._settings = settings
     return executor
 
@@ -93,7 +95,8 @@ async def test_non_realistic_dryrun_uses_model_price():
 
 # ── v12.2 maker-fill simulation ─────────────────────────────────────────
 
-def _make_executor_v12_2(db, clob, *, assume_maker=True, max_spread=0.15):
+def _make_executor_v12_2(db, clob, *, assume_maker=True, max_spread=0.15,
+                         maker_fill_tolerance=0.02):
     """Helper that wires the v12.2 dry_run_assume_maker_fill flag explicitly."""
     from polybot.trading.executor import OrderExecutor
     scanner = MagicMock()
@@ -108,39 +111,95 @@ def _make_executor_v12_2(db, clob, *, assume_maker=True, max_spread=0.15):
     settings.dry_run_max_spread = max_spread
     settings.dry_run_taker_fee_pct = 0.02
     settings.dry_run_assume_maker_fill = assume_maker
+    settings.dry_run_maker_fill_tolerance = maker_fill_tolerance
     executor._settings = settings
     return executor
 
 
 @pytest.mark.asyncio
-async def test_maker_fill_skips_spread_cap():
-    """Maker mode (post_only=True + dry_run_assume_maker_fill=True) should
-    fill even on a wide-spread book — we're not crossing it."""
+async def test_maker_fill_with_tight_book_succeeds():
+    """v12.5: maker fill at limit price, tight book within tolerance.
+    Limit 0.93, best_ask 0.94 → gap 0.01 ≤ 0.02 tolerance → fill at limit."""
     db = AsyncMock()
     db.fetchval = AsyncMock(return_value=1)
     clob = AsyncMock()
     clob.get_order_book_summary = AsyncMock(return_value={
-        "best_bid": 0.01, "best_ask": 0.99, "spread": 0.98,    # extreme spread
+        "best_bid": 0.91, "best_ask": 0.94, "spread": 0.03,
     })
-    executor = _make_executor_v12_2(db, clob, assume_maker=True, max_spread=0.15)
+    executor = _make_executor_v12_2(db, clob, assume_maker=True)
     result = await executor.place_order(
         token_id="tok1", side="NO", size_usd=20.0, price=0.93,
         market_id=1, analysis_id=None, strategy="snipe", post_only=True)
     assert result is not None
-    # Trade inserted at our limit price, not best_ask
     insert_args = db.fetchval.call_args[0]
     entry_price = insert_args[4]
-    assert entry_price == 0.93
+    assert entry_price == 0.93    # at limit, not best_ask
 
 
 @pytest.mark.asyncio
-async def test_maker_fill_zero_fee():
-    """Maker fill should NOT apply the taker fee — 0% on the size_usd field."""
+async def test_maker_fill_rejects_when_book_too_wide():
+    """v12.5: real maker fills require a counter-party near our price.
+    Limit 0.93, best_ask 0.99 → gap 0.06 > 0.02 tolerance → REJECT.
+    This is the gate that prevents fictional fills on the LOCKED markets
+    where bid 0.001 / ask 0.999 means no real seller near our limit."""
+    db = AsyncMock()
+    clob = AsyncMock()
+    clob.get_order_book_summary = AsyncMock(return_value={
+        "best_bid": 0.01, "best_ask": 0.99, "spread": 0.98,
+    })
+    executor = _make_executor_v12_2(db, clob, assume_maker=True)
+    result = await executor.place_order(
+        token_id="tok1", side="NO", size_usd=20.0, price=0.93,
+        market_id=1, analysis_id=None, strategy="snipe", post_only=True)
+    assert result is None
+    db.fetchval.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maker_fill_tolerance_configurable():
+    """Custom tolerance changes the rejection threshold. With tolerance=0.10,
+    a 0.06 gap that would normally reject now fills."""
     db = AsyncMock()
     db.fetchval = AsyncMock(return_value=1)
     clob = AsyncMock()
     clob.get_order_book_summary = AsyncMock(return_value={
-        "best_bid": 0.90, "best_ask": 0.94, "spread": 0.04,
+        "best_bid": 0.01, "best_ask": 0.99, "spread": 0.98,
+    })
+    executor = _make_executor_v12_2(
+        db, clob, assume_maker=True, maker_fill_tolerance=0.10)
+    result = await executor.place_order(
+        token_id="tok1", side="NO", size_usd=20.0, price=0.93,
+        market_id=1, analysis_id=None, strategy="snipe", post_only=True)
+    assert result is not None    # gap 0.06 < tolerance 0.10 → fills
+
+
+@pytest.mark.asyncio
+async def test_maker_fill_at_exact_tolerance_boundary():
+    """A gap of exactly the tolerance is treated as fillable (≤, not <)."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    clob = AsyncMock()
+    clob.get_order_book_summary = AsyncMock(return_value={
+        "best_bid": 0.90, "best_ask": 0.95, "spread": 0.05,
+    })
+    executor = _make_executor_v12_2(
+        db, clob, assume_maker=True, maker_fill_tolerance=0.02)
+    result = await executor.place_order(
+        token_id="tok1", side="NO", size_usd=20.0, price=0.93,
+        market_id=1, analysis_id=None, strategy="snipe", post_only=True)
+    # gap 0.95 - 0.93 = 0.02, exactly at tolerance → fills
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_maker_fill_zero_fee():
+    """Maker fill should NOT apply the taker fee — 0% on the size_usd field.
+    Book is tight (gap 0.92→0.93 = 0.01, within tolerance) so fill happens."""
+    db = AsyncMock()
+    db.fetchval = AsyncMock(return_value=1)
+    clob = AsyncMock()
+    clob.get_order_book_summary = AsyncMock(return_value={
+        "best_bid": 0.90, "best_ask": 0.93, "spread": 0.03,
     })
     executor = _make_executor_v12_2(db, clob, assume_maker=True)
     await executor.place_order(

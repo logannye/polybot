@@ -34,6 +34,8 @@ def test_settings_loads_defaults(monkeypatch):
     # v12.2 maker-fill simulation defaults on
     assert s.dry_run_assume_maker_fill is True
     assert s.snipe_skip_spread_gate is True
+    # v12.5 maker-fill realism gate
+    assert s.dry_run_maker_fill_tolerance == 0.02
     # v12.3 retuned tiers (caps doubled — killswitch absorbs variance)
     assert s.snipe_tier_high_min_edge == 0.02
     assert s.snipe_tier_high_max_pct == 0.01
