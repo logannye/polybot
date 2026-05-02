@@ -1,8 +1,15 @@
+"""Polybot v12 entry point — single-strategy snipe bot.
+
+Wires up: DB, Polymarket scanner, wallet, optional CLOB, executor, recorder,
+risk manager, email notifier, dashboard, Gemini verifier, snipe strategy,
+engine.
+"""
 import asyncio
 import os
 import signal
 import structlog
 import uvicorn
+
 from polybot.core.config import Settings
 from polybot.core.engine import Engine
 from polybot.db.connection import Database
@@ -11,16 +18,11 @@ from polybot.trading.executor import OrderExecutor
 from polybot.trading.wallet import WalletManager
 from polybot.trading.risk import RiskManager
 from polybot.trading.clob import ClobGateway
-from polybot.learning.recorder import TradeRecorder
-from polybot.learning.trade_learning import TradeLearner
 from polybot.notifications.email import EmailNotifier
-from polybot.trading.position_manager import ActivePositionManager
 from polybot.dashboard.app import create_app
 from polybot.strategies.snipe import ResolutionSnipeStrategy
-from polybot.strategies.live_sports import LiveSportsStrategy
-from polybot.sports.espn_client import ESPNClient
-from polybot.sports.calibrator import OnlineCalibrator
 from polybot.analysis.gemini_client import GeminiClient
+from polybot.analysis.verifier_cache import VerifierCache
 
 structlog.configure(
     processors=[
@@ -32,8 +34,15 @@ structlog.configure(
 log = structlog.get_logger()
 
 
+class _MinimalRecorder:
+    """v12 doesn't need the v10 ensemble-trust recorder. The engine writes
+    trade_outcome rows directly. This shim is held for any legacy call sites.
+    """
+    def __init__(self, db):
+        self._db = db
+
+
 async def _run_bot_tasks(engine_fn, dashboard_fn, shutdown_event: asyncio.Event):
-    """Run engine and dashboard concurrently. Dashboard failure is non-fatal."""
     engine_task = asyncio.create_task(engine_fn())
     dashboard_task = asyncio.create_task(dashboard_fn())
     shutdown_task = asyncio.create_task(shutdown_event.wait())
@@ -47,15 +56,14 @@ async def _run_bot_tasks(engine_fn, dashboard_fn, shutdown_event: asyncio.Event)
 
     dashboard_task.add_done_callback(_on_dashboard_done)
 
-    # Wait for shutdown signal or engine exit (NOT dashboard exit)
     await asyncio.wait(
         [engine_task, shutdown_task],
         return_when=asyncio.FIRST_COMPLETED)
 
-    # Cancel everything
     for task in [engine_task, dashboard_task, shutdown_task]:
         task.cancel()
-    results = await asyncio.gather(engine_task, dashboard_task, shutdown_task, return_exceptions=True)
+    results = await asyncio.gather(
+        engine_task, dashboard_task, shutdown_task, return_exceptions=True)
     engine_result = results[0]
     if isinstance(engine_result, BaseException) and not isinstance(engine_result, asyncio.CancelledError):
         log.error("engine_crashed", error=str(engine_result))
@@ -64,16 +72,21 @@ async def _run_bot_tasks(engine_fn, dashboard_fn, shutdown_event: asyncio.Event)
 
 async def main():
     settings = Settings()
-    log.info("polybot_starting", bankroll=settings.starting_bankroll)
-    espn_client = None
+    log.info("polybot_starting", bankroll=settings.starting_bankroll,
+             dry_run=settings.dry_run, version="v12")
+
     db = Database(settings.database_url)
     await db.connect()
     exists = await db.fetchval("SELECT COUNT(*) FROM system_state")
     if exists == 0:
-        await db.execute("INSERT INTO system_state (bankroll) VALUES ($1)", settings.starting_bankroll)
+        await db.execute(
+            "INSERT INTO system_state (bankroll) VALUES ($1)",
+            settings.starting_bankroll)
+
     scanner = PolymarketScanner(api_key=settings.polymarket_api_key)
     await scanner.start()
     wallet = WalletManager(private_key=settings.polymarket_private_key)
+
     clob = None
     if settings.polymarket_api_secret and settings.polymarket_api_passphrase:
         clob = ClobGateway(
@@ -88,7 +101,6 @@ async def main():
         log.error("live_mode_requires_clob_credentials")
         return
 
-    # Run preflight checks before starting live trading
     if not settings.dry_run:
         import subprocess
         log.info("running_live_preflight")
@@ -102,80 +114,57 @@ async def main():
             if result.stderr:
                 log.error("preflight_stderr", output=result.stderr[-500:])
             return
-        log.info("preflight_passed")
 
-    recorder = TradeRecorder(
-        db=db, cold_start_trades=settings.cold_start_trades,
-        brier_ema_alpha=settings.brier_ema_alpha)
-    trade_learner = TradeLearner(db=db, settings=settings)
+    recorder = _MinimalRecorder(db=db)
     executor = OrderExecutor(
         scanner=scanner, wallet=wallet, db=db,
         fill_timeout_seconds=settings.fill_timeout_seconds,
-        clob=clob, dry_run=settings.dry_run,
-        trade_learner=trade_learner)
+        clob=clob, dry_run=settings.dry_run, trade_learner=None)
     executor._settings = settings
+
     risk_manager = RiskManager(
-        max_single_pct=settings.max_single_position_pct,
+        max_single_pct=settings.snipe_max_single_pct,
         max_total_deployed_pct=settings.max_total_deployed_pct,
-        max_per_category_pct=settings.max_per_category_pct,
-        max_concurrent=settings.max_concurrent_positions,
-        daily_loss_limit_pct=settings.daily_loss_limit_pct,
-        circuit_breaker_hours=settings.circuit_breaker_hours,
+        max_per_category_pct=0.50,
+        max_concurrent=settings.snipe_max_concurrent,
+        daily_loss_limit_pct=0.20,
+        circuit_breaker_hours=6,
         min_trade_size=settings.min_trade_size,
-        book_depth_max_pct=settings.book_depth_max_pct)
+        book_depth_max_pct=0.10)
+
     email_notifier = EmailNotifier(
         api_key=settings.resend_api_key, to_email=settings.alert_email,
         dry_run=settings.dry_run)
     portfolio_lock = asyncio.Lock()
-    position_manager = ActivePositionManager(
-        db=db, executor=executor, scanner=scanner,
-        email_notifier=email_notifier, settings=settings,
+
+    engine = Engine(
+        db=db, scanner=scanner, executor=executor, recorder=recorder,
+        risk_manager=risk_manager, settings=settings,
+        email_notifier=email_notifier, clob=clob,
         portfolio_lock=portfolio_lock)
 
-    price_history_scanner = None
-    engine = Engine(
-        db=db, scanner=scanner, researcher=None, ensemble=None,
-        executor=executor, recorder=recorder, risk_manager=risk_manager,
-        settings=settings, email_notifier=email_notifier,
-        position_manager=position_manager, clob=clob,
-        portfolio_lock=portfolio_lock, trade_learner=trade_learner,
-        price_history_scanner=price_history_scanner)
+    log.info("polybot_mode", dry_run=settings.dry_run,
+             clob_connected=clob is not None)
 
-    log.info("polybot_mode", dry_run=settings.dry_run, clob_connected=clob is not None)
-
-    # Snipe v10 uses Gemini Flash directly for T1 verification
     gemini_client = None
     if settings.google_api_key:
+        verifier_cache = VerifierCache(
+            ttl_seconds=settings.snipe_cache_ttl_seconds,
+            price_drift_threshold=settings.snipe_cache_price_drift,
+            hours_drift_threshold=settings.snipe_cache_hours_drift)
         gemini_client = GeminiClient(
             api_key=settings.google_api_key,
-            cap_usd=float(getattr(settings, "snipe_gemini_daily_cap_usd", 2.0)))
+            cap_usd=settings.snipe_gemini_daily_cap_usd,
+            min_reason_chars=settings.snipe_min_verifier_reason_chars,
+            cache=verifier_cache)
+
     engine.add_strategy(ResolutionSnipeStrategy(
         settings=settings, gemini_client=gemini_client))
-
-    if getattr(settings, 'lg_enabled', False):
-        espn_client = ESPNClient(
-            sports=getattr(settings, 'lg_sports', 'mlb,nba,nhl').split(','))
-        await espn_client.start()
-        calibrator = OnlineCalibrator(
-            min_obs_for_fit=int(getattr(settings, 'sports_calibrator_min_obs', 30)),
-            fallback_shrinkage=float(getattr(settings, 'sports_calibrator_fallback_shrinkage', 0.10)),
-        )
-        live_sports_strategy = LiveSportsStrategy(
-            settings=settings, espn_client=espn_client, calibrator=calibrator)
-        engine.add_strategy(live_sports_strategy)
-
-        # v11.0b Pregame Sharp-Line — reuses the same ESPN client.
-        if getattr(settings, 'pg_enabled', True):
-            from polybot.strategies.pregame_sharp import PregameSharpStrategy
-            pregame_strategy = PregameSharpStrategy(
-                settings=settings, espn_client=espn_client)
-            engine.add_strategy(pregame_strategy)
 
     app = create_app(db)
     dashboard_server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=8080, log_level="warning"))
 
-    # Graceful shutdown on signals
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
 
@@ -187,9 +176,9 @@ async def main():
         loop.add_signal_handler(sig, _signal_handler, sig)
 
     try:
-        await _run_bot_tasks(engine.run_forever, dashboard_server.serve, shutdown_event)
+        await _run_bot_tasks(
+            engine.run_forever, dashboard_server.serve, shutdown_event)
     finally:
-        # Log open positions on shutdown
         try:
             open_trades = await db.fetch(
                 """SELECT t.id, t.strategy, t.side, t.position_size_usd, m.question
@@ -201,12 +190,10 @@ async def main():
                                 for t in open_trades])
         except Exception:
             pass
-        for client in [scanner, espn_client]:
-            if client is not None:
-                try:
-                    await client.close()
-                except Exception:
-                    pass
+        try:
+            await scanner.close()
+        except Exception:
+            pass
         await db.close()
         log.info("polybot_shutdown_complete")
 

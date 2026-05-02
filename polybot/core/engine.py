@@ -1,25 +1,40 @@
+"""Polybot v12 engine — single-strategy (snipe) async loop.
+
+Periodic coroutines:
+  - strategy.run_once (snipe), every snipe_interval_seconds
+  - _resolution_monitor: closes filled/dry_run trades + backfills shadow + updates killswitch
+  - _fill_monitor (live mode only): cancels expired post_only orders
+  - _check_drawdown_halt + _check_capital_divergence: v10 safeguards
+  - _hourly_summary: emails a brief status report each hour
+
+Removed in v12:
+  - _hourly_kelly_edge_adjust (no Kelly scaler in v12)
+  - _hourly_learning legacy path (replaced by killswitch update)
+  - _maybe_self_assess (referenced deleted analyses/calibration tables)
+  - _check_positions (snipe holds to resolution; no TP/SL logic)
+  - _cleanup_stale_arbs (no arb strategy)
+"""
+from __future__ import annotations
+
 import asyncio
-import json
 import resource
 import time
 import structlog
 from datetime import datetime, timezone, timedelta
+
 from polybot.strategies.base import Strategy, TradingContext
-from polybot.trading.risk import PortfolioState
 from polybot.safeguards import (
     DrawdownHalt, CapitalDivergenceMonitor, DeploymentStageGate)
+from polybot.learning import shadow_log
+from polybot.learning import hit_rate_killswitch
 
 log = structlog.get_logger()
 
 
 class Engine:
     def __init__(self, db, scanner, executor, recorder,
-                 risk_manager, settings, email_notifier, position_manager, clob=None,
-                 portfolio_lock=None, trade_learner=None,
-                 researcher=None, ensemble=None, price_history_scanner=None):
-        # researcher/ensemble/price_history_scanner kept as kwargs for
-        # backward-compat with callers that still pass them (tests). v10 doesn't
-        # use them — they were dependencies of deleted strategies.
+                 risk_manager, settings, email_notifier,
+                 clob=None, portfolio_lock=None):
         self._db = db
         self._scanner = scanner
         self._executor = executor
@@ -27,25 +42,21 @@ class Engine:
         self._risk = risk_manager
         self._settings = settings
         self._email = email_notifier
-        self._position_manager = position_manager
         self._clob = clob
         self._context = TradingContext(
             db=db, scanner=scanner, risk_manager=risk_manager,
-            portfolio_lock=portfolio_lock or asyncio.Lock(), executor=executor,
-            email_notifier=email_notifier, settings=settings, clob=clob)
+            portfolio_lock=portfolio_lock or asyncio.Lock(),
+            executor=executor, email_notifier=email_notifier,
+            settings=settings, clob=clob)
         self._strategies: list[Strategy] = []
-        self._trade_learner = trade_learner
         self._last_heartbeats: dict[str, datetime] = {}
-        self._last_self_assess: datetime | None = None
-        # Extracted safeguards (v10 Phase A). Engine delegates via thin
-        # wrappers below; direct-call migration deferred to PR B.
         self._drawdown_halt = DrawdownHalt(
             db=db, settings=settings, email_notifier=email_notifier)
         self._divergence_monitor = CapitalDivergenceMonitor(
             db=db, clob=clob, settings=settings, email_notifier=email_notifier)
         self._deployment_gate = DeploymentStageGate(db=db, settings=settings)
-        # Legacy attributes preserved for tests that poke internals directly.
-        # New code should use self._drawdown_halt / self._divergence_monitor.
+        # Compatibility shims for the safeguards (read by _check_drawdown_halt
+        # / _check_capital_divergence below). These mirror v10 internals.
         self._capital_divergence_halted = False
         self._capital_divergence_ok_count = 0
         self._drawdown_cache: tuple[bool, float] | None = None
@@ -54,38 +65,41 @@ class Engine:
         self._strategies.append(strategy)
 
     async def run_forever(self):
-        # Enforce deployment stage limits
         stage = getattr(self._settings, 'live_deployment_stage', 'dry_run')
         if not self._settings.dry_run:
             if stage == 'dry_run':
                 log.critical("DEPLOYMENT_STAGE_BLOCK",
-                             message="live_deployment_stage is 'dry_run' but dry_run=false. Refusing to start.")
+                             message="live_deployment_stage='dry_run' but dry_run=false. Refusing to start.")
                 return
             if stage == 'micro_test':
                 self._settings.max_total_deployed_pct = 0.05
                 log.warning("MICRO_TEST_MODE", max_deployed_pct=5)
 
-        log.info("engine_starting", strategies=[s.name for s in self._strategies])
+        log.info("engine_starting",
+                 strategies=[s.name for s in self._strategies],
+                 deployment_stage=stage,
+                 dry_run=self._settings.dry_run)
+
         await self._reconcile_on_startup()
+
         tasks = [self._run_strategy(s) for s in self._strategies]
-        tasks.append(self._run_periodic(self._health_check, self._settings.health_check_interval))
-        tasks.append(self._run_periodic(self._maybe_self_assess, 60))
+        tasks.append(self._run_periodic(self._health_check,
+                                         self._settings.health_check_interval))
+        tasks.append(self._run_periodic(self._resolution_monitor, 60))
+        if getattr(self._settings, 'snipe_early_exit_enabled', False):
+            interval = int(getattr(self._settings, 'snipe_early_exit_check_interval', 60))
+            tasks.append(self._run_periodic(self._early_exit_monitor, interval))
         if not self._settings.dry_run and self._clob:
             tasks.append(self._run_periodic(self._fill_monitor, 30))
             tasks.append(self._run_periodic(self._check_capital_divergence, 60))
-        tasks.append(self._run_periodic(self._resolution_monitor, 60))
         tasks.append(self._run_periodic(self._reconcile_capital, 300))
-        tasks.append(self._run_periodic(self._check_positions,
-                                         self._settings.position_check_interval))
-        if getattr(self._settings, 'enable_hourly_learning', True):
-            tasks.append(self._run_periodic(self._hourly_learning, 3600))
-        tasks.append(self._run_periodic(self._cleanup_stale_arbs, 3600))
+        tasks.append(self._run_periodic(self._hourly_summary, 3600))
         await asyncio.gather(*tasks)
 
     async def _run_strategy(self, strategy: Strategy):
         consecutive_errors = 0
-        max_backoff = 600  # 10 minutes
-        kill_threshold = 30  # permanent disable after this many consecutive
+        max_backoff = 600
+        kill_threshold = 30
         while True:
             try:
                 if await self._check_drawdown_halt():
@@ -108,15 +122,20 @@ class Engine:
                           backoff_s=backoff)
                 if consecutive_errors >= kill_threshold:
                     log.critical("strategy_disabled", strategy=strategy.name)
-                    await self._context.email_notifier.send(
-                        f"[POLYBOT CRITICAL] {strategy.name} disabled",
-                        f"Strategy {strategy.name} disabled after {kill_threshold} consecutive errors: {e}")
+                    try:
+                        await self._email.send(
+                            f"[POLYBOT CRITICAL] {strategy.name} disabled",
+                            f"Strategy disabled after {kill_threshold} errors: {e}")
+                    except Exception:
+                        pass
                     return
                 if consecutive_errors % 5 == 0:
-                    await self._context.email_notifier.send(
-                        f"[POLYBOT WARNING] {strategy.name} errors: {consecutive_errors}",
-                        f"Strategy {strategy.name} has {consecutive_errors} consecutive errors. "
-                        f"Backing off {backoff}s. Latest: {e}")
+                    try:
+                        await self._email.send(
+                            f"[POLYBOT WARNING] {strategy.name} errors: {consecutive_errors}",
+                            f"Backing off {backoff}s. Latest: {e}")
+                    except Exception:
+                        pass
                 await asyncio.sleep(backoff)
                 continue
             await asyncio.sleep(strategy.interval_seconds)
@@ -140,38 +159,21 @@ class Engine:
             for trade in open_trades:
                 market = await self._db.fetchrow(
                     "SELECT * FROM markets WHERE id = $1", trade["market_id"])
-                if market and market["resolution_time"] < now:
-                    resolved = await self._scanner.fetch_market_resolution(
-                        market["polymarket_id"])
+                if market and market["resolution_time"] and market["resolution_time"] < now:
+                    try:
+                        resolved = await self._scanner.fetch_market_resolution(
+                            market["polymarket_id"])
+                    except Exception as e:
+                        log.error("reconcile_resolution_fetch_failed",
+                                  trade_id=trade["id"], error=str(e))
+                        continue
                     if resolved is not None:
-                        if trade["status"] == "open":
-                            await self._recorder.record_resolution(trade["id"], resolved)
-                            await self._db.execute(
-                                "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
-                                float(trade["position_size_usd"]))
-                        elif trade["status"] == "dry_run":
-                            entry = float(trade["entry_price"])
-                            shares = float(trade["shares"])
-                            if trade["side"] == "YES":
-                                pnl = shares * (resolved - entry)
-                            else:
-                                pnl = shares * ((1 - resolved) - (1 - entry))
-                            await self._db.execute(
-                                """UPDATE trades SET status='dry_run_resolved', pnl=$1,
-                                   exit_price=$2, exit_reason='resolution', closed_at=$3
-                                   WHERE id=$4""",
-                                pnl, float(resolved), now, trade["id"])
-                            await self._db.execute(
-                                """UPDATE system_state SET bankroll = bankroll + $1,
-                                   total_deployed = total_deployed - $2, daily_pnl = daily_pnl + $1
-                                   WHERE id = 1""",
-                                pnl, float(trade["position_size_usd"]))
-                        log.info("reconciled_stale_trade", trade_id=trade["id"], outcome=resolved)
-            # Sync bankroll from CLOB on startup (live mode only)
+                        await self._close_resolved_trade(trade, market, resolved, now)
             if not self._settings.dry_run and self._clob:
                 try:
                     balance = await self._clob.get_balance()
-                    await self._db.execute("UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
+                    await self._db.execute(
+                        "UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
                     log.info("startup_bankroll_synced", balance=balance)
                 except Exception as e:
                     log.error("startup_bankroll_sync_failed", error=str(e))
@@ -179,35 +181,25 @@ class Engine:
             log.error("reconciliation_error", error=str(e))
 
     async def _check_drawdown_halt(self) -> bool:
-        """Check if total drawdown halt is active or should be triggered.
-        Returns True if trading should be halted. Caches result for 30s."""
         if self._drawdown_cache is not None:
             cached_result, cached_at = self._drawdown_cache
             if time.monotonic() - cached_at < 30:
                 return cached_result
-
         state = await self._db.fetchrow("SELECT * FROM system_state WHERE id = 1")
         if not state:
             self._drawdown_cache = (False, time.monotonic())
             return False
-
         bankroll = float(state["bankroll"])
         high_water = float(state.get("high_water_bankroll", bankroll) or bankroll)
         halt_until = state.get("drawdown_halt_until")
-
-        # Already halted?
         if halt_until and halt_until > datetime.now(timezone.utc):
             self._drawdown_cache = (True, time.monotonic())
             return True
-
-        # Update high-water mark
         if bankroll > high_water:
             await self._db.execute(
                 "UPDATE system_state SET high_water_bankroll = $1 WHERE id = 1", bankroll)
             self._drawdown_cache = (False, time.monotonic())
             return False
-
-        # Check drawdown
         if high_water > 0:
             drawdown = 1.0 - (bankroll / high_water)
             max_drawdown = getattr(self._settings, 'max_total_drawdown_pct', 0.30)
@@ -216,29 +208,27 @@ class Engine:
                 await self._db.execute(
                     "UPDATE system_state SET drawdown_halt_until = $1 WHERE id = 1",
                     halt_time)
-                log.critical("DRAWDOWN_HALT", bankroll=bankroll, high_water=high_water,
+                log.critical("DRAWDOWN_HALT", bankroll=bankroll,
+                             high_water=high_water,
                              drawdown_pct=round(drawdown * 100, 1))
                 try:
-                    await self._context.email_notifier.send(
-                        "[POLYBOT CRITICAL] DRAWDOWN HALT — ALL TRADING STOPPED",
+                    await self._email.send(
+                        "[POLYBOT CRITICAL] DRAWDOWN HALT",
                         f"<p>Bankroll ${bankroll:.2f} is {drawdown*100:.1f}% below "
-                        f"high-water ${high_water:.2f}. Threshold: {max_drawdown*100:.0f}%.</p>"
-                        f"<p>All trading halted. Manual DB reset required to resume.</p>")
+                        f"high-water ${high_water:.2f}. All trading halted.</p>")
                 except Exception:
                     pass
                 self._drawdown_cache = (True, time.monotonic())
                 return True
-
         self._drawdown_cache = (False, time.monotonic())
         return False
 
     async def _check_capital_divergence(self):
-        """Compare CLOB balance vs DB bankroll. Halt if divergence > threshold.
-        Self-heals after 3 consecutive OK checks."""
         if not self._clob or self._settings.dry_run:
             return
         try:
-            state = await self._db.fetchrow("SELECT bankroll, total_deployed FROM system_state WHERE id = 1")
+            state = await self._db.fetchrow(
+                "SELECT bankroll, total_deployed FROM system_state WHERE id = 1")
             clob_balance = await self._clob.get_balance()
             expected_cash = float(state["bankroll"]) - float(state["total_deployed"])
             if expected_cash <= 0:
@@ -249,9 +239,10 @@ class Engine:
                 self._capital_divergence_halted = True
                 self._capital_divergence_ok_count = 0
                 log.critical("CAPITAL_DIVERGENCE_HALT", clob=clob_balance,
-                             expected=expected_cash, divergence_pct=round(divergence * 100, 1))
+                             expected=expected_cash,
+                             divergence_pct=round(divergence * 100, 1))
                 try:
-                    await self._context.email_notifier.send(
+                    await self._email.send(
                         "[POLYBOT CRITICAL] Capital divergence halt",
                         f"<p>CLOB: ${clob_balance:.2f}, Expected: ${expected_cash:.2f}, "
                         f"Divergence: {divergence*100:.1f}%</p>")
@@ -264,13 +255,6 @@ class Engine:
                     self._capital_divergence_ok_count = 0
                     log.info("CAPITAL_DIVERGENCE_RECOVERED",
                              clob=clob_balance, expected=expected_cash)
-                    try:
-                        await self._context.email_notifier.send(
-                            "[POLYBOT INFO] Capital divergence recovered",
-                            f"<p>CLOB balance back in sync after 3 consecutive OK checks. "
-                            f"CLOB: ${clob_balance:.2f}, Expected: ${expected_cash:.2f}</p>")
-                    except Exception:
-                        pass
         except Exception as e:
             log.error("capital_divergence_check_error", error=str(e))
 
@@ -279,9 +263,12 @@ class Engine:
         for name, last in self._last_heartbeats.items():
             elapsed = (now - last).total_seconds()
             if elapsed > self._settings.heartbeat_critical_seconds:
-                await self._context.email_notifier.send(
-                    f"[POLYBOT CRITICAL] {name} unresponsive",
-                    f"Strategy {name} has not completed a cycle in {elapsed:.0f}s")
+                try:
+                    await self._email.send(
+                        f"[POLYBOT CRITICAL] {name} unresponsive",
+                        f"Strategy {name} has not completed a cycle in {elapsed:.0f}s")
+                except Exception:
+                    pass
             elif elapsed > self._settings.heartbeat_warn_seconds:
                 log.warning("heartbeat_warn", strategy=name, elapsed=elapsed)
         try:
@@ -292,24 +279,14 @@ class Engine:
         except Exception:
             pass
 
-        # Stale positions check
-        try:
-            open_trades = await self._db.fetch(
-                """SELECT t.id, t.opened_at, m.resolution_time
-                   FROM trades t JOIN markets m ON t.market_id = m.id
-                   WHERE t.status = 'open'""")
-            for t in open_trades:
-                total_duration = (t["resolution_time"] - t["opened_at"]).total_seconds()
-                elapsed = (datetime.now(timezone.utc) - t["opened_at"]).total_seconds()
-                if total_duration > 0 and elapsed / total_duration > 0.80:
-                    log.warning("stale_position", trade_id=t["id"],
-                                pct_elapsed=elapsed / total_duration)
-        except Exception as e:
-            log.error("stale_check_failed", error=str(e))
-
     async def _fill_monitor(self):
+        """Live-only: cancel post_only limits that have aged past the timeout."""
+        if not self._clob or self._settings.dry_run:
+            return
         open_orders = await self._db.fetch(
-            "SELECT * FROM trades WHERE status = 'open' AND clob_order_id IS NOT NULL")
+            "SELECT * FROM trades WHERE status = 'open' "
+            "AND clob_order_id IS NOT NULL AND strategy = 'snipe'")
+        timeout = float(getattr(self._settings, 'fill_timeout_seconds', 60))
         for trade in open_orders:
             try:
                 status = await self._clob.get_order_status(trade["clob_order_id"])
@@ -317,44 +294,41 @@ class Engine:
                 log.error("fill_check_failed", trade_id=trade["id"], error=str(e))
                 continue
             if status["status"] == "matched":
-                await self._db.execute("UPDATE trades SET status = 'filled' WHERE id = $1", trade["id"])
+                await self._db.execute(
+                    "UPDATE trades SET status = 'filled' WHERE id = $1", trade["id"])
                 try:
                     balance = await self._clob.get_balance()
-                    await self._db.execute("UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
+                    await self._db.execute(
+                        "UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
                 except Exception as e:
                     log.error("bankroll_sync_failed", error=str(e))
-                await self._context.email_notifier.send(
-                    f"Trade filled: order {trade['clob_order_id']}",
-                    f"<p>Trade #{trade['id']} filled. Strategy: {trade['strategy']}</p>")
-                log.info("order_filled", trade_id=trade["id"], clob_order_id=trade["clob_order_id"])
+                log.info("order_filled", trade_id=trade["id"])
             elif status["status"] == "cancelled":
-                await self._db.execute("UPDATE trades SET status = 'cancelled' WHERE id = $1", trade["id"])
+                await self._db.execute(
+                    "UPDATE trades SET status = 'cancelled' WHERE id = $1", trade["id"])
                 await self._db.execute(
                     "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
                     float(trade["position_size_usd"]))
-                log.info("order_cancelled_externally", trade_id=trade["id"])
             elif status["status"] == "live":
-                # MM orders are managed by QuoteManager (requote cycle), not fill timeout
-                if trade["strategy"] == "market_maker":
-                    continue
                 elapsed = (datetime.now(timezone.utc) - trade["opened_at"]).total_seconds()
-                if trade["strategy"] == "arbitrage":
-                    timeout = self._settings.arb_fill_timeout_seconds
-                elif trade["strategy"] == "mean_reversion":
-                    timeout = getattr(self._settings, 'mr_fill_timeout_seconds', self._settings.fill_timeout_seconds)
-                else:
-                    timeout = self._settings.fill_timeout_seconds
                 if elapsed > timeout:
-                    await self._clob.cancel_order(trade["clob_order_id"])
-                    await self._db.execute("UPDATE trades SET status = 'cancelled' WHERE id = $1", trade["id"])
+                    try:
+                        await self._clob.cancel_order(trade["clob_order_id"])
+                    except Exception as e:
+                        log.error("cancel_failed", trade_id=trade["id"], error=str(e))
+                        continue
+                    await self._db.execute(
+                        "UPDATE trades SET status = 'cancelled' WHERE id = $1", trade["id"])
                     await self._db.execute(
                         "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
                         float(trade["position_size_usd"]))
                     log.info("order_timed_out", trade_id=trade["id"], elapsed=elapsed)
 
     async def _resolution_monitor(self):
+        """For each filled/dry_run trade past resolution time:
+        close the trade, backfill shadow signals, and refresh the killswitch.
+        """
         now = datetime.now(timezone.utc)
-        # Only check trades whose market resolution_time has passed (defense-in-depth)
         resolvable = await self._db.fetch(
             """SELECT t.* FROM trades t JOIN markets m ON t.market_id = m.id
                WHERE t.status IN ('filled', 'dry_run')
@@ -366,344 +340,288 @@ class Engine:
             if not market:
                 continue
             try:
-                outcome = await self._scanner.fetch_market_resolution(market["polymarket_id"])
+                outcome = await self._scanner.fetch_market_resolution(
+                    market["polymarket_id"])
             except Exception as e:
-                log.error("resolution_check_failed", trade_id=trade["id"], error=str(e))
+                log.error("resolution_check_failed",
+                          trade_id=trade["id"], error=str(e))
                 continue
             if outcome is None:
-                log.debug("resolution_pending", trade_id=trade["id"],
-                          market=market["polymarket_id"])
+                log.debug("resolution_pending", trade_id=trade["id"])
                 continue
-            if trade["status"] == "filled":
-                await self._recorder.record_resolution(trade["id"], outcome)
-                await self._db.execute(
-                    "UPDATE system_state SET total_deployed = total_deployed - $1 WHERE id = 1",
-                    float(trade["position_size_usd"]))
-                # Update daily_pnl
-                resolved_trade = await self._db.fetchrow("SELECT pnl FROM trades WHERE id = $1", trade["id"])
-                if resolved_trade and resolved_trade["pnl"] is not None:
-                    await self._db.execute(
-                        "UPDATE system_state SET daily_pnl = daily_pnl + $1 WHERE id = 1",
-                        float(resolved_trade["pnl"]))
-                if self._clob:
-                    try:
-                        balance = await self._clob.get_balance()
-                        await self._db.execute("UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
-                    except Exception as e:
-                        log.error("bankroll_sync_failed", error=str(e))
-                log.info("trade_resolved", trade_id=trade["id"], outcome=outcome)
-                if self._trade_learner:
-                    try:
-                        await self._trade_learner.on_trade_closed(trade["id"])
-                    except Exception as e:
-                        log.error("trade_learning_error", trade_id=trade["id"], error=str(e))
-            elif trade["status"] == "dry_run":
-                entry = float(trade["entry_price"])
-                shares = float(trade["shares"])
-                if trade["side"] == "YES":
-                    pnl = shares * (outcome - entry)
-                else:
-                    pnl = shares * ((1 - outcome) - (1 - entry))
-                await self._db.execute(
-                    """UPDATE trades SET status='dry_run_resolved', pnl=$1, exit_price=$2,
-                       exit_reason='resolution', closed_at=$3 WHERE id=$4""",
-                    pnl, float(outcome), now, trade["id"])
-                await self._db.execute(
-                    """UPDATE system_state SET bankroll = bankroll + $1,
-                       total_deployed = total_deployed - $2, daily_pnl = daily_pnl + $1
-                       WHERE id = 1""",
-                    pnl, float(trade["position_size_usd"]))
-                # Update strategy_performance for dry-run tracking
-                await self._db.execute(
-                    """UPDATE strategy_performance SET
-                       total_trades = total_trades + 1,
-                       winning_trades = winning_trades + CASE WHEN $1 > 0 THEN 1 ELSE 0 END,
-                       total_pnl = total_pnl + $1, last_updated = $2
-                       WHERE strategy = $3""",
-                    pnl, now, trade["strategy"])
-                log.info("dry_run_resolved", trade_id=trade["id"], outcome=outcome,
-                         simulated_pnl=pnl, side=trade["side"],
-                         entry_price=entry, shares=shares)
-                if self._trade_learner:
-                    try:
-                        await self._trade_learner.on_trade_closed(trade["id"])
-                    except Exception as e:
-                        log.error("trade_learning_error", trade_id=trade["id"], error=str(e))
+            await self._close_resolved_trade(trade, market, outcome, now)
 
-    async def _check_positions(self):
-        """Periodic task: check all non-arb positions for take-profit/stop-loss/edge-erosion."""
-        await self._position_manager.check_positions()
-
-    async def _cleanup_stale_arbs(self):
-        """Close arb positions that have exceeded max hold time."""
-        max_hold_days = getattr(self._settings, 'arb_max_hold_days', 7.0)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max_hold_days)
-        stale = await self._db.fetch(
-            """SELECT t.id, t.position_size_usd, t.status
-               FROM trades t
-               WHERE t.strategy = 'arbitrage'
-                 AND t.status IN ('open', 'filled', 'dry_run')
-                 AND t.opened_at < $1""", cutoff)
-        for trade in stale:
-            await self._executor.exit_position(
-                trade_id=trade["id"], exit_price=0.0,
-                exit_reason="arb_ttl_expired")
-            log.info("arb_ttl_cleanup", trade_id=trade["id"])
-        if stale:
-            log.info("arb_cleanup_complete", closed=len(stale))
-
-    async def _hourly_learning(self):
-        """Hourly learning cycle: recompute adaptive parameters."""
-        if self._trade_learner:
-            try:
-                await self._trade_learner.compute_optimal_thresholds()
-            except Exception as e:
-                log.error("hourly_learning_thresholds_error", error=str(e))
-
-            try:
-                await self._trade_learner.compute_snipe_params()
-            except Exception as e:
-                log.error("hourly_learning_snipe_error", error=str(e))
-
-            try:
-                await self._hourly_kelly_edge_adjust()
-            except Exception as e:
-                log.error("hourly_kelly_edge_error", error=str(e))
-
-        # v11.0c — orchestrate Kelly scaler + edge decay + calibrator refit
+        # Refresh killswitch + rolling hit rate gauge after every cycle.
         try:
-            from polybot.learning.learning_cycle import run_hourly_cycle
-            await run_hourly_cycle(self._db, self._strategies)
+            await hit_rate_killswitch.update_and_check(
+                self._db,
+                window=int(getattr(self._settings, 'killswitch_window', 50)),
+                min_hit_rate=float(getattr(self._settings, 'killswitch_min_hit_rate', 0.97)),
+                min_n=int(getattr(self._settings, 'killswitch_min_n', 50)),
+                email_notifier=self._email,
+            )
         except Exception as e:
-            log.error("hourly_learning_v11c_error", error=str(e))
+            log.error("killswitch_update_failed", error=str(e))
 
-        log.info("hourly_learning_complete")
+    async def _close_resolved_trade(self, trade, market, outcome: int, now) -> None:
+        """Common close path for filled (live) and dry_run trades.
 
-    async def _hourly_kelly_edge_adjust(self):
-        """Adjust Kelly multiplier and edge threshold based on recent performance (3-day window)."""
-        from polybot.learning.self_assess import suggest_kelly_adjustment, suggest_edge_threshold
+        Updates the trade row, system_state, strategy_performance,
+        trade_outcome, and backfills the shadow signal log.
+        """
+        entry = float(trade["entry_price"])
+        shares = float(trade["shares"])
+        side = trade["side"]
+        if side == "YES":
+            pnl = shares * (outcome - entry)
+        else:
+            pnl = shares * ((1 - outcome) - (1 - entry))
 
-        state = await self._db.fetchrow("SELECT * FROM system_state WHERE id = 1")
-        if not state:
-            return
+        if trade["status"] == "filled":
+            await self._db.execute(
+                """UPDATE trades SET status='closed', exit_price=$1,
+                   exit_reason='resolution', pnl=$2, closed_at=$3 WHERE id=$4""",
+                float(outcome), pnl, now, trade["id"])
+            await self._db.execute(
+                "UPDATE system_state SET total_deployed = total_deployed - $1, "
+                "daily_pnl = daily_pnl + $2 WHERE id = 1",
+                float(trade["position_size_usd"]), pnl)
+            if self._clob:
+                try:
+                    balance = await self._clob.get_balance()
+                    await self._db.execute(
+                        "UPDATE system_state SET bankroll = $1 WHERE id = 1", balance)
+                except Exception as e:
+                    log.error("bankroll_sync_failed", error=str(e))
+        else:    # dry_run
+            await self._db.execute(
+                """UPDATE trades SET status='dry_run_resolved', pnl=$1,
+                   exit_price=$2, exit_reason='resolution', closed_at=$3
+                   WHERE id=$4""",
+                pnl, float(outcome), now, trade["id"])
+            await self._db.execute(
+                """UPDATE system_state SET bankroll = bankroll + $1,
+                   total_deployed = total_deployed - $2,
+                   daily_pnl = daily_pnl + $1 WHERE id = 1""",
+                pnl, float(trade["position_size_usd"]))
 
-        # Kelly: 3-day window for hourly (vs 7-day for daily)
-        trades = await self._db.fetch(
-            """SELECT pnl FROM trades
-               WHERE status IN ('closed', 'dry_run_resolved')
-                 AND closed_at > NOW() - INTERVAL '3 days'""")
-        if not trades:
-            return
-
-        cumulative, peak, max_dd = 0.0, 0.0, 0.0
-        for t in trades:
-            cumulative += float(t["pnl"] or 0)
-            peak = max(peak, cumulative)
-            dd = (peak - cumulative) / max(float(state["bankroll"]), 1)
-            max_dd = max(max_dd, dd)
-
-        new_kelly = suggest_kelly_adjustment(float(state["kelly_mult"]), max_dd)
-
-        # Edge threshold: 3-day window
-        edge_trades = await self._db.fetch(
-            """SELECT a.edge, t.pnl FROM trades t JOIN analyses a ON t.analysis_id = a.id
-               WHERE t.status IN ('closed', 'dry_run_resolved')
-                 AND t.closed_at > NOW() - INTERVAL '3 days'""")
-        buckets = {}
-        for t in edge_trades:
-            if t["edge"] is None or t["pnl"] is None:
-                continue
-            bucket_key = round(float(t["edge"]) * 20) / 20
-            if bucket_key not in buckets:
-                buckets[bucket_key] = {"count": 0, "total_pnl": 0.0}
-            buckets[bucket_key]["count"] += 1
-            buckets[bucket_key]["total_pnl"] += float(t["pnl"] or 0)
-        new_edge = suggest_edge_threshold(float(state["edge_threshold"]), buckets)
-
-        # Also refresh calibration corrections hourly
-        resolved = await self._db.fetch(
-            """SELECT a.ensemble_probability, t.exit_price as outcome
-               FROM trades t JOIN analyses a ON t.analysis_id = a.id
-               WHERE t.status IN ('closed', 'dry_run_resolved')
-                 AND t.closed_at > NOW() - INTERVAL '30 days'
-                 AND t.exit_price IS NOT NULL""")
-        if len(resolved) >= 20:
-            import json
-            from polybot.learning.calibration import compute_calibration_correction
-            predictions = [float(r["ensemble_probability"]) for r in resolved]
-            outcomes = [int(float(r["outcome"]) > 0.5) for r in resolved]
-            corrections = compute_calibration_correction(predictions, outcomes)
-            if corrections:
-                await self._db.execute(
-                    "UPDATE system_state SET calibration_corrections = $1 WHERE id = 1",
-                    json.dumps(corrections))
-
+        # Update strategy_performance.
         await self._db.execute(
-            "UPDATE system_state SET kelly_mult=$1, edge_threshold=$2 WHERE id=1",
-            new_kelly, new_edge)
+            """UPDATE strategy_performance SET
+               total_trades = total_trades + 1,
+               winning_trades = winning_trades + CASE WHEN $1 > 0 THEN 1 ELSE 0 END,
+               total_pnl = total_pnl + $1, last_updated = $2
+               WHERE strategy = $3""",
+            pnl, now, trade.get("strategy", "snipe"))
 
-        log.info("hourly_kelly_edge_adjusted", kelly=new_kelly, edge=new_edge, max_dd=round(max_dd, 4))
+        # Write trade_outcome row (the v12 source-of-truth for hit rate).
+        kelly_inputs = trade.get("kelly_inputs") or {}
+        if isinstance(kelly_inputs, str):
+            try:
+                import json
+                kelly_inputs = json.loads(kelly_inputs)
+            except Exception:
+                kelly_inputs = {}
+        verifier_conf = kelly_inputs.get("verifier_confidence")
+        verifier_reason = kelly_inputs.get("verifier_reason", "")
+        won = (side == "YES" and outcome == 1) or (side == "NO" and outcome == 0)
+        try:
+            await self._db.execute(
+                """INSERT INTO trade_outcome (
+                       strategy, market_id, market_category,
+                       entry_price, exit_price, pnl, predicted_prob,
+                       realized_outcome, kelly_inputs, exit_reason,
+                       duration_minutes, verifier_confidence, verifier_reason)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
+                trade.get("strategy", "snipe"),
+                trade["market_id"],
+                market.get("category", "unknown"),
+                entry, float(outcome), pnl, entry,
+                1 if won else 0,
+                kelly_inputs if isinstance(kelly_inputs, (dict, list, str)) else {},
+                'resolution',
+                (now - trade["opened_at"]).total_seconds() / 60.0,
+                verifier_conf, verifier_reason)
+        except Exception as e:
+            log.error("trade_outcome_insert_failed",
+                      trade_id=trade["id"], error=str(e))
+
+        # Backfill shadow_signal rows for this market.
+        try:
+            await shadow_log.backfill_resolution(
+                self._db, market["polymarket_id"], int(outcome))
+        except Exception as e:
+            log.error("shadow_backfill_failed",
+                      polymarket_id=market["polymarket_id"], error=str(e))
+
+        log.info("trade_resolved", trade_id=trade["id"], outcome=outcome,
+                 pnl=round(pnl, 4), strategy=trade.get("strategy"),
+                 verifier_confidence=verifier_conf)
+
+    async def _early_exit_monitor(self):
+        """v12.4: Three exit rules, priority-ordered per trade per cycle:
+
+          1. STOP-LOSS — `move_toward_thesis ≤ -stop_loss_adverse_pp` AND
+             `age_hours ≤ stop_loss_window_hours`. Caps per-trade downside.
+          2. TAKE-PROFIT — `move_toward_thesis / max_possible_move ≥
+             early_exit_capture_pct`. Locks in most of the eventual PnL
+             without waiting for resolution.
+          3. TIME-STOP — `age_hours ≥ max_hold_hours`. Forces realization.
+
+        `move_toward_thesis` is signed: positive = our way, negative = adverse.
+        For NO: `entry - current_yes`. For YES: `current_yes - entry`.
+        Max possible toward-thesis move: `entry` (NO → 0) or `1 - entry`
+        (YES → 1).
+        """
+        capture_pct = float(getattr(self._settings, 'snipe_early_exit_capture_pct', 0.80))
+        max_hold_hours = float(getattr(self._settings, 'snipe_max_hold_hours', 48.0))
+        sl_adverse_pp = float(getattr(self._settings, 'snipe_stop_loss_adverse_pp', 0.05))
+        sl_window_hours = float(getattr(self._settings, 'snipe_stop_loss_window_hours', 2.0))
+
+        open_trades = await self._db.fetch(
+            """SELECT t.*, m.polymarket_id, m.question
+               FROM trades t JOIN markets m ON t.market_id = m.id
+               WHERE t.strategy = 'snipe'
+                 AND t.status IN ('dry_run', 'filled')""")
+        if not open_trades:
+            return
+
+        now = datetime.now(timezone.utc)
+        for trade in open_trades:
+            entry = float(trade["entry_price"])
+            side = trade["side"]
+            opened_at = trade["opened_at"]
+            age_hours = (now - opened_at).total_seconds() / 3600.0
+
+            # Need a current mark for stop-loss + take-profit decisions.
+            # Time-stop fires regardless of whether we have a price (we
+            # exit at entry as a fallback — net-zero but frees the slot).
+            cached = self._scanner.get_cached_price(trade["polymarket_id"])
+            current_yes = (float(cached["yes_price"])
+                           if cached and cached.get("yes_price") is not None
+                           else None)
+
+            move_toward = None
+            capture_ratio = None
+            if current_yes is not None:
+                if side == "NO":
+                    move_toward = entry - current_yes
+                    max_move = entry
+                else:
+                    move_toward = current_yes - entry
+                    max_move = 1.0 - entry
+                capture_ratio = (move_toward / max_move) if max_move > 0 else 0.0
+
+            exit_reason: str | None = None
+            if (move_toward is not None
+                    and age_hours <= sl_window_hours
+                    and move_toward <= -sl_adverse_pp):
+                exit_reason = "stop_loss"
+            elif capture_ratio is not None and capture_ratio >= capture_pct:
+                exit_reason = "take_profit"
+            elif age_hours >= max_hold_hours:
+                exit_reason = "time_stop"
+            if exit_reason is None:
+                continue
+
+            exit_price = current_yes if current_yes is not None else entry
+            try:
+                pnl = await self._executor.exit_position(
+                    trade_id=trade["id"], exit_price=exit_price,
+                    exit_reason=exit_reason)
+                log.info("trade_early_closed",
+                         trade_id=trade["id"], reason=exit_reason,
+                         side=side, entry=entry,
+                         exit_price=round(exit_price, 4),
+                         move_toward=(round(move_toward, 4)
+                                      if move_toward is not None else None),
+                         capture_ratio=(round(capture_ratio, 3)
+                                        if capture_ratio is not None else None),
+                         age_hours=round(age_hours, 2),
+                         pnl=round(float(pnl or 0), 4))
+            except Exception as e:
+                log.error("early_exit_failed",
+                          trade_id=trade["id"], error=str(e))
 
     async def _reconcile_capital(self):
-        """Periodic check: ensure total_deployed matches actual open positions."""
+        """Ensure system_state.total_deployed matches actual open positions."""
         actual = await self._db.fetchval(
             """SELECT COALESCE(SUM(position_size_usd), 0) FROM trades
                WHERE status IN ('open', 'filled', 'dry_run')""")
         actual = float(actual)
-        state = await self._db.fetchrow("SELECT total_deployed FROM system_state WHERE id = 1")
+        state = await self._db.fetchrow(
+            "SELECT total_deployed FROM system_state WHERE id = 1")
         if not state:
             return
         recorded = float(state["total_deployed"])
-        divergence = abs(recorded - actual)
-        if divergence > 1.0:
-            log.warning("capital_reconciliation", recorded=recorded, actual=actual,
-                        divergence=divergence)
+        if abs(recorded - actual) > 1.0:
+            log.warning("capital_reconciliation",
+                        recorded=recorded, actual=actual)
             await self._db.execute(
-                "UPDATE system_state SET total_deployed = $1 WHERE id = 1", actual)
+                "UPDATE system_state SET total_deployed = $1 WHERE id = 1",
+                actual)
 
-    async def _maybe_self_assess(self):
-        now = datetime.now(timezone.utc)
-        if now.hour != 0:
-            return
-        if self._last_self_assess and (now - self._last_self_assess).total_seconds() < 82800:
-            return
-
-        from polybot.learning.self_assess import (
-            suggest_kelly_adjustment, suggest_edge_threshold, check_strategy_kill_switch)
-        from polybot.notifications.email import format_daily_report
-
-        state = await self._db.fetchrow("SELECT * FROM system_state WHERE id = 1")
+    async def _hourly_summary(self):
+        """Emit a structured-log summary line every hour. Cheap, observable,
+        and survives restart. Email digest is daily (handled by ops, not bot)."""
+        state = await self._db.fetchrow(
+            """SELECT bankroll, total_deployed, daily_pnl, rolling_hit_rate,
+                      rolling_hit_rate_n, killswitch_tripped_at,
+                      live_deployment_stage
+               FROM system_state WHERE id = 1""")
         if not state:
             return
+        open_count = await self._db.fetchval(
+            "SELECT COUNT(*) FROM trades WHERE strategy='snipe' "
+            "AND status IN ('open', 'filled', 'dry_run')")
+        closed_24h = await self._db.fetchval(
+            "SELECT COUNT(*) FROM trade_outcome "
+            "WHERE strategy='snipe' AND closed_at > NOW() - INTERVAL '24 hours'")
+        signals_24h = await self._db.fetchval(
+            "SELECT COUNT(*) FROM shadow_signal "
+            "WHERE signaled_at > NOW() - INTERVAL '24 hours'")
 
-        # Kelly adjustment
-        trades = await self._db.fetch(
-            "SELECT pnl FROM trades WHERE status='closed' AND closed_at > NOW() - INTERVAL '7 days'")
-        cumulative, peak, max_dd = 0.0, 0.0, 0.0
-        for t in trades:
-            cumulative += float(t["pnl"] or 0)
-            peak = max(peak, cumulative)
-            dd = (peak - cumulative) / max(float(state["bankroll"]), 1)
-            max_dd = max(max_dd, dd)
+        # v12.1: per-tier verifier accuracy from resolved shadow signals.
+        # Joins shadow_signal (with verifier_confidence) against itself
+        # filtered to resolved rows. Tiers match the snipe sizing tiers.
+        accuracy = await self._db.fetch(
+            """SELECT
+                  CASE
+                      WHEN verifier_confidence >= 0.99 THEN 'high'
+                      WHEN verifier_confidence >= 0.97 THEN 'mid'
+                      WHEN verifier_confidence >= 0.95 THEN 'low'
+                      ELSE 'sub_low'
+                  END AS tier,
+                  COUNT(*) AS n,
+                  COUNT(*) FILTER (
+                      WHERE (verifier_verdict = 'YES_LOCKED' AND resolved_outcome = 1)
+                         OR (verifier_verdict = 'NO_LOCKED'  AND resolved_outcome = 0)
+                  ) AS correct,
+                  COUNT(*) FILTER (WHERE verifier_verdict = 'UNCERTAIN') AS uncertain
+               FROM shadow_signal
+               WHERE resolved_at IS NOT NULL
+                 AND verifier_confidence IS NOT NULL
+               GROUP BY tier
+               ORDER BY tier""")
+        per_tier = {}
+        for row in accuracy:
+            n = int(row["n"])
+            correct = int(row["correct"])
+            per_tier[row["tier"]] = {
+                "n": n, "correct": correct,
+                "hit_rate": round(correct / n, 4) if n else None,
+            }
 
-        new_kelly = suggest_kelly_adjustment(float(state["kelly_mult"]), max_dd)
-
-        # Edge threshold
-        edge_trades = await self._db.fetch(
-            """SELECT a.edge, t.pnl FROM trades t JOIN analyses a ON t.analysis_id = a.id
-               WHERE t.status='closed' AND t.closed_at > NOW() - INTERVAL '7 days'""")
-        buckets: dict[float, dict] = {}
-        for t in edge_trades:
-            if t["edge"] is None or t["pnl"] is None:
-                continue
-            bucket_key = round(float(t["edge"]) * 20) / 20
-            if bucket_key not in buckets:
-                buckets[bucket_key] = {"count": 0, "total_pnl": 0.0}
-            buckets[bucket_key]["count"] += 1
-            buckets[bucket_key]["total_pnl"] += float(t["pnl"] or 0)
-        new_edge = suggest_edge_threshold(float(state["edge_threshold"]), buckets)
-
-        await self._db.execute(
-            "UPDATE system_state SET kelly_mult=$1, edge_threshold=$2 WHERE id=1",
-            new_kelly, new_edge)
-
-        # Calibration corrections
-        resolved_analyses = await self._db.fetch(
-            """SELECT a.ensemble_probability, t.exit_price as outcome
-               FROM trades t JOIN analyses a ON t.analysis_id = a.id
-               WHERE t.status IN ('closed', 'dry_run_resolved')
-                 AND t.exit_price IS NOT NULL
-                 AND a.ensemble_probability IS NOT NULL
-                 AND t.closed_at > NOW() - INTERVAL '30 days'""")
-        if len(resolved_analyses) >= 20:
-            from polybot.learning.calibration import compute_calibration_correction
-            predictions = [float(r["ensemble_probability"]) for r in resolved_analyses]
-            outcomes = [int(r["outcome"]) for r in resolved_analyses]
-            corrections = compute_calibration_correction(predictions, outcomes)
-            if corrections:
-                await self._db.execute(
-                    "UPDATE system_state SET calibration_corrections = $1 WHERE id = 1",
-                    json.dumps(corrections))
-                log.info("calibration_updated", corrections=corrections)
-
-        # Strategy kill switch
-        strat_rows = await self._db.fetch("SELECT * FROM strategy_performance")
-        for s in strat_rows:
-            should_kill = check_strategy_kill_switch(
-                s["total_trades"], float(s["total_pnl"]),
-                self._settings.strategy_kill_min_trades)
-            if should_kill and s["enabled"]:
-                await self._db.execute(
-                    "UPDATE strategy_performance SET enabled = FALSE WHERE strategy = $1",
-                    s["strategy"])
-                await self._context.email_notifier.send(
-                    f"[POLYBOT WARNING] {s['strategy']} strategy killed",
-                    f"Strategy {s['strategy']} disabled: negative P&L over {s['total_trades']} trades")
-
-        # Circuit breaker check
-        portfolio = PortfolioState(
-            bankroll=float(state["bankroll"]),
-            total_deployed=float(state["total_deployed"]),
-            daily_pnl=float(state["daily_pnl"]),
-            open_count=0, category_deployed={},
-            circuit_breaker_until=state.get("circuit_breaker_until"))
-        triggered, until = self._risk.check_circuit_breaker(portfolio)
-        if triggered:
-            post_breaker_until = until + timedelta(hours=self._settings.post_breaker_cooldown_hours)
-            await self._db.execute(
-                "UPDATE system_state SET circuit_breaker_until=$1, post_breaker_until=$2 WHERE id=1",
-                until, post_breaker_until)
-
-        # Daily report
-        day_trades = await self._db.fetch(
-            """SELECT t.*, m.question FROM trades t JOIN markets m ON t.market_id = m.id
-               WHERE t.closed_at > NOW() - INTERVAL '24 hours'""")
-        strategy_breakdown = []
-        for strat_name in ("arbitrage", "snipe", "forecast"):
-            strat_trades = [t for t in day_trades if t.get("strategy") == strat_name]
-            wins = sum(1 for t in strat_trades if t["pnl"] and float(t["pnl"]) > 0)
-            losses = len(strat_trades) - wins
-            pnl = sum(float(t["pnl"] or 0) for t in strat_trades)
-            strategy_breakdown.append({
-                "strategy": strat_name, "trades": len(strat_trades),
-                "pnl": pnl, "wins": wins, "losses": losses})
-
-        models = await self._db.fetch("SELECT * FROM model_performance")
-        open_positions = await self._db.fetch(
-            """SELECT t.side, t.entry_price, t.position_size_usd, m.question
-               FROM trades t JOIN markets m ON t.market_id = m.id WHERE t.status = 'open'""")
-
-        first_trade = await self._db.fetchval("SELECT MIN(opened_at) FROM trades")
-        days_running = max(1, (now - first_trade).days) if first_trade else 1
-
-        strat_statuses = []
-        for s in strat_rows:
-            status = "active" if s["enabled"] else "disabled"
-            strat_statuses.append(f"{s['strategy']}: {status}")
-        strategies_status = ", ".join(strat_statuses) if strat_statuses else "all active"
-
-        report = format_daily_report(
-            date=now.strftime("%Y-%m-%d"),
-            starting_bankroll=float(state["bankroll"]) - sum(float(t["pnl"] or 0) for t in day_trades),
-            ending_bankroll=float(state["bankroll"]),
-            strategy_breakdown=strategy_breakdown,
-            total_trades_cumulative=sum(s["total_trades"] for s in strat_rows),
-            total_pnl_cumulative=sum(float(s["total_pnl"]) for s in strat_rows),
-            days_running=days_running,
-            model_performance=[
-                {"model": m["model_name"], "brier": float(m["brier_score_ema"]),
-                 "trust": float(m["trust_weight"])} for m in models],
-            open_positions=[
-                {"question": p["question"], "side": p["side"],
-                 "price": float(p["entry_price"]), "size": float(p["position_size_usd"])}
-                for p in open_positions],
-            api_errors=0, strategies_status=strategies_status)
-
-        await self._context.email_notifier.send(
-            f"[POLYBOT] Daily Report — {now.strftime('%Y-%m-%d')}", f"<pre>{report}</pre>")
-
-        # Reset daily P&L for next day
-        await self._db.execute("UPDATE system_state SET daily_pnl = 0 WHERE id = 1")
-
-        self._last_self_assess = now
-        log.info("self_assessment_complete", kelly=new_kelly, edge=new_edge, max_dd=max_dd)
+        log.info("hourly_summary",
+                 bankroll=float(state["bankroll"]),
+                 total_deployed=float(state["total_deployed"]),
+                 daily_pnl=float(state["daily_pnl"]),
+                 open_positions=int(open_count or 0),
+                 closed_24h=int(closed_24h or 0),
+                 signals_24h=int(signals_24h or 0),
+                 rolling_hit_rate=(float(state["rolling_hit_rate"])
+                                   if state["rolling_hit_rate"] is not None else None),
+                 rolling_hit_rate_n=int(state["rolling_hit_rate_n"]),
+                 killswitch_tripped=bool(state["killswitch_tripped_at"]),
+                 deployment_stage=state["live_deployment_stage"],
+                 verifier_accuracy_per_tier=per_tier)

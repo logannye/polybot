@@ -1,11 +1,12 @@
+"""Polybot v12 settings — snipe-only."""
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Secrets
+    # ── Secrets ────────────────────────────────────────────────────────
     polymarket_api_key: str
     polymarket_private_key: str
-    google_api_key: str                 # Gemini Flash for Snipe T1 verification (v10 PR C)
+    google_api_key: str
     database_url: str
     resend_api_key: str
     alert_email: str = "logan@galenhealth.org"
@@ -15,169 +16,174 @@ class Settings(BaseSettings):
     polymarket_api_passphrase: str = ""
     polymarket_chain_id: int = 137
 
-    # Dry-run mode
+    # ── Mode ──────────────────────────────────────────────────────────
     dry_run: bool = True
-    dry_run_realistic: bool = True           # use real order books for dry-run pricing
-    dry_run_taker_fee_pct: float = 0.02      # simulated taker fee (2%)
-    dry_run_max_spread: float = 0.15         # reject dry-run orders on markets with > 15% spread
+    dry_run_realistic: bool = True
+    dry_run_taker_fee_pct: float = 0.02
+    dry_run_max_spread: float = 0.15
+    # v12.2: maker-fill simulation — match deployed behavior (post_only=True).
+    # When true + post_only, fill at limit price with 0% fee, no spread cap.
+    # Set false to stress-test against worst-case taker fills.
+    dry_run_assume_maker_fill: bool = True
+    # v12.5: maker-fill realism gate. The pre-v12.5 simulation always
+    # filled maker orders at the limit price. Phase 0 audit (2026-05-02)
+    # showed this was wildly optimistic — the LOCKED markets we'd been
+    # simulating profitably had bid 0.001 / ask 0.999 (no real liquidity).
+    # Real maker fills require best_ask close enough to our limit that
+    # a small market move could match. Reject when:
+    #   best_ask - our_limit > dry_run_maker_fill_tolerance
+    # Default 0.02 (2pp): permits realistic small moves, rejects wide
+    # books where no one is selling near our price.
+    dry_run_maker_fill_tolerance: float = 0.02
 
-    # Bot parameters
+    # ── Bankroll & deployment ─────────────────────────────────────────
     starting_bankroll: float = 2000.0
-    kelly_mult: float = 0.25
-    edge_threshold: float = 0.05
-    scan_interval_seconds: int = 300
-
-    # Fee model: makers pay 0%, takers pay category-specific rates
-    use_maker_orders: bool = True   # post_only flag → guaranteed 0% maker fee
-    fee_rate_default: float = 0.04  # fallback taker rate for unknown categories
-
-    # Portfolio limits
-    max_single_position_pct: float = 0.15
-    max_total_deployed_pct: float = 0.70
-    max_per_category_pct: float = 0.50
     min_trade_size: float = 1.0
-    max_concurrent_positions: int = 12
-    max_positions_per_market: int = 1
-    daily_loss_limit_pct: float = 0.20
-    circuit_breaker_hours: int = 6
-    post_breaker_cooldown_hours: int = 24
-    post_breaker_kelly_reduction: float = 0.50
-
-    # Total drawdown + divergence protection + deployment stage (v10 safeguards)
-    max_total_drawdown_pct: float = 0.30     # halt all trading at 30% total loss from high-water
-    max_capital_divergence_pct: float = 0.10  # halt if CLOB vs DB diverges > 10%
+    # v12.3: deployed cap raised 0.20 → 0.30 so the higher concurrency cap
+    # below can actually fill. Killswitch (3-loss tolerance over 50 trades
+    # at 4% per trade ≈ 11% drawdown) is still well under 30% halt.
+    max_total_deployed_pct: float = 0.30      # snipe-wide deployed cap
+    max_total_drawdown_pct: float = 0.30
+    max_capital_divergence_pct: float = 0.10
     live_deployment_stage: str = "dry_run"    # dry_run → micro_test → ramp → full
 
-    # Market filters
-    resolution_hours_max: int = 168
-    min_book_depth: float = 500.0
-    min_price: float = 0.05
-    max_price: float = 0.95
-    cooldown_minutes: int = 30
-    price_move_threshold: float = 0.03
-
-    # Position management
-    early_exit_edge: float = 0.02
-    fill_timeout_seconds: int = 120
-    book_depth_max_pct: float = 0.10
-    take_profit_threshold: float = 0.20
-    stop_loss_threshold: float = 0.15
-    position_check_interval: int = 60
-    universal_max_hold_hours: float = 12.0
-
-    # Bankroll tiers (snipe uses direct attribute access; v10 PR C will move
-    # this logic into the strategy itself or delete it with simplified Kelly)
-    bankroll_survival_threshold: float = 50.0
-    bankroll_growth_threshold: float = 500.0
-
-    # Transitional keys still referenced by engine/position_manager via
-    # getattr with defaults. These will be cleaned up in PR B/C.
-    arb_fill_timeout_seconds: int = 30
-    arb_max_hold_days: float = 3.0
-
-    # Snipe strategy (to be rewritten to 2-tier in PR C — keys retained for
-    # transitional v8 snipe that ships in Phase A)
-    # Snipe v10 — 2-tier resolution-convergence (spec §4)
+    # ── Snipe strategy (the only strategy) ────────────────────────────
     snipe_enabled: bool = True
-    snipe_interval_seconds: int = 120
-    snipe_max_concurrent: int = 3
-    snipe_min_net_edge: float = 0.02
-    snipe_min_book_depth: float = 2000.0
+    snipe_interval_seconds: int = 60
+    # v12.3: 4 → 10. Was the binding throttle (28h in max_concurrent_reached
+    # over the 3-day v12.2 observation window). 10 × 4% = 40% deployed peak,
+    # bounded by snipe_max_total_deployed_pct=0.30 below (≈7-8 fills before
+    # the deployed gate trips).
+    snipe_max_concurrent: int = 10
+    snipe_max_total_deployed_pct: float = 0.30
+
+    # Entry gates — v12.4.3 expanded universe further (0.92 → 0.85).
+    # The 0.92 floor missed the highest-EV opportunity: verifier-confirmed
+    # structural locks where the market HASN'T YET converged. Yesterday's
+    # 4/4 trades were all 0.927-0.935 (post-convergence). At 0.85 entry,
+    # gross edge is 0.15 (vs 0.07 at 0.93) — 2.3× per-dollar EV at the
+    # same verifier accuracy. Verifier prompt is price-agnostic so
+    # accuracy should generalize, but band is empirically unvalidated.
+    # Per-trade worst-case at 0.85 × 4% = 3.4% bankroll (vs 3.68% at
+    # 0.92), still inside the 30% drawdown halt.
+    snipe_min_price: float = 0.85             # was 0.92 in v12.2-v12.4
+    snipe_max_hours: float = 12.0             # live ceiling
+    # v12.4.1 (2026-04-30): reverted 72h → 168h. The 72h entry filter
+    # crushed the universe (~14-100× fewer signaling markets) without
+    # adding value, because the v12.4 48h time-stop AT EXIT already
+    # caps hold duration. Restricting at both entry AND exit was
+    # redundant; the entry restriction was strictly destructive.
+    snipe_max_hours_dryrun: float = 168.0     # 7d entry ceiling, 48h exit cap
+    snipe_min_net_edge: float = 0.02          # legacy; superseded by tier floors
+    snipe_min_book_depth: float = 1000.0
+    snipe_min_book_depth_dryrun: float = 500.0
+    # v12.2: bypass dry-run spread cap for snipe trades. Snipe holds to
+    # resolution (no exit transaction), so spread is irrelevant for exit;
+    # the spread cap was a v10 inheritance for round-trip strategies.
+    snipe_skip_spread_gate: bool = True
+
+    # Sizing — tiered by verifier confidence (v12.1).
+    # The static snipe_min_net_edge floor is now interpreted as the LOW-tier
+    # floor; mid- and high-confidence verdicts get tighter floors and tighter
+    # per-trade caps so a single false-positive can't blow up bankroll.
+    snipe_kelly_mult: float = 0.25
+    snipe_max_single_pct: float = 0.05      # legacy; equals low-tier cap
+
+    # Tier caps doubled in v12.3. The v12.2 caps were Kelly-conservative by
+    # ~12× (proper quarter-Kelly at p_win=0.97, payoff 13:1 is ~24%); the
+    # binding constraint was killswitch headroom, not Kelly. The killswitch
+    # at 97%/50 tolerates 3 losses in 50 trades; at 4% low-tier cap × 0.92
+    # max buy price, that's 3 × 3.68% = 11% drawdown — well inside the 30%
+    # `max_total_drawdown_pct` halt.
+    #
+    # Worst-case single-trade loss (cap × max_buy_price = cap × 0.92):
+    #   high: 0.010 × 0.92 = 0.92% bankroll
+    #   mid:  0.020 × 0.92 = 1.84% bankroll
+    #   low:  0.040 × 0.92 = 3.68% bankroll
+    # 3-loss killswitch drawdown caps:
+    #   high: 3 × 0.92% = 2.76%
+    #   mid:  3 × 1.84% = 5.52%
+    #   low:  3 × 3.68% = 11.04%
+
+    # High-confidence tier: conf ≥0.99. 2% min edge (price ≤0.98).
+    snipe_tier_high_min_conf: float = 0.99
+    snipe_tier_high_min_edge: float = 0.02
+    snipe_tier_high_max_pct: float = 0.01
+
+    # Mid-confidence tier: conf 0.97–0.99. 4% min edge (price ≤0.96).
+    snipe_tier_mid_min_conf: float = 0.97
+    snipe_tier_mid_min_edge: float = 0.04
+    snipe_tier_mid_max_pct: float = 0.02
+
+    # Low-confidence tier: conf 0.95–0.97. 6% min edge (price ≤0.94).
+    snipe_tier_low_min_conf: float = 0.95
+    snipe_tier_low_min_edge: float = 0.06
+    snipe_tier_low_max_pct: float = 0.04
+
+    # Verifier
+    snipe_min_verifier_confidence: float = 0.95
+    snipe_min_verifier_reason_chars: int = 30
     snipe_gemini_daily_cap_usd: float = 2.0
-    snipe_t0_kelly_mult: float = 0.50    # T0: 0.50× Kelly
-    snipe_t0_max_single_pct: float = 0.10
-    snipe_t1_kelly_mult: float = 0.30    # T1: 0.30× Kelly (needs LLM verify)
-    snipe_t1_max_single_pct: float = 0.07
-    snipe_t1_min_confidence: float = 0.85
 
-    # Live Sports v10 engine (spec §3)
-    lg_enabled: bool = True
-    lg_interval_seconds: float = 15.0          # spec: 15s ESPN polling cadence
-    lg_kelly_mult: float = 0.50                # half-Kelly
-    lg_max_single_pct: float = 0.20            # spec: max 20% per market (was 25%)
-    lg_min_edge: float = 0.04                  # min 4% edge vs Polymarket price
-    lg_min_win_prob: float = 0.85              # LIVE only: trade when calibrated WP ≥ this. Hardcoded floor = 0.80 (cannot be bypassed by config).
-    lg_min_win_prob_dryrun: float = 0.65       # DRY-RUN only: looser gate for data collection. Floor = 0.55.
-    lg_min_book_depth: float = 10000.0         # min $10K liquidity at entry (live)
-    lg_min_book_depth_dryrun: float = 1000.0   # DRY-RUN only: looser gate for flow observation. Floor = $500.
-    lg_max_concurrent: int = 6                 # max concurrent live_sports positions
-    lg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
-    lg_max_staleness_s: float = 60.0           # reject data older than 60s
-    lg_matcher_min_confidence: float = 0.95    # 3-pass matcher confidence floor
-    lg_take_profit_price: float = 0.97         # exit when price hits this
-    lg_emergency_exit_wp: float = 0.70         # exit if calibrated WP drops below
-    lg_max_hold_hours: float = 6.0             # hard time stop
+    # Verifier cache (v12.1): kills 60x duplicate LLM calls per market.
+    snipe_cache_ttl_seconds: float = 1800.0     # 30 min
+    snipe_cache_price_drift: float = 0.01
+    snipe_cache_hours_drift: float = 1.0
 
-    # Spread-market trading (higher variance than moneyline; conservative defaults)
-    lg_spread_min_edge: float = 0.06           # higher edge bar than moneyline's 0.04
-    lg_spread_kelly_reduction: float = 0.50    # multiply base Kelly by this for spread trades
+    # ── Exit rules (v12.4: asymmetric upside) ─────────────────────────
+    # Three exit triggers, evaluated in priority order each cycle:
+    #
+    #   1. STOP-LOSS — within the first `stop_loss_window_hours` of entry,
+    #      if the YES price has moved ≥ `stop_loss_adverse_pp` AGAINST our
+    #      thesis, close at mark. Caps per-trade loss at ~5% of position
+    #      instead of 100% on the rare verifier-wrong call.
+    #
+    #   2. TAKE-PROFIT — when the move toward our thesis has captured
+    #      ≥ `early_exit_capture_pct` (default 80%) of the max-possible
+    #      move (entry → 0 for NO, entry → 1 for YES), close at mark.
+    #      The 3-day v12.3 data showed verifier-correct trades moving
+    #      80+pp in 1-3d; capturing 75% in 1-2d beats holding 7d to
+    #      resolution by ~3× in time-yield.
+    #
+    #   3. TIME-STOP — any open trade past `max_hold_hours` closes at
+    #      mark. Forces unrealized into realized; frees the slot.
+    #
+    # Combined, these turn the win/loss size ratio from ~1:1 (full +93%
+    # vs full -100% per position) to ~15:1 (+75% vs -5%).
+    snipe_early_exit_enabled: bool = True
+    snipe_early_exit_check_interval: int = 60   # seconds
+    snipe_early_exit_capture_pct: float = 0.80  # take-profit at 80% of max move
+    snipe_max_hold_hours: float = 48.0          # time-stop ceiling
+    snipe_stop_loss_adverse_pp: float = 0.05    # 5pp adverse → cut
+    snipe_stop_loss_window_hours: float = 2.0   # window for stop-loss eligibility
 
-    # Totals (O/U) market trading — lower per-period variance than spreads but
-    # set by the same retail flow that misprices spreads, so still half-Kelly.
-    lg_total_min_edge: float = 0.05            # between moneyline's 0.04 and spread's 0.06
-    lg_total_kelly_reduction: float = 0.50     # multiply base Kelly by this for total trades
+    # v12.4: prevent ≥1 position per news event. Markets that share a
+    # `group_slug` in Gamma (e.g. "Q1 2026 GDP" bracket markets) are driven
+    # by the same underlying outcome, so opening multiple positions on
+    # them creates phantom diversification — one news event triggers
+    # correlated PnL across all of them. Off → on by default in v12.4.
+    snipe_correlation_filter_enabled: bool = True
 
-    # Snipe dry-run relaxations (v11.0d) — live caps unchanged.
-    # The 12h spec ceiling is structurally empty in current Polymarket
-    # (~0 markets at p≥0.96 with t≤12h); dry-run window opens to 7d so
-    # the observation pipeline sees what the strategy would do.
-    snipe_t0_max_hours: float = 12.0           # live ceiling (spec §4)
-    snipe_t1_max_hours: float = 8.0
-    snipe_t0_max_hours_dryrun: float = 168.0   # 7d for observation
-    snipe_t1_max_hours_dryrun: float = 168.0
-    snipe_min_book_depth_dryrun: float = 500.0  # parity with live_sports/pregame dry-run floor
+    # ── Hit-rate killswitch (the only adaptive component) ─────────────
+    killswitch_window: int = 50
+    killswitch_min_hit_rate: float = 0.97
+    killswitch_min_n: int = 50
 
-    # Pregame Sharp-Line (v11.0b)
-    pg_enabled: bool = True
-    pg_interval_seconds: float = 60.0
-    pg_kelly_mult: float = 0.40
-    pg_max_single_pct: float = 0.12
-    pg_min_edge: float = 0.04
-    pg_min_book_depth: float = 5000.0
-    pg_min_book_depth_dryrun: float = 1000.0   # DRY-RUN only relaxation. Floor $500.
-    pg_matcher_min_confidence: float = 0.95
-    pg_min_calibrated_wp: float = 0.60
-    pg_emergency_exit_wp: float = 0.50
-    pg_take_profit_price: float = 0.95
-    pg_min_minutes_to_start: int = 15
-    pg_max_minutes_to_start: int = 60
-    pg_max_bpi_staleness_s: float = 21600.0    # 6h
-    # Mirror lg_sports — pregame fetch is cheap and parse_pregame_summary
-    # returns None gracefully when ESPN's predictor is empty (common for
-    # soccer). Restricting to US sports earlier missed European weekend
-    # fixtures that are in the live_sports universe.
-    pg_sports: str = "mlb,nba,nhl,ncaab,ucl,epl,laliga,bundesliga,mls"
+    # ── Executor ──────────────────────────────────────────────────────
+    use_maker_orders: bool = True
+    fill_timeout_seconds: int = 60            # cancel unfilled limit after 60s
 
-    # Online calibrator (spec §5 Loop 2)
-    sports_calibrator_min_obs: int = 30
-    sports_calibrator_fallback_shrinkage: float = 0.10
-
-    # Learning (TradeLearner still in use; replaced by v10 learning layer in PR C)
-    enable_hourly_learning: bool = True
-    enable_adaptive_thresholds: bool = True
-    adaptive_threshold_min_trades: int = 10
-    enable_snipe_learning: bool = True
-    enable_proxy_trust_learning: bool = True
-    proxy_brier_alpha_tp: float = 0.05
-    proxy_brier_alpha_sl: float = 0.08
-    proxy_brier_alpha_weak: float = 0.03
-    cold_start_trades: int = 30
-    brier_ema_alpha: float = 0.15
-    category_min_trades: int = 20
-    calibration_min_trades: int = 50
-    strategy_kill_min_trades: int = 50
-
-    # WebSocket streaming
-    enable_websocket_streaming: bool = True
-    ws_reconnect_max_delay: float = 30.0
-
-    # Monitoring
+    # ── Monitoring ────────────────────────────────────────────────────
     health_check_interval: int = 60
     heartbeat_warn_seconds: int = 600
     heartbeat_critical_seconds: int = 1800
-    balance_divergence_pct: float = 0.05
+    position_check_interval: int = 60
 
-    # "extra=ignore" so stale .env keys from deleted v10 strategies (forecast_*,
-    # mm_*, mr_*, cv_*, pol_*, arb_*) don't crash startup. .env cleanup is a
-    # separate follow-up.
+    # ── Misc legacy keys still referenced ─────────────────────────────
+    # The engine and position_manager still read a couple of these via
+    # getattr; default values keep them inert in v12 but avoid AttributeError
+    # on call paths we haven't fully gutted.
+    enable_hourly_learning: bool = True
+
+    # Tolerate legacy .env keys from deleted strategies.
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

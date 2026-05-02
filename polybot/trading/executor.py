@@ -40,25 +40,80 @@ class OrderExecutor:
         if shares <= 0:
             return None
 
-        # Realistic dry-run: check order book before filling
+        # Realistic dry-run: check order book before filling.
+        #
+        # v12.2: two simulation modes selectable via dry_run_assume_maker_fill:
+        #   (a) MAKER mode (default + when post_only=True): fill at our limit
+        #       price with 0% fee, no spread cap. Matches the deployed live
+        #       behavior (post_only=True). Only requires the book to exist.
+        #   (b) TAKER mode: fill at best_ask with taker fee, reject on
+        #       spread > dry_run_max_spread. Pessimistic counterfactual.
         effective_price = price
         if (self._dry_run
                 and getattr(self, '_settings', None)
                 and getattr(self._settings, 'dry_run_realistic', False)
                 and self._clob is not None
                 and token_id):
+            assume_maker = (
+                getattr(self._settings, 'dry_run_assume_maker_fill', True)
+                and post_only)
             try:
                 summary = await self._clob.get_order_book_summary(token_id)
-                if summary is not None:
+                if summary is None:
+                    log.info("dryrun_no_book", token_id=token_id[:20], strategy=strategy)
+                    log.info("dryrun_observation",
+                             strategy=strategy, side=side, size_usd=size_usd,
+                             intended_price=price, reject_reason="no_book",
+                             kelly_inputs=kelly_inputs)
+                    return None
+
+                if assume_maker:
+                    # Maker mode: post_only at our limit price.
+                    # v12.5 realism gate: a maker buy at limit X only fills
+                    # if a seller comes down to (or below) X. Best_ask is
+                    # our proxy for "how close is the cheapest seller to
+                    # our limit?" — if best_ask >> X, no realistic fill.
+                    # The pre-v12.5 simulation ignored this and always
+                    # filled, producing fictional PnL on markets where
+                    # the real book had bid 0.001 / ask 0.999 (no
+                    # tradeable counter-party near our price).
+                    best_ask = summary.get("best_ask")
+                    tolerance = float(getattr(
+                        self._settings, "dry_run_maker_fill_tolerance", 0.02))
+                    if best_ask is None:
+                        log.info("dryrun_no_ask",
+                                 token_id=token_id[:20], strategy=strategy)
+                        return None
+                    gap = float(best_ask) - float(price)
+                    if gap > tolerance:
+                        log.info("dryrun_maker_unfillable",
+                                 token_id=token_id[:20], strategy=strategy,
+                                 limit=price, best_ask=float(best_ask),
+                                 gap=round(gap, 4), tolerance=tolerance)
+                        log.info("dryrun_observation",
+                                 strategy=strategy, side=side, size_usd=size_usd,
+                                 intended_price=price,
+                                 best_bid=summary.get("best_bid"),
+                                 best_ask=float(best_ask),
+                                 spread=round(summary.get("spread", 0.0), 4),
+                                 reject_reason="maker_unfillable",
+                                 kelly_inputs=kelly_inputs)
+                        return None
+                    log.info("dryrun_maker_fill",
+                             token_id=token_id[:20], strategy=strategy,
+                             side=side, price=price, size_usd=size_usd,
+                             best_bid=summary.get("best_bid"),
+                             best_ask=float(best_ask),
+                             gap=round(gap, 4),
+                             spread=round(summary.get("spread", 0.0), 4))
+                    # effective_price stays at `price`, fee = 0
+                else:
+                    # Taker mode: cross the spread, pay taker fee.
                     max_spread = getattr(self._settings, 'dry_run_max_spread', 0.15)
                     if summary["spread"] > max_spread:
                         log.info("dryrun_spread_reject", token_id=token_id[:20],
                                  spread=round(summary["spread"], 4), max=max_spread,
                                  strategy=strategy)
-                        # Observation log — what the trade WOULD have looked like
-                        # if the spread gate weren't blocking. Lets us measure
-                        # would-be trade flow during dry-run without dropping the
-                        # post-mortem safeguard.
                         log.info("dryrun_observation",
                                  strategy=strategy, side=side, size_usd=size_usd,
                                  intended_price=price, best_bid=summary.get("best_bid"),
@@ -67,19 +122,11 @@ class OrderExecutor:
                                  reject_reason="spread_too_wide",
                                  kelly_inputs=kelly_inputs)
                         return None
-                    # Fill at best ask (what you'd actually pay), with simulated fee
                     if side in ("YES", "NO"):
                         effective_price = summary["best_ask"]
                         fee_pct = getattr(self._settings, 'dry_run_taker_fee_pct', 0.02)
                         size_usd = size_usd * (1 - fee_pct)
                         shares = self._wallet.compute_shares(size_usd, effective_price)
-                else:
-                    log.info("dryrun_no_book", token_id=token_id[:20], strategy=strategy)
-                    log.info("dryrun_observation",
-                             strategy=strategy, side=side, size_usd=size_usd,
-                             intended_price=price, reject_reason="no_book",
-                             kelly_inputs=kelly_inputs)
-                    return None
             except Exception as e:
                 log.debug("dryrun_book_check_failed", error=str(e)[:60])
 
@@ -164,8 +211,15 @@ class OrderExecutor:
         position_size = float(trade["position_size_usd"])
         strategy = trade.get("strategy", "forecast")
 
-        # PnL: exit_price is the share value we're selling at
-        pnl = shares * (exit_price - entry_price)
+        # PnL: exit_price is the YES-priced mark (matches close_position +
+        # _close_resolved_trade convention). For YES we win when YES rises;
+        # for NO we win when YES falls. Pre-v12.3 this was side-agnostic
+        # (`shares * (exit - entry)`), which silently inverted PnL on every
+        # NO-side close. Surfaced by the v12.3 early-exit monitor.
+        if side == "YES":
+            pnl = shares * (exit_price - entry_price)
+        else:
+            pnl = shares * ((1.0 - exit_price) - (1.0 - entry_price))
 
         now = datetime.now(timezone.utc)
         closed_status = "dry_run_resolved" if trade["status"] == "dry_run" else "closed"
